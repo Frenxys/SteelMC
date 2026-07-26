@@ -17,7 +17,7 @@ use crate::{
 };
 use simdnbt::borrow::{NbtTag as BorrowedNbtTag, read_tag};
 use steel_utils::Identifier;
-use text_components::content::Content;
+use text_components::{TextComponent, content::Content};
 
 fn with_borrowed_tag<R>(tag: OwnedNbtTag, visitor: impl FnOnce(BorrowedNbtTag<'_, '_>) -> R) -> R {
     let mut bytes = Vec::new();
@@ -29,6 +29,25 @@ fn with_borrowed_tag<R>(tag: OwnedNbtTag, visitor: impl FnOnce(BorrowedNbtTag<'_
 
 fn parse_patch(tag: OwnedNbtTag) -> Option<DataComponentPatch> {
     with_borrowed_tag(tag, DataComponentPatch::from_nbt_tag)
+}
+
+fn parse_map(tag: OwnedNbtTag) -> Option<DataComponentMap> {
+    with_borrowed_tag(tag, DataComponentMap::from_nbt_tag)
+}
+
+#[test]
+fn persistent_component_map_round_trips_without_patch_removals() {
+    init_test_registry();
+    let custom_name = TextComponent::from("Stored block entity name");
+    let mut components = DataComponentMap::new();
+    components.set(CUSTOM_NAME, Some(custom_name.clone()));
+
+    let encoded = components
+        .try_to_nbt_tag_ref()
+        .expect("valid component map should encode");
+    let decoded = parse_map(encoded).expect("valid component map should decode");
+
+    assert_eq!(decoded.get_ref(CUSTOM_NAME), Some(&custom_name));
 }
 
 #[test]

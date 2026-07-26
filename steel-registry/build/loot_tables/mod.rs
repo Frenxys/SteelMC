@@ -402,6 +402,8 @@ struct LootFunctionJson {
     source: Option<String>,
     #[serde(default)]
     include: Option<Vec<String>>,
+    #[serde(default)]
+    exclude: Option<Vec<String>>,
     // copy_state
     #[serde(default)]
     block: Option<String>,

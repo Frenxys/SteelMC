@@ -90,7 +90,10 @@ use tokio::{runtime::Runtime, time::Instant};
 
 use crate::{
     ChunkMap,
-    behavior::{BLOCK_BEHAVIORS, BlockCollisionContext, BlockLootContext, FLUID_BEHAVIORS},
+    behavior::{
+        BLOCK_BEHAVIORS, BlockCollisionBoxes, BlockCollisionContext, BlockLootContext,
+        FLUID_BEHAVIORS,
+    },
     block_entity::{BlockEntity, SharedBlockEntity, entities::EndGatewayBlockEntity},
     chunk::{heightmap::HeightmapType, player_chunk_view::PlayerChunkView},
     chunk_saver::{ChunkStorage, RamOnlyStorage, RegionManager},
@@ -118,6 +121,7 @@ mod domain_entity_directory;
 mod entity_management;
 mod environment;
 mod events;
+mod explosion;
 /// Vanilla game-event contexts, listeners, and dispatch storage.
 pub mod game_event;
 mod level_effects;
@@ -148,6 +152,10 @@ pub(crate) use domain_entity_directory::DomainEntityDirectory;
 use entity_management::NavigatingMobTracker;
 #[cfg(test)]
 use entity_management::nearest_player_distance_in_range;
+pub use explosion::{
+    BlockInteraction, DefaultExplosionDamageCalculator, EntityBasedExplosionDamageCalculator,
+    Explosion, ExplosionDamageCalculator, ExplosionInteraction, ExplosionOptions, ExplosionOutcome,
+};
 pub use level_reader::{LevelAccessor, LevelReader, ScheduledTickAccess};
 pub use player_index::{PlayerAreaMap, PlayerMap};
 pub use raycast::{ClipBlockShape, ClipFluid, ClipHitResult, RaytraceAction};

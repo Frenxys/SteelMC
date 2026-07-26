@@ -1,12 +1,16 @@
 //! Standard chest block entity implementation.
 
-use std::sync::{Arc, Weak};
+use std::{
+    io,
+    sync::{Arc, Weak},
+};
 
 use simdnbt::borrow::{BaseNbtCompound as BorrowedNbtCompound, NbtCompound as NbtCompoundView};
 use simdnbt::owned::NbtCompound;
 use steel_protocol::packets::game::SoundSource;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{BlockStateProperties, ChestType};
+use steel_registry::data_components::DataComponentMap;
 use steel_registry::sound_event::SoundEventRef;
 use steel_registry::vanilla_block_entity_types;
 use steel_utils::{
@@ -148,6 +152,12 @@ impl BlockEntity for ChestBlockEntity {
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
         self.container.lock().save(nbt);
+    }
+
+    fn collect_implicit_components(&self, components: &mut DataComponentMap) -> io::Result<()> {
+        self.container
+            .lock()
+            .collect_implicit_components(components)
     }
 
     fn trigger_event(&self, param_a: i32, _param_b: i32) -> bool {

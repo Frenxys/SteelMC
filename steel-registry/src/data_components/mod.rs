@@ -34,13 +34,14 @@ pub mod vanilla_components;
 pub use crate::item_predicate::{AdventureModePredicate, BlockPredicate, LockCode};
 pub use component_data::{Component, ComponentData};
 pub use components::{
-    ArmorTrim, BannerPatternLayer, BannerPatternLayers, BlocksAttacks, BundleContents,
-    ChargedProjectiles, Consumable, CustomData, CustomModelData, DeathProtection, DyedItemColor,
-    Enchantable, Equippable, EquippableAllowedEntities, InstrumentComponent,
-    InvalidEnchantableValue, ItemContainerContents, JukeboxPlayable, MapDecorationEntry,
-    MapDecorations, MapId, MapItemColor, OminousBottleAmplifier, PaintingVariantComponent,
-    PotDecorations, PotionContents, ProvidesBannerPatterns, ProvidesTrimMaterial, Recipes,
-    SulfurCubeContent, Tool, ToolRule, ToolRuleBlocks, UseRemainder,
+    ArmorTrim, BannerPatternLayer, BannerPatternLayers, BeehiveOccupant, Bees, BlocksAttacks,
+    BundleContents, ChargedProjectiles, Consumable, CustomData, CustomModelData, DeathProtection,
+    DyedItemColor, Enchantable, EntityData, Equippable, EquippableAllowedEntities,
+    InstrumentComponent, InvalidEnchantableValue, ItemContainerContents, JukeboxPlayable,
+    MapDecorationEntry, MapDecorations, MapId, MapItemColor, OminousBottleAmplifier,
+    PaintingVariantComponent, PotDecorations, PotionContents, ProvidesBannerPatterns,
+    ProvidesTrimMaterial, Recipes, SeededContainerLoot, SulfurCubeContent, Tool, ToolRule,
+    ToolRuleBlocks, UseRemainder,
 };
 pub use registry::{
     ComponentEntry,

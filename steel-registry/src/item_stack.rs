@@ -460,6 +460,22 @@ impl ItemStack {
         }
     }
 
+    /// Sets an erased component after validating its registered value type.
+    pub fn set_raw_component(&mut self, key: &Identifier, value: &ComponentData) -> bool {
+        let Some(component) = REGISTRY.data_components.by_key(key) else {
+            return false;
+        };
+        if !component.validates(value) {
+            return false;
+        }
+        if self.prototype().get_raw(key) == Some(value) {
+            self.patch.clear_raw(key);
+        } else {
+            self.patch.set_component_data(key.clone(), value.clone());
+        }
+        true
+    }
+
     /// Removes a component from this item (marks it as removed in the patch).
     /// This will hide the component even if it exists in the prototype.
     pub fn remove<T: 'static>(&mut self, component: DataComponentType<T>) {
@@ -796,18 +812,6 @@ impl ItemStack {
             }
         }
         None
-    }
-
-    /// Copies components from a source (block entity, attacker, etc.) to this item.
-    pub const fn copy_components<R: Random>(
-        &mut self,
-        _source: crate::loot_table::CopySource,
-        _include: &[Identifier],
-        _ctx: &crate::loot_table::LootContext<'_, R>,
-    ) {
-        // TODO: Implement when block entity system is ready
-        // 1. Get the source entity/block entity from context
-        // 2. For each component in `include`, copy it to this item's patch
     }
 
     /// Copies block state properties to this item (for blocks like `note_block`).

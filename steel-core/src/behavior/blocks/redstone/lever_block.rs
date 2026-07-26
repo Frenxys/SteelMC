@@ -6,6 +6,7 @@ use steel_macros::block_behavior;
 use steel_registry::blocks::BlockRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::{BlockStateProperties, Direction};
+use steel_registry::item_stack::ItemStack;
 use steel_registry::{sound_events, vanilla_game_events};
 use steel_utils::types::UpdateFlags;
 use steel_utils::{BlockPos, BlockStateId};
@@ -16,7 +17,9 @@ use crate::behavior::{
 };
 use crate::player::Player;
 use crate::world::game_event::GameEventContext;
-use crate::world::{LevelAccessor, LevelReader, ScheduledTickAccess, SignalQueryContext, World};
+use crate::world::{
+    Explosion, LevelAccessor, LevelReader, ScheduledTickAccess, SignalQueryContext, World,
+};
 
 /// Vanilla `LeverBlock` source behavior.
 #[block_behavior]
@@ -102,6 +105,20 @@ impl BlockBehavior for LeverBlock {
         InteractionResult::Success
     }
 
+    fn on_explosion_hit(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        explosion: &dyn Explosion,
+        on_hit: &mut dyn FnMut(ItemStack, BlockPos),
+    ) {
+        if explosion.can_trigger_blocks() {
+            self.pull(state, world, pos);
+        }
+        self.default_on_explosion_hit(state, world, pos, explosion, on_hit);
+    }
+
     fn affect_neighbors_after_removal(
         &self,
         state: BlockStateId,
@@ -148,9 +165,7 @@ impl BlockBehavior for LeverBlock {
             0
         }
     }
-
-    // Client-local interaction/ambient dust particles are omitted. Explosion
-    // toggling awaits Steel's shared block-explosion callback foundation.
+    // Client-local interaction/ambient dust particles are omitted.
 }
 
 #[cfg(test)]

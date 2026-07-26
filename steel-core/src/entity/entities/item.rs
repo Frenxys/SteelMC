@@ -12,6 +12,7 @@ use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_damage_types;
 use steel_registry::vanilla_entity_data::ItemEntityData;
+use steel_registry::vanilla_game_rules::MOB_GRIEFING;
 use steel_utils::UuidExt;
 use steel_utils::locks::SyncMutex;
 use steel_utils::{Downcast as _, DowncastType, DowncastTypeKey};
@@ -25,7 +26,7 @@ use crate::entity::{
 use crate::inventory::container::Container;
 use crate::physics::MoverType;
 use crate::player::Player;
-use crate::world::World;
+use crate::world::{Explosion, World};
 
 use simdnbt::ToNbtTag;
 use simdnbt::borrow::NbtCompound as BorrowedNbtCompoundView;
@@ -681,6 +682,10 @@ impl Entity for ItemEntity {
         false
     }
 
+    fn ignore_explosion(&self, explosion: &dyn Explosion) -> bool {
+        !explosion.should_affect_blocklike_entities()
+    }
+
     fn should_play_lava_hurt_sound(&self) -> bool {
         self.get_health() <= 0 || self.tick_count() % 10 == 0
     }
@@ -696,8 +701,16 @@ impl Entity for ItemEntity {
         self.try_pickup(player);
     }
 
-    fn hurt(&self, _world: &World, source: &DamageSource, amount: f32) -> bool {
+    fn hurt(&self, world: &World, source: &DamageSource, amount: f32) -> bool {
         // TODO: Check isInvulnerableToBase once the shared non-living entity hook is ported.
+        if !world.get_game_rule(&MOB_GRIEFING)
+            && source
+                .causing_entity_id
+                .and_then(|entity_id| world.get_entity_by_id(entity_id))
+                .is_some_and(|entity| entity.as_mob().is_some())
+        {
+            return false;
+        }
         if !self.get_item().can_be_hurt_by(source.damage_type) {
             return false;
         }
@@ -774,17 +787,18 @@ impl Entity for ItemEntity {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Weak;
+    use std::sync::{Arc, Weak};
 
     use glam::DVec3;
 
     use steel_registry::{
         item_stack::ItemStack, test_support::init_test_registry, vanilla_damage_types,
-        vanilla_entities, vanilla_items,
+        vanilla_entities, vanilla_game_rules::MOB_GRIEFING, vanilla_items,
     };
+    use steel_utils::ChunkPos;
 
-    use crate::entity::{Entity, damage::DamageSource};
-    use crate::test_support::test_world;
+    use crate::entity::{Entity, SharedEntity, damage::DamageSource, entities::PigEntity};
+    use crate::test_support::{fresh_test_world, insert_ready_full_chunk, test_world};
     use crate::world::World;
 
     use super::ItemEntity;
@@ -906,6 +920,36 @@ mod tests {
         ));
 
         assert_eq!(item.get_health(), 4);
+    }
+
+    #[test]
+    fn mob_damage_does_not_hurt_items_when_mob_griefing_is_disabled() {
+        init_test_registry();
+        let world = fresh_test_world("item_mob_griefing_damage");
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+        assert!(world.set_game_rule(&MOB_GRIEFING, false));
+        let pig = Arc::new(PigEntity::new(
+            &vanilla_entities::PIG,
+            2,
+            DVec3::ZERO,
+            Arc::downgrade(&world),
+        ));
+        let pig_entity: SharedEntity = pig.clone();
+        let Ok(()) = world.try_add_entity(pig_entity) else {
+            panic!("test pig must be added to its loaded chunk");
+        };
+        let item = ItemEntity::with_item(
+            &vanilla_entities::ITEM,
+            1,
+            DVec3::ZERO,
+            ItemStack::new(&vanilla_items::STONE),
+            Arc::downgrade(&world),
+        );
+        let source =
+            DamageSource::environment(&vanilla_damage_types::GENERIC).with_causing_entity(pig.id());
+
+        assert!(!item.hurt(&world, &source, 1.0));
+        assert_eq!(item.get_health(), 5);
     }
 
     #[test]

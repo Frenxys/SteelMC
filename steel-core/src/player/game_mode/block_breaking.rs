@@ -21,6 +21,7 @@ use steel_utils::{
 };
 
 use crate::behavior::{BLOCK_BEHAVIORS, BlockLootContext};
+use crate::block_entity::SharedBlockEntity;
 use crate::entity::{Entity, LivingEntity};
 use crate::fluid::fluid_state_to_block;
 use crate::player::Player;
@@ -352,6 +353,7 @@ impl BlockBreakingManager {
         // TODO: Check blockActionRestricted
 
         let behavior = BLOCK_BEHAVIORS.get_behavior(state.get_block());
+        let block_entity = world.get_block_entity(pos);
         let adjusted_state = behavior.player_will_destroy(state, world, pos, player);
         world.game_event(
             &vanilla_game_events::BLOCK_DESTROY,
@@ -434,7 +436,14 @@ impl BlockBreakingManager {
                 && has_correct_tool
             {
                 // TODO: Call playerDestroy to spawn drops
-                drop_block_loot(player, world, pos, adjusted_state, &destroyed_with);
+                drop_block_loot(
+                    player,
+                    world,
+                    pos,
+                    adjusted_state,
+                    block_entity,
+                    &destroyed_with,
+                );
             }
         }
 
@@ -535,6 +544,7 @@ fn drop_block_loot(
     world: &Arc<World>,
     pos: BlockPos,
     state: BlockStateId,
+    block_entity: Option<SharedBlockEntity>,
     tool: &ItemStack,
 ) {
     let luck = player
@@ -543,10 +553,13 @@ fn drop_block_loot(
         .get_value(vanilla_attributes::LUCK)
         .unwrap_or(0.0) as f32;
 
-    let drops = BlockLootContext::new(world, pos)
+    let mut context = BlockLootContext::new(world, pos)
         .with_luck(luck)
-        .with_tool(tool)
-        .get_drops(state);
+        .with_tool(tool);
+    if let Some(block_entity) = block_entity {
+        context = context.with_block_entity(block_entity);
+    }
+    let drops = context.get_drops(state);
 
     // Spawn each dropped item using the player's world reference (Arc<World>)
     for item in drops {

@@ -34,6 +34,8 @@ pub enum LootError {
     InvalidExplorationMapZoom(i32),
     #[error("one loot evaluation produced too many exploration maps")]
     TooManyExplorationMaps,
+    #[error("cannot copy invalid data component {0}")]
+    InvalidCopiedComponent(Identifier),
     #[error("unsupported loot number provider: {0}")]
     UnsupportedNumberProvider(&'static str),
     #[error("unsupported loot condition: {0}")]

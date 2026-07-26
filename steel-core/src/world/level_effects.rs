@@ -6,6 +6,7 @@ use super::{
     UpdateFlags, World, WorldEntityManager, entity_loot_ref, fluid_state_to_block, level_events,
     vanilla_blocks, vanilla_game_events,
 };
+use steel_registry::loot_table::BlockEntityRef;
 
 pub(super) fn sound_is_within_range(
     sound: SoundEventRef,
@@ -307,7 +308,7 @@ impl World {
     /// This is the no-tool/no-entity overload. Player block breaking uses
     /// `block_breaking::drop_block_loot` which includes tool context for
     /// fortune/silk touch.
-    // TODO: block entity and entity drops
+    // TODO: entity-specific container drops
     pub fn drop_resources(self: &Arc<Self>, state: BlockStateId, pos: BlockPos) {
         self.drop_resources_with_entity(state, pos, None);
     }
@@ -318,7 +319,10 @@ impl World {
         pos: BlockPos,
         entity: Option<&dyn Entity>,
     ) {
-        let context = BlockLootContext::new(self, pos).with_entity(entity);
+        let mut context = BlockLootContext::new(self, pos).with_entity(entity);
+        if let Some(block_entity) = self.get_block_entity(pos) {
+            context = context.with_block_entity(block_entity);
+        }
         for item in context.get_drops(state) {
             if !item.is_empty() {
                 self.pop_resource(pos, item);
@@ -350,23 +354,42 @@ impl World {
             return Vec::new();
         };
 
+        let block_entity = match context.block_entity() {
+            Some(entity) => match entity.collect_components() {
+                Ok(components) => Some((entity.get_type(), components)),
+                Err(error) => {
+                    log::error!(
+                        "Failed to collect block entity components for loot table {loot_key}: {error}"
+                    );
+                    return Vec::new();
+                }
+            },
+            None => None,
+        };
+
         let result =
             context
                 .world()
                 .with_loot_random(0, loot_table.random_sequence.as_ref(), |random| {
+                    let (origin_x, origin_y, origin_z) = context.pos().get_center();
                     let mut ctx = LootContext::new(random)
                         .with_luck(context.luck())
                         .with_block_state(state)
-                        .with_origin(
-                            f64::from(context.pos().x()),
-                            f64::from(context.pos().y()),
-                            f64::from(context.pos().z()),
-                        );
+                        .with_origin(origin_x, origin_y, origin_z);
                     if let Some(tool) = context.tool() {
                         ctx = ctx.with_tool(tool);
                     }
+                    if let Some(radius) = context.explosion_radius() {
+                        ctx = ctx.with_explosion(radius);
+                    }
                     if let Some(entity) = context.entity() {
                         ctx = ctx.with_this_entity(entity_loot_ref(entity));
+                    }
+                    if let Some((block_entity_type, components)) = &block_entity {
+                        ctx = ctx.with_block_entity(BlockEntityRef {
+                            block_entity_type: Some(&block_entity_type.key),
+                            components,
+                        });
                     }
 
                     loot_table.get_random_items(&mut ctx)

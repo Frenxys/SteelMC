@@ -127,7 +127,8 @@ pub enum LootFunction {
     /// Copy components from the block entity to the item.
     CopyComponents {
         source: CopySource,
-        include: &'static [Identifier],
+        include: Option<&'static [Identifier]>,
+        exclude: &'static [Identifier],
     },
     /// Copy block state properties to the item.
     CopyState {
@@ -456,17 +457,39 @@ impl LootFunction {
                 let level = levels.get_int_with_ctx(ctx.rng, Some(&context))?;
                 item.enchant_with_levels(level, options, ctx.rng)?;
             }
-            LootFunction::CopyComponents { source, .. } => {
-                let source_is_present = match source {
-                    CopySource::BlockEntity => ctx.block_entity.is_some(),
-                    CopySource::This => ctx.this_entity.is_some(),
-                    CopySource::Attacker => ctx.killer_entity.is_some(),
-                    CopySource::DirectAttacker => ctx.direct_killer_entity.is_some(),
-                };
-                if source_is_present {
-                    return Err(LootError::UnsupportedFunction("copy_components"));
+            LootFunction::CopyComponents {
+                source,
+                include,
+                exclude,
+            } => match source {
+                CopySource::BlockEntity => {
+                    if let Some(block_entity) = ctx.block_entity {
+                        for (key, value) in block_entity.components.iter() {
+                            if include.is_some_and(|include| !include.contains(key))
+                                || exclude.contains(key)
+                            {
+                                continue;
+                            }
+                            if !item.set_raw_component(key, value) {
+                                return Err(LootError::InvalidCopiedComponent(key.clone()));
+                            }
+                        }
+                    }
                 }
-            }
+                CopySource::This | CopySource::Attacker | CopySource::DirectAttacker => {
+                    let source_is_present = match source {
+                        CopySource::This => ctx.this_entity.is_some(),
+                        CopySource::Attacker => ctx.killer_entity.is_some(),
+                        CopySource::DirectAttacker => ctx.direct_killer_entity.is_some(),
+                        CopySource::BlockEntity => false,
+                    };
+                    if source_is_present {
+                        return Err(LootError::UnsupportedFunction(
+                            "copy_components from entity",
+                        ));
+                    }
+                }
+            },
             LootFunction::CopyState { .. } => {
                 return Err(LootError::UnsupportedFunction("copy_state"));
             }

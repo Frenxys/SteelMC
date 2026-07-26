@@ -16,7 +16,7 @@ use crate::entity::{
     Entity, EntityBase, EntityBaseLoad, EntityBaseState, RemovalReason, SharedEntity,
     next_entity_id,
 };
-use crate::world::World;
+use crate::world::{Explosion, World};
 
 /// Vanilla leash knot attached to a fence block.
 #[entity_behavior(class = "LeashFenceKnotEntity")]
@@ -224,6 +224,13 @@ impl Entity for LeashFenceKnotEntity {
 
     fn is_pickable(&self) -> bool {
         true
+    }
+
+    fn ignore_explosion(&self, explosion: &dyn Explosion) -> bool {
+        explosion
+            .direct_source_entity()
+            .is_some_and(Entity::is_in_water)
+            || !explosion.should_affect_blocklike_entities()
     }
 }
 

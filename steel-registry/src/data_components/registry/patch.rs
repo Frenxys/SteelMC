@@ -104,6 +104,10 @@ impl DataComponentPatch {
         self.entries.remove(&component.key);
     }
 
+    pub(crate) fn clear_raw(&mut self, key: &Identifier) {
+        self.entries.remove(key);
+    }
+
     /// Gets the patch entry for a key.
     #[must_use]
     pub fn get_entry(&self, key: &Identifier) -> Option<&ComponentPatchEntry> {

@@ -1,9 +1,9 @@
 use rustc_hash::FxHashSet;
 
 use super::{
-    ConditionalLootFunction, EnchantmentOptions, ExplorationMapRequest, InstrumentOptions,
-    LootCondition, LootEntry, LootError, LootFunction, LootResult, LootTable, NumberProvider,
-    NumberProviderRange, REGISTRY, RegistryExt, TaggedRegistryExt,
+    ConditionalLootFunction, CopySource, EnchantmentOptions, ExplorationMapRequest,
+    InstrumentOptions, LootCondition, LootEntry, LootError, LootFunction, LootResult, LootTable,
+    NumberProvider, NumberProviderRange, REGISTRY, RegistryExt, TaggedRegistryExt,
 };
 
 /// World work that must be resolved before a loot table can be evaluated.
@@ -201,6 +201,23 @@ fn validate_function(
         LootFunction::SetItem { item } => {
             require_registry_value(REGISTRY.items.by_key(item), "item", item)?;
         }
+        LootFunction::CopyComponents {
+            source: CopySource::BlockEntity,
+            include,
+            exclude,
+        } => {
+            for key in include
+                .iter()
+                .flat_map(|included| included.iter())
+                .chain(exclude.iter())
+            {
+                require_registry_value(
+                    REGISTRY.data_components.by_key(key),
+                    "data component",
+                    key,
+                )?;
+            }
+        }
         LootFunction::Sequence { functions } => {
             validate_functions(functions, requirements, visiting)?;
         }
@@ -214,7 +231,9 @@ fn validate_function(
         | LootFunction::FurnaceSmelt { .. }
         | LootFunction::SetName { .. }
         | LootFunction::Discard => {}
-        LootFunction::CopyComponents { .. } => unsupported_function("copy_components")?,
+        LootFunction::CopyComponents { .. } => {
+            unsupported_function("copy_components from entity")?;
+        }
         LootFunction::CopyState { .. } => unsupported_function("copy_state")?,
         LootFunction::SetComponents { .. } => unsupported_function("set_components")?,
         LootFunction::CopyName { .. } => unsupported_function("copy_name")?,

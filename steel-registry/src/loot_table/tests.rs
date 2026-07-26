@@ -712,13 +712,44 @@ fn copy_components_without_its_optional_source_keeps_the_item() {
 
     LootFunction::CopyComponents {
         source: CopySource::BlockEntity,
-        include: &INCLUDE,
+        include: Some(&INCLUDE),
+        exclude: &[],
     }
     .apply(&mut chest, &mut context)
     .expect("an absent optional block-entity source should be a Vanilla no-op");
 
     assert!(chest.is(&vanilla_items::CHEST));
     assert_eq!(chest.count(), 1);
+}
+
+#[test]
+fn copy_components_filters_a_block_entity_component_snapshot() {
+    use crate::data_components::{DataComponentMap, vanilla_components::CUSTOM_NAME};
+    use text_components::TextComponent;
+
+    static INCLUDE: [Identifier; 1] = [Identifier::vanilla_static("custom_name")];
+
+    init_test_registries();
+    let custom_name = TextComponent::from("Loot snapshot");
+    let mut components = DataComponentMap::new();
+    components.set(CUSTOM_NAME, Some(custom_name.clone()));
+    let block_entity_type = Identifier::vanilla_static("chest");
+    let mut chest = ItemStack::new(&vanilla_items::CHEST);
+    let mut random = test_rng();
+    let mut context = LootContext::new(&mut random).with_block_entity(BlockEntityRef {
+        block_entity_type: Some(&block_entity_type),
+        components: &components,
+    });
+
+    LootFunction::CopyComponents {
+        source: CopySource::BlockEntity,
+        include: Some(&INCLUDE),
+        exclude: &[],
+    }
+    .apply(&mut chest, &mut context)
+    .expect("valid block entity components should copy");
+
+    assert_eq!(chest.get(CUSTOM_NAME), Some(&custom_name));
 }
 
 #[test]

@@ -3,13 +3,17 @@
 //! Barrels are container block entities with 27 slots (3x9 grid),
 //! functioning similarly to chests but without double-chest behavior.
 
-use std::sync::{Arc, Weak};
+use std::{
+    io,
+    sync::{Arc, Weak},
+};
 
 use simdnbt::borrow::{BaseNbtCompound as BorrowedNbtCompound, NbtCompound as NbtCompoundView};
 use simdnbt::owned::NbtCompound;
 use steel_protocol::packets::game::SoundSource;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::BlockStateProperties;
+use steel_registry::data_components::DataComponentMap;
 use steel_registry::{sound_events, vanilla_block_entity_types};
 use steel_utils::types::UpdateFlags;
 use steel_utils::{
@@ -140,6 +144,12 @@ impl BlockEntity for BarrelBlockEntity {
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
         self.container.lock().save(nbt);
+    }
+
+    fn collect_implicit_components(&self, components: &mut DataComponentMap) -> io::Result<()> {
+        self.container
+            .lock()
+            .collect_implicit_components(components)
     }
 
     fn get_update_tag(&self) -> Option<NbtCompound> {

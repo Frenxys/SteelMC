@@ -167,23 +167,38 @@ pub(super) fn generate_function(function: &LootFunctionJson) -> TokenStream {
                 _ => quote! { CopySource::BlockEntity },
             };
 
-            let include: Vec<TokenStream> = function
-                .include
-                .as_ref()
-                .map(|inc| {
-                    inc.iter()
+            let include = function.include.as_ref().map_or_else(
+                || quote! { None },
+                |inc| {
+                    let values = inc
+                        .iter()
                         .map(|s| {
                             let s = s.strip_prefix("minecraft:").unwrap_or(s);
                             quote! { Identifier::vanilla_static(#s) }
                         })
-                        .collect()
+                        .collect::<Vec<_>>();
+                    quote! { Some(&[#(#values),*]) }
+                },
+            );
+            let exclude = function
+                .exclude
+                .as_ref()
+                .map(|values| {
+                    values
+                        .iter()
+                        .map(|value| {
+                            let value = value.strip_prefix("minecraft:").unwrap_or(value);
+                            quote! { Identifier::vanilla_static(#value) }
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
 
             quote! {
                 LootFunction::CopyComponents {
                     source: #source,
-                    include: &[#(#include),*],
+                    include: #include,
+                    exclude: &[#(#exclude),*],
                 }
             }
         }

@@ -2,13 +2,16 @@
 
 mod exploration;
 
-use std::{str::FromStr, sync::Arc};
+use std::{io, str::FromStr, sync::Arc};
 
 use simdnbt::borrow::NbtCompound as NbtCompoundView;
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 use steel_registry::{
     REGISTRY, RegistryExt,
-    data_components::{MapId, vanilla_components::MAP_ID},
+    data_components::{
+        DataComponentMap, MapId, SeededContainerLoot,
+        vanilla_components::{CONTAINER_LOOT, MAP_ID},
+    },
     item_stack::ItemStack,
     loot_table::{
         ExplorationMapRequest, ExplorationMapResolver, LootContext, LootError, LootResult,
@@ -138,6 +141,20 @@ impl RandomizableContainer {
             return;
         }
         self.base.save_items(nbt);
+    }
+
+    pub(crate) fn collect_implicit_components(
+        &self,
+        components: &mut DataComponentMap,
+    ) -> io::Result<()> {
+        self.base.collect_implicit_components(components)?;
+        components.set(
+            CONTAINER_LOOT,
+            self.loot_table
+                .as_ref()
+                .map(|key| SeededContainerLoot::new(key.clone(), self.loot_table_seed)),
+        );
+        Ok(())
     }
 
     /// Marks this storage removed and takes any already-realized items.

@@ -10,7 +10,9 @@ use crate::{
     entity::Entity,
     entity::ai::path::PathComputationType,
     player::Player,
-    world::{ScheduledTickAccess, SignalGetter as _, World, game_event::GameEventContext},
+    world::{
+        Explosion, ScheduledTickAccess, SignalGetter as _, World, game_event::GameEventContext,
+    },
 };
 use std::sync::Arc;
 use steel_macros::block_behavior;
@@ -20,6 +22,7 @@ use steel_registry::{
         block_state_ext::BlockStateExt as _,
         properties::{BlockStateProperties, BoolProperty, Direction, EnumProperty, Half},
     },
+    item_stack::ItemStack,
     sound_event::SoundEventRef,
     vanilla_fluids, vanilla_game_events,
 };
@@ -31,6 +34,8 @@ pub struct TrapDoorBlock {
     block: BlockRef,
     #[json_arg(value, json = "type_can_open_by_hand")]
     can_open_by_hand: bool,
+    #[json_arg(value, json = "type_can_open_by_wind_charge")]
+    can_open_by_wind_charge: bool,
     #[json_arg(sound_events, json = "type_trapdoor_open")]
     sound_open: SoundEventRef,
     #[json_arg(sound_events, json = "type_trapdoor_close")]
@@ -45,6 +50,8 @@ pub struct WeatheringCopperTrapDoorBlock {
     pub weathering: WeatheringCopper,
     #[json_arg(value, json = "type_can_open_by_hand")]
     can_open_by_hand: bool,
+    #[json_arg(value, json = "type_can_open_by_wind_charge")]
+    can_open_by_wind_charge: bool,
     #[json_arg(sound_events, json = "type_trapdoor_open")]
     sound_open: SoundEventRef,
     #[json_arg(sound_events, json = "type_trapdoor_close")]
@@ -63,12 +70,14 @@ impl TrapDoorBlock {
     pub const fn new(
         block: BlockRef,
         can_open_by_hand: bool,
+        can_open_by_wind_charge: bool,
         sound_open: SoundEventRef,
         sound_close: SoundEventRef,
     ) -> Self {
         Self {
             block,
             can_open_by_hand,
+            can_open_by_wind_charge,
             sound_open,
             sound_close,
         }
@@ -100,14 +109,20 @@ impl TrapDoorBlock {
         );
     }
 
-    fn toggle(&self, state: BlockStateId, world: &Arc<World>, pos: BlockPos, player: &Player) {
+    fn toggle(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: Option<&Player>,
+    ) {
         let block_state = state.set_value(OPEN, !state.get_value(OPEN));
         world.set_block(pos, block_state, UpdateFlags::UPDATE_CLIENTS);
         if block_state.get_value(WATERLOGGED) {
             let delay = world.fluid_tick_delay(&vanilla_fluids::WATER);
             let _ = world.schedule_fluid_tick_default(pos, &vanilla_fluids::WATER, delay);
         }
-        self.play_sound(Some(player), world, pos, block_state.get_value(OPEN));
+        self.play_sound(player, world, pos, block_state.get_value(OPEN));
     }
 }
 
@@ -174,11 +189,28 @@ impl BlockBehavior for TrapDoorBlock {
         _inv: &mut InventoryAccess,
     ) -> InteractionResult {
         if self.can_open_by_hand {
-            self.toggle(state, world, pos, player);
+            self.toggle(state, world, pos, Some(player));
             InteractionResult::Success
         } else {
             InteractionResult::Pass
         }
+    }
+
+    fn on_explosion_hit(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        explosion: &dyn Explosion,
+        on_hit: &mut dyn FnMut(ItemStack, BlockPos),
+    ) {
+        if explosion.can_trigger_blocks()
+            && self.can_open_by_wind_charge
+            && !state.get_value(POWERED)
+        {
+            self.toggle(state, world, pos, None);
+        }
+        self.default_on_explosion_hit(state, world, pos, explosion, on_hit);
     }
 
     fn handle_neighbor_changed(
@@ -225,6 +257,7 @@ impl WeatheringCopperTrapDoorBlock {
         block: BlockRef,
         weather_state: WeatherState,
         can_open_by_hand: bool,
+        can_open_by_wind_charge: bool,
         sound_open: SoundEventRef,
         sound_close: SoundEventRef,
     ) -> Self {
@@ -232,6 +265,7 @@ impl WeatheringCopperTrapDoorBlock {
             block,
             weathering: WeatheringCopper::new(weather_state),
             can_open_by_hand,
+            can_open_by_wind_charge,
             sound_open,
             sound_close,
         }
@@ -241,6 +275,7 @@ impl WeatheringCopperTrapDoorBlock {
         TrapDoorBlock::new(
             self.block,
             self.can_open_by_hand,
+            self.can_open_by_wind_charge,
             self.sound_open,
             self.sound_close,
         )
@@ -280,6 +315,18 @@ impl BlockBehavior for WeatheringCopperTrapDoorBlock {
     ) -> InteractionResult {
         self.trapdoor()
             .use_without_item(state, world, pos, player, hit_result, inv)
+    }
+
+    fn on_explosion_hit(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        explosion: &dyn Explosion,
+        on_hit: &mut dyn FnMut(ItemStack, BlockPos),
+    ) {
+        self.trapdoor()
+            .on_explosion_hit(state, world, pos, explosion, on_hit);
     }
 
     fn handle_neighbor_changed(
@@ -323,6 +370,7 @@ mod tests {
         let behavior = TrapDoorBlock::new(
             &vanilla_blocks::OAK_TRAPDOOR,
             true,
+            true,
             &sound_events::BLOCK_WOODEN_TRAPDOOR_OPEN,
             &sound_events::BLOCK_WOODEN_TRAPDOOR_CLOSE,
         );
@@ -341,6 +389,7 @@ mod tests {
         init_test_registry();
         let behavior = TrapDoorBlock::new(
             &vanilla_blocks::OAK_TRAPDOOR,
+            true,
             true,
             &sound_events::BLOCK_WOODEN_TRAPDOOR_OPEN,
             &sound_events::BLOCK_WOODEN_TRAPDOOR_CLOSE,

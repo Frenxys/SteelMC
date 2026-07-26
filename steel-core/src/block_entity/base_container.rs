@@ -1,17 +1,23 @@
 //! Shared storage and persistence for Vanilla base container block entities.
 
-use std::mem;
+use std::{io, mem};
 
 use simdnbt::borrow::NbtCompound as NbtCompoundView;
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 use simdnbt::{FromNbtTag as _, ToNbtTag as _};
-use steel_registry::{item_predicate::LockCode, item_stack::ItemStack};
+use steel_registry::{
+    data_components::{
+        DataComponentMap, ItemContainerContents,
+        vanilla_components::{CONTAINER, CUSTOM_NAME, LOCK},
+    },
+    item_predicate::LockCode,
+    item_stack::ItemStack,
+    item_stack_template::ItemStackTemplate,
+};
 use text_components::TextComponent;
 
 /// Inventory, custom-name, and lock data shared by container block entities.
 ///
-/// TODO: Apply and collect these values through Steel's shared block-item/block-entity
-/// implicit-component pipeline once that foundation exists.
 pub(crate) struct BaseContainer {
     items: Vec<ItemStack>,
     custom_name: Option<TextComponent>,
@@ -68,6 +74,36 @@ impl BaseContainer {
 
     pub(crate) fn save_items(&self, nbt: &mut NbtCompound) {
         Self::save_item_slice(nbt, &self.items);
+    }
+
+    pub(crate) fn collect_implicit_components(
+        &self,
+        components: &mut DataComponentMap,
+    ) -> io::Result<()> {
+        components.set(CUSTOM_NAME, self.custom_name.clone());
+        components.set(
+            LOCK,
+            self.lock
+                .as_ref()
+                .filter(|lock| *lock != &LockCode::NO_LOCK)
+                .cloned(),
+        );
+        let Some(last_non_empty_slot) = self.items.iter().rposition(|item| !item.is_empty()) else {
+            components.set(CONTAINER, Some(ItemContainerContents::empty()));
+            return Ok(());
+        };
+        let items = self.items[..=last_non_empty_slot]
+            .iter()
+            .map(|item| {
+                if item.is_empty() {
+                    Ok(None)
+                } else {
+                    ItemStackTemplate::from_stack(item).map(Some)
+                }
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        components.set(CONTAINER, Some(ItemContainerContents::new(items)?));
+        Ok(())
     }
 
     pub(crate) fn save_item_slice(nbt: &mut NbtCompound, item_slice: &[ItemStack]) {
@@ -138,5 +174,53 @@ impl BaseContainer {
         self.lock
             .as_ref()
             .is_some_and(|lock| lock != &LockCode::NO_LOCK)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use steel_registry::{
+        data_components::{DataComponentMap, vanilla_components::CONTAINER},
+        item_stack::ItemStack,
+        test_support::init_test_registry,
+        vanilla_items,
+    };
+
+    use super::BaseContainer;
+
+    #[test]
+    fn component_snapshot_trims_trailing_empty_container_slots() {
+        init_test_registry();
+        let mut container = BaseContainer::new(3);
+        container.set_item(1, ItemStack::with_count(&vanilla_items::DIAMOND, 2));
+        let mut components = DataComponentMap::new();
+
+        container
+            .collect_implicit_components(&mut components)
+            .expect("valid live container items should collect");
+
+        let contents = components
+            .get_ref(CONTAINER)
+            .expect("container snapshot should always include contents");
+        assert!(contents.items()[0].is_none());
+        let item = contents.items()[1]
+            .as_ref()
+            .expect("occupied slot should contain an item template");
+        assert_eq!(item.item(), &*vanilla_items::DIAMOND);
+        assert_eq!(item.count(), 2);
+        assert_eq!(contents.items().len(), 2);
+
+        let empty_container = BaseContainer::new(3);
+        let mut empty_components = DataComponentMap::new();
+        empty_container
+            .collect_implicit_components(&mut empty_components)
+            .expect("empty live container should collect");
+        assert!(
+            empty_components
+                .get_ref(CONTAINER)
+                .expect("empty snapshot should contain container contents")
+                .items()
+                .is_empty()
+        );
     }
 }

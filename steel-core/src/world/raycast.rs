@@ -93,6 +93,40 @@ impl World {
         block_shape: ClipBlockShape,
         fluid: ClipFluid,
     ) -> ClipHitResult {
+        self.clip_with_collision_context(
+            start_pos,
+            end_pos,
+            block_shape,
+            fluid,
+            BlockCollisionContext::empty(),
+        )
+    }
+
+    /// Performs a vanilla-style block/fluid clip using an entity collision context.
+    #[must_use]
+    pub fn clip_for_entity(
+        &self,
+        start_pos: DVec3,
+        end_pos: DVec3,
+        block_shape: ClipBlockShape,
+        fluid: ClipFluid,
+        entity: &dyn Entity,
+    ) -> ClipHitResult {
+        let context = BlockCollisionContext::entity(entity.position().y, entity.is_descending())
+            .with_fall_distance(entity.fall_distance())
+            .with_can_walk_on_powder_snow(entity.can_walk_on_powder_snow())
+            .with_falling_block(entity.entity_type() == &vanilla_entities::FALLING_BLOCK);
+        self.clip_with_collision_context(start_pos, end_pos, block_shape, fluid, context)
+    }
+
+    fn clip_with_collision_context(
+        &self,
+        start_pos: DVec3,
+        end_pos: DVec3,
+        block_shape: ClipBlockShape,
+        fluid: ClipFluid,
+        collision_context: BlockCollisionContext,
+    ) -> ClipHitResult {
         if start_pos == end_pos {
             return Self::clip_miss(start_pos, end_pos);
         }
@@ -107,8 +141,14 @@ impl World {
             from.z.floor() as i32,
         );
 
-        if let Some(hit) = self.clip_block_and_fluid(block, start_pos, end_pos, block_shape, fluid)
-        {
+        if let Some(hit) = self.clip_block_and_fluid(
+            block,
+            start_pos,
+            end_pos,
+            block_shape,
+            fluid,
+            collision_context,
+        ) {
             return hit;
         }
 
@@ -167,9 +207,14 @@ impl World {
                 next.z += delta.z;
             }
 
-            if let Some(hit) =
-                self.clip_block_and_fluid(block, start_pos, end_pos, block_shape, fluid)
-            {
+            if let Some(hit) = self.clip_block_and_fluid(
+                block,
+                start_pos,
+                end_pos,
+                block_shape,
+                fluid,
+                collision_context,
+            ) {
                 return hit;
             }
         }
@@ -212,13 +257,14 @@ impl World {
         to: DVec3,
         block_shape: ClipBlockShape,
         fluid: ClipFluid,
+        collision_context: BlockCollisionContext,
     ) -> Option<ClipHitResult> {
         let state = self.get_block_state(pos);
-        let block_result = Self::clip_shape(
+        let block_result = Self::clip_boxes(
             pos,
             from,
             to,
-            self.clip_block_shape(state, pos, block_shape),
+            self.clip_block_shape(state, pos, block_shape, collision_context),
         )
         .map(|hit| Self::clip_with_interaction_override(pos, from, to, state, hit));
         let fluid_result = self.clip_fluid_shape(pos, from, to, state, fluid);
@@ -267,15 +313,20 @@ impl World {
         state: BlockStateId,
         pos: BlockPos,
         shape: ClipBlockShape,
-    ) -> OffsetVoxelShape {
+        collision_context: BlockCollisionContext,
+    ) -> BlockCollisionBoxes {
         match shape {
-            ClipBlockShape::Collider => state.get_collision_shape_at(pos),
-            ClipBlockShape::Outline => state.get_outline_shape_at(pos),
-            ClipBlockShape::Visual => state.get_visual_shape_at(pos),
+            ClipBlockShape::Collider => BLOCK_BEHAVIORS
+                .get_behavior(state.get_block())
+                .get_collision_boxes(state, self, pos, collision_context),
+            ClipBlockShape::Outline => state.get_outline_shape_at(pos).iter().collect(),
+            ClipBlockShape::Visual => state.get_visual_shape_at(pos).iter().collect(),
             ClipBlockShape::FallDamageResetting { entity_is_player } => {
                 OffsetVoxelShape::without_offset(
                     self.fall_damage_resetting_shape(state, entity_is_player),
                 )
+                .iter()
+                .collect()
             }
         }
     }
@@ -360,10 +411,15 @@ impl World {
         to: DVec3,
         shape: OffsetVoxelShape,
     ) -> Option<ClipHitResult> {
-        if shape.is_empty() {
-            return None;
-        }
+        Self::clip_boxes(block_pos, from, to, shape.iter())
+    }
 
+    fn clip_boxes(
+        block_pos: BlockPos,
+        from: DVec3,
+        to: DVec3,
+        boxes: impl IntoIterator<Item = BlockLocalAabb>,
+    ) -> Option<ClipHitResult> {
         if (to - from).length_squared() < 1.0e-7 {
             return None;
         }
@@ -374,20 +430,19 @@ impl World {
             f64::from(block_pos.z()),
         );
         let inside_test_point = from + (to - from) * 0.001;
-        if Self::shape_contains_world_point(shape, block_vec, inside_test_point) {
-            return Some(ClipHitResult {
-                location: inside_test_point,
-                direction: Self::approximate_nearest_direction(to - from).opposite(),
-                block_pos,
-                miss: false,
-                inside: true,
-                world_border_hit: false,
-            });
-        }
-
         let mut closest: Option<(f64, Direction)> = None;
 
-        for shape in shape.iter() {
+        for shape in boxes {
+            if Self::local_aabb_contains_world_point(shape, block_vec, inside_test_point) {
+                return Some(ClipHitResult {
+                    location: inside_test_point,
+                    direction: Self::approximate_nearest_direction(to - from).opposite(),
+                    block_pos,
+                    miss: false,
+                    inside: true,
+                    world_border_hit: false,
+                });
+            }
             let world_min = DVec3::new(shape.min_x(), shape.min_y(), shape.min_z()) + block_vec;
             let world_max = DVec3::new(shape.max_x(), shape.max_y(), shape.max_z()) + block_vec;
 
@@ -457,16 +512,6 @@ impl World {
                 None
             }
         })
-    }
-
-    pub(super) fn shape_contains_world_point(
-        shape: OffsetVoxelShape,
-        block_vec: DVec3,
-        point: DVec3,
-    ) -> bool {
-        shape
-            .iter()
-            .any(|aabb| Self::local_aabb_contains_world_point(aabb, block_vec, point))
     }
 
     pub(super) fn local_aabb_contains_world_point(

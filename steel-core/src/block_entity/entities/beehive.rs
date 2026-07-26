@@ -1,10 +1,15 @@
 //! Beehive block entity implementation.
 
-use std::sync::Weak;
+use std::{io, sync::Weak};
 
 use simdnbt::borrow::{BaseNbtCompound as BorrowedNbtCompound, NbtCompound as NbtCompoundView};
-use simdnbt::owned::{NbtCompound, NbtList};
-use steel_registry::{vanilla_block_entity_types, vanilla_entities};
+use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+use steel_registry::{
+    data_components::{
+        BeehiveOccupant, Bees, DataComponentMap, EntityData, vanilla_components::BEES,
+    },
+    vanilla_block_entity_types, vanilla_entities,
+};
 use steel_utils::{BlockPos, BlockStateId, DowncastType, DowncastTypeKey, locks::SyncMutex};
 
 use crate::block_entity::{BlockEntity, BlockEntityBase};
@@ -54,6 +59,17 @@ impl BeeOccupant {
         nbt.insert("ticks_in_hive", self.ticks_in_hive);
         nbt.insert("min_ticks_in_hive", self.min_ticks_in_hive);
         nbt
+    }
+
+    fn to_component(&self) -> io::Result<BeehiveOccupant> {
+        let entity_data =
+            EntityData::from_owned_nbt(&NbtTag::Compound(self.entity_data.clone()))
+                .ok_or_else(|| io::Error::other("invalid beehive occupant entity data"))?;
+        Ok(BeehiveOccupant::new(
+            entity_data,
+            self.ticks_in_hive,
+            self.min_ticks_in_hive,
+        ))
     }
 }
 
@@ -161,5 +177,54 @@ impl BlockEntity for BeehiveBlockEntity {
             .map(BeeOccupant::save)
             .collect::<Vec<_>>();
         nbt.insert("bees", NbtList::Compound(bees));
+    }
+
+    fn collect_implicit_components(&self, components: &mut DataComponentMap) -> io::Result<()> {
+        let bees = self
+            .state
+            .lock()
+            .stored
+            .iter()
+            .map(BeeOccupant::to_component)
+            .collect::<io::Result<Vec<_>>>()?;
+        components.set(BEES, Some(Bees::new(bees)));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Weak;
+
+    use steel_registry::{
+        data_components::vanilla_components::BEES, test_support::init_test_registry, vanilla_blocks,
+    };
+    use steel_utils::BlockPos;
+
+    use super::*;
+
+    #[test]
+    fn component_snapshot_contains_live_beehive_occupants() {
+        init_test_registry();
+        let block_entity = BeehiveBlockEntity::new(
+            Weak::new(),
+            BlockPos::ZERO,
+            vanilla_blocks::BEEHIVE.default_state(),
+        );
+        block_entity.store_worldgen_bee(37);
+
+        let components = block_entity
+            .collect_components()
+            .expect("valid bee occupants should collect");
+        let bees = components
+            .get_ref(BEES)
+            .expect("beehive snapshot should contain bees");
+
+        assert_eq!(bees.bees().len(), 1);
+        assert_eq!(bees.bees()[0].ticks_in_hive(), 37);
+        assert_eq!(
+            bees.bees()[0].min_ticks_in_hive(),
+            BEEHIVE_MIN_OCCUPATION_TICKS_NECTARLESS,
+        );
     }
 }

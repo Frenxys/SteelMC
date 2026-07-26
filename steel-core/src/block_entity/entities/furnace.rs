@@ -1,7 +1,7 @@
 //! Normal furnace block entity and cooking state.
 
 use std::{
-    mem,
+    io, mem,
     sync::{Arc, Weak},
 };
 
@@ -10,6 +10,7 @@ use simdnbt::borrow::{BaseNbtCompound as BorrowedNbtCompound, NbtCompound as Nbt
 use simdnbt::owned::{NbtCompound, NbtTag};
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::blocks::properties::BlockStateProperties;
+use steel_registry::data_components::DataComponentMap;
 use steel_registry::item_stack::ItemStack;
 use steel_registry::{REGISTRY, vanilla_block_entity_types, vanilla_items};
 use steel_utils::types::UpdateFlags;
@@ -143,6 +144,13 @@ impl BlockEntity for FurnaceBlockEntity {
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
         self.container.lock().save(nbt);
+    }
+
+    fn collect_implicit_components(&self, components: &mut DataComponentMap) -> io::Result<()> {
+        self.container
+            .lock()
+            .base
+            .collect_implicit_components(components)
     }
 
     fn tick(&self, world: &Arc<World>) {

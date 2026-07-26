@@ -66,7 +66,9 @@ pub struct BlockLootContext<'a> {
     pos: BlockPos,
     entity: Option<&'a dyn Entity>,
     tool: Option<&'a ItemStack>,
+    explosion_radius: Option<f32>,
     luck: f32,
+    block_entity: Option<SharedBlockEntity>,
 }
 
 impl<'a> BlockLootContext<'a> {
@@ -78,7 +80,9 @@ impl<'a> BlockLootContext<'a> {
             pos,
             entity: None,
             tool: None,
+            explosion_radius: None,
             luck: 0.0,
+            block_entity: None,
         }
     }
 
@@ -96,10 +100,24 @@ impl<'a> BlockLootContext<'a> {
         self
     }
 
+    /// Adds the explosion radius used by explosion-decay loot functions.
+    #[must_use]
+    pub const fn with_explosion(mut self, radius: f32) -> Self {
+        self.explosion_radius = Some(radius);
+        self
+    }
+
     /// Adds the luck used to evaluate the loot table.
     #[must_use]
     pub const fn with_luck(mut self, luck: f32) -> Self {
         self.luck = luck;
+        self
+    }
+
+    /// Captures the live block entity strongly until loot evaluation finishes.
+    #[must_use]
+    pub fn with_block_entity(mut self, block_entity: SharedBlockEntity) -> Self {
+        self.block_entity = Some(block_entity);
         self
     }
 
@@ -129,8 +147,16 @@ impl<'a> BlockLootContext<'a> {
         self.tool
     }
 
+    pub(crate) const fn explosion_radius(&self) -> Option<f32> {
+        self.explosion_radius
+    }
+
     pub(crate) const fn luck(&self) -> f32 {
         self.luck
+    }
+
+    pub(crate) const fn block_entity(&self) -> Option<&SharedBlockEntity> {
+        self.block_entity.as_ref()
     }
 }
 

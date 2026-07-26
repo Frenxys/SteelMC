@@ -33,19 +33,26 @@ mod registry;
 mod storage;
 
 use std::{
-    ptr,
+    io, ptr,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use simdnbt::borrow::BaseNbtCompound as BorrowedNbtCompound;
+use simdnbt::FromNbtTag as _;
+use simdnbt::borrow::{
+    BaseNbtCompound as BorrowedNbtCompound, NbtCompound as BorrowedNbtCompoundView,
+};
 use simdnbt::owned::NbtCompound;
 use smallvec::SmallVec;
 use steel_registry::block_entity_type::BlockEntityTypeRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
-use steel_utils::{BlockPos, BlockStateId, ErasedType, locks::SyncMutex};
+use steel_registry::data_components::DataComponentMap;
+use steel_utils::{
+    BlockPos, BlockStateId, ErasedType,
+    locks::{SyncMutex, SyncRwLock},
+};
 
 pub use container_openers_counter::{ContainerOpeners, ContainerOpenersCounter};
 pub use fuel_values::{FuelValues, vanilla_fuel_values};
@@ -150,6 +157,7 @@ pub struct BlockEntityBase {
     /// Lock-free removal snapshot; lifecycle writers remain serialized below.
     removed: AtomicBool,
     lifecycle: SyncMutex<BlockEntityLifecycle>,
+    components: SyncRwLock<DataComponentMap>,
 }
 
 struct BlockEntityLifecycleDispatchGuard<'a> {
@@ -197,6 +205,7 @@ impl BlockEntityBase {
                 events: SmallVec::new(),
                 dispatching_events: false,
             }),
+            components: SyncRwLock::new(DataComponentMap::new()),
         }
     }
 
@@ -287,6 +296,26 @@ impl BlockEntityBase {
         if !state.is_air() {
             world.update_neighbor_for_output_signal(self.pos, state.get_block());
         }
+    }
+
+    fn load_components(&self, nbt: &BorrowedNbtCompound<'_>) {
+        let nbt_view: BorrowedNbtCompoundView<'_, '_> = nbt.into();
+        let components = match nbt_view.get("components") {
+            Some(tag) => DataComponentMap::from_nbt_tag(tag).unwrap_or_else(|| {
+                log::warn!(
+                    "Discarding malformed stored components for block entity {} at {:?}",
+                    self.block_entity_type.key,
+                    self.pos,
+                );
+                DataComponentMap::new()
+            }),
+            None => DataComponentMap::new(),
+        };
+        *self.components.write() = components;
+    }
+
+    fn stored_components(&self) -> DataComponentMap {
+        self.components.read().clone()
     }
 
     pub(crate) fn is_valid_container_for(&self, player: &Player) -> bool {
@@ -396,6 +425,12 @@ pub trait BlockEntity: ErasedType + Send + Sync {
     /// chunk data from the server.
     fn load_additional(&self, nbt: &BorrowedNbtCompound<'_>);
 
+    /// Loads entity-specific data and the base block-entity component map.
+    fn load_with_components(&self, nbt: &BorrowedNbtCompound<'_>) {
+        self.load_additional(nbt);
+        self.base().load_components(nbt);
+    }
+
     /// Saves additional data to NBT.
     ///
     /// Called when saving the block entity to disk.
@@ -405,24 +440,43 @@ pub trait BlockEntity: ErasedType + Send + Sync {
     fn save_custom_only(&self) -> NbtCompound {
         let mut nbt = NbtCompound::new();
         self.save_additional(&mut nbt);
-        for key in ["id", "x", "y", "z"] {
+        for key in ["id", "x", "y", "z", "components"] {
             while nbt.remove(key).is_some() {}
         }
         nbt
     }
 
+    /// Saves entity-specific data and stored components without position/type metadata.
+    fn save_without_metadata(&self) -> NbtCompound {
+        let mut nbt = self.save_custom_only();
+        nbt.insert(
+            "components",
+            self.base().stored_components().to_nbt_tag_ref(),
+        );
+        nbt
+    }
+
     /// Saves command-visible data together with vanilla block-entity metadata.
     fn save_with_full_metadata(&self) -> NbtCompound {
-        // TODO: Include stored block-entity components once Steel has Vanilla's
-        // block-entity component foundation. NBT predicates targeting the
-        // `components` field cannot match exactly until then.
-        let mut nbt = self.save_custom_only();
+        let mut nbt = self.save_without_metadata();
         let pos = self.get_block_pos();
         nbt.insert("id", self.get_type().key.to_string());
         nbt.insert("x", pos.x());
         nbt.insert("y", pos.y());
         nbt.insert("z", pos.z());
         nbt
+    }
+
+    /// Adds this implementation's live implicit values to a component snapshot.
+    fn collect_implicit_components(&self, _components: &mut DataComponentMap) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Collects stored and implicit components at one synchronous world-state boundary.
+    fn collect_components(&self) -> io::Result<DataComponentMap> {
+        let mut components = self.base().stored_components();
+        self.collect_implicit_components(&mut components)?;
+        Ok(components)
     }
 
     /// Returns the NBT data to send to clients for initial sync.
