@@ -76,6 +76,7 @@ impl CaveVinesBlock {
         let loot_table = &vanilla_loot_tables::HARVEST_CAVE_VINE;
         let items = world.with_loot_random(0, loot_table.random_sequence.as_ref(), |random| {
             let mut ctx = LootContext::new(random)
+                .with_level(world.as_ref())
                 .with_block_state(state)
                 .with_interacting_entity(entity_loot_ref(source_entity));
             loot_table.get_random_items(&mut ctx)

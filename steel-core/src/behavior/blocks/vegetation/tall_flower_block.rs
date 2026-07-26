@@ -9,6 +9,8 @@ use steel_utils::{BlockPos, BlockStateId};
 use crate::behavior::block::BlockBehavior;
 use crate::behavior::blocks::vegetation::bonemealable::Bonemealable;
 use crate::behavior::context::{BlockPlaceContext, PlacementSource};
+use crate::block_entity::SharedBlockEntity;
+use crate::player::Player;
 use crate::world::{LevelReader, ScheduledTickAccess, World};
 
 use super::{BlockRef, DoublePlantBlock};
@@ -32,6 +34,29 @@ impl TallFlowerBlock {
 }
 
 impl BlockBehavior for TallFlowerBlock {
+    fn player_will_destroy(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+    ) -> BlockStateId {
+        self.base.player_will_destroy(state, world, pos, player)
+    }
+
+    fn player_destroy(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+        block_entity: Option<SharedBlockEntity>,
+        destroyed_with: &ItemStack,
+    ) {
+        self.base
+            .player_destroy(state, world, pos, player, block_entity, destroyed_with);
+    }
+
     fn update_shape(
         &self,
         state: BlockStateId,

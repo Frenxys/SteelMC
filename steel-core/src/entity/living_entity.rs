@@ -2762,6 +2762,7 @@ fn death_loot_items_with_rng<R: Random, E: LivingEntity + ?Sized>(
     };
 
     let mut context = LootContext::new(rng)
+        .with_level(world)
         .with_origin(position.x, position.y, position.z)
         .with_game_time(world.game_time())
         .with_killed_by_player(killed_by_player)

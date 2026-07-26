@@ -1,12 +1,14 @@
-use steel_utils::BlockPos;
 use steel_utils::random::Random;
+use steel_utils::{BlockPos, BlockStateId};
 
 use super::{
     BlockStateExt, DamageSourceInfo, EntityEquipmentRef, EntityRef, EntityRefFlags, Identifier,
     ItemStack, LootContext, LootContextEntity, LootError, LootResult, NumberProvider,
     NumberProviderRange, REGISTRY, RegistryExt, TaggedRegistryExt,
 };
+use crate::RegistryHolderSet;
 use crate::biome::BiomeRef;
+use crate::item_predicate::BlockPredicate;
 
 /// A property check for block state conditions.
 #[derive(Debug, Clone)]
@@ -128,6 +130,9 @@ pub enum ToolPredicate {
 #[derive(Debug, Clone)]
 pub struct LocationPredicate {
     pub biomes: Option<BiomeOptions>,
+    /// Canonical Vanilla block predicate. Loot evaluation currently supports
+    /// its holder-set and state-property portions; preflight rejects NBT and
+    /// component matchers until location access exposes block-entity data.
     pub block: Option<BlockPredicate>,
 }
 
@@ -181,11 +186,47 @@ impl BiomeOptions {
     }
 }
 
-/// Predicate for checking block properties.
-#[derive(Debug, Clone)]
-pub struct BlockPredicate {
-    pub blocks: Option<Identifier>,
-    pub state: &'static [(&'static str, &'static str)],
+pub(crate) fn validate_block_predicate(predicate: &BlockPredicate) -> LootResult<()> {
+    if predicate.nbt().is_some() {
+        return Err(LootError::UnsupportedCondition(
+            "location_check block NBT predicate",
+        ));
+    }
+    if !predicate.components().is_empty() {
+        return Err(LootError::UnsupportedCondition(
+            "location_check block component predicate",
+        ));
+    }
+
+    match predicate.blocks() {
+        Some(RegistryHolderSet::Tag(tag)) if REGISTRY.blocks.get_tag(tag).is_none() => {
+            return Err(LootError::UnknownRegistryTag {
+                registry: "block",
+                key: tag.clone(),
+            });
+        }
+        Some(RegistryHolderSet::Direct(blocks)) => {
+            for block in blocks.iter() {
+                if REGISTRY
+                    .blocks
+                    .by_key(&block.key)
+                    .is_none_or(|registered| !std::ptr::eq(registered, *block))
+                {
+                    return Err(LootError::UnknownRegistryValue {
+                        registry: "block",
+                        key: block.key.clone(),
+                    });
+                }
+            }
+        }
+        Some(RegistryHolderSet::Tag(_)) | None => {}
+    }
+    Ok(())
+}
+
+fn block_predicate_matches(predicate: &BlockPredicate, state: BlockStateId) -> LootResult<bool> {
+    validate_block_predicate(predicate)?;
+    Ok(predicate.matches_state(state))
 }
 
 /// Predicate for checking entity properties.
@@ -353,10 +394,16 @@ impl LootCondition {
                         return Ok(false);
                     }
                 }
-                if predicate.block.is_some() {
-                    return Err(LootError::UnsupportedCondition(
-                        "location_check with a block predicate requires world access",
-                    ));
+                if let Some(block) = &predicate.block {
+                    let level = ctx
+                        .level
+                        .ok_or(LootError::MissingLevel("location_check block predicate"))?;
+                    let Some(state) = level.block_state_at(pos) else {
+                        return Ok(false);
+                    };
+                    if !block_predicate_matches(block, state)? {
+                        return Ok(false);
+                    }
                 }
                 true
             }

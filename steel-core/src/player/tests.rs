@@ -1,12 +1,14 @@
+use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use glam::DVec3;
+use simdnbt::{ToNbtTag as _, borrow::read_compound, owned::NbtCompound};
 use steel_protocol::packets::game::EquipmentSlotItem;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
-use steel_registry::blocks::properties::{BlockStateProperties, Direction};
+use steel_registry::blocks::properties::{BlockStateProperties, Direction, DoubleBlockHalf};
 use steel_registry::data_component_predicate::DataComponentMatchers;
-use steel_registry::data_components::vanilla_components::{CAN_BREAK, EQUIPPABLE};
+use steel_registry::data_components::vanilla_components::{CAN_BREAK, CUSTOM_NAME, EQUIPPABLE};
 use steel_registry::data_components::{AdventureModePredicate, BlockPredicate};
 use steel_registry::{
     RegistryHolderSet, item_stack::ItemStack, test_support::init_test_registry, vanilla_attributes,
@@ -16,9 +18,11 @@ use steel_registry::{
 use steel_utils::locks::IntoShared as _;
 use steel_utils::types::{Difficulty, GameType, InteractionHand, UpdateFlags};
 use steel_utils::{BlockPos, ChunkPos, Downcast as _, DowncastType, DowncastTypeKey, WorldAabb};
+use text_components::TextComponent;
 use uuid::Uuid;
 
 use crate::behavior::{InteractionResult, init_behaviors};
+use crate::block_entity::init_block_entities;
 use crate::entity::{
     Entity, EntitySyncedData, LivingEntity, damage::DamageSource, entities::ItemEntity,
     next_entity_id,
@@ -858,7 +862,7 @@ fn block_action_restriction_precedes_redstone_ore_attack() {
     }
 
     let predicate = BlockPredicate::new(
-        Some(RegistryHolderSet::Direct(vec![
+        Some(RegistryHolderSet::direct(vec![
             &vanilla_blocks::REDSTONE_ORE,
         ])),
         None,
@@ -883,4 +887,133 @@ fn block_action_restriction_precedes_redstone_ore_attack() {
             .get_block_state(pos)
             .get_value(&BlockStateProperties::LIT)
     );
+}
+
+#[test]
+fn player_breaks_double_plant_loot_before_either_half_is_removed() {
+    init_test_registry();
+    init_behaviors();
+
+    for (world_key, broken_half) in [
+        ("double_plant_break_lower", DoubleBlockHalf::Lower),
+        ("double_plant_break_upper", DoubleBlockHalf::Upper),
+    ] {
+        let world = fresh_test_world(world_key);
+        let lower_pos = BlockPos::new(8, 64, 8);
+        let upper_pos = lower_pos.above();
+        insert_ready_full_chunk(&world, ChunkPos::from_block_pos(lower_pos));
+
+        let lower = vanilla_blocks::TALL_GRASS.default_state().set_value(
+            &BlockStateProperties::DOUBLE_BLOCK_HALF,
+            DoubleBlockHalf::Lower,
+        );
+        let upper = vanilla_blocks::TALL_GRASS.default_state().set_value(
+            &BlockStateProperties::DOUBLE_BLOCK_HALF,
+            DoubleBlockHalf::Upper,
+        );
+        let placement_flags = UpdateFlags::UPDATE_NONE | UpdateFlags::UPDATE_KNOWN_SHAPE;
+        assert!(world.set_block(lower_pos, lower, placement_flags));
+        assert!(world.set_block(upper_pos, upper, placement_flags));
+
+        let player = test_player(Arc::clone(&world));
+        player.base.set_position_local(DVec3::new(8.5, 64.0, 8.5));
+        player
+            .inventory
+            .lock()
+            .set_selected_item(ItemStack::new(&vanilla_items::SHEARS));
+        let break_pos = match broken_half {
+            DoubleBlockHalf::Lower => lower_pos,
+            DoubleBlockHalf::Upper => upper_pos,
+        };
+        player.block_breaking.lock().handle_block_break_action(
+            &player,
+            &world,
+            break_pos,
+            BlockBreakAction::Start,
+            Direction::Up,
+        );
+
+        assert!(world.get_block_state(lower_pos).is_air());
+        assert!(world.get_block_state(upper_pos).is_air());
+        let dropped = world.get_entities_in_aabb_matching(
+            &WorldAabb::new(6.0, 62.0, 6.0, 11.0, 68.0, 11.0),
+            |entity| entity.entity_type() == &vanilla_entities::ITEM,
+        );
+        assert_eq!(dropped.len(), 1);
+        let Some(item) = dropped[0].as_ref().downcast_ref::<ItemEntity>() else {
+            panic!("double-plant loot should spawn an item entity");
+        };
+        let stack = item.get_item();
+        assert!(stack.is(&vanilla_items::SHORT_GRASS));
+        assert_eq!(stack.count(), 2);
+    }
+}
+
+#[test]
+fn player_break_loot_preserves_removed_block_entity_components() {
+    init_test_registry();
+    init_behaviors();
+    init_block_entities();
+
+    let world = fresh_test_world("player_break_block_entity_components");
+    let pos = BlockPos::new(8, 64, 8);
+    insert_ready_full_chunk(&world, ChunkPos::from_block_pos(pos));
+    assert!(world.set_block(
+        pos,
+        vanilla_blocks::CHEST.default_state(),
+        UpdateFlags::UPDATE_ALL,
+    ));
+    let Some(block_entity) = world.get_block_entity(pos) else {
+        panic!("placed chest must create its block entity");
+    };
+    let custom_name = TextComponent::from("Player-broken chest");
+    let mut nbt = NbtCompound::new();
+    nbt.insert("CustomName", custom_name.clone().to_nbt_tag());
+    let mut encoded = Vec::new();
+    nbt.write(&mut encoded);
+    let Ok(borrowed) = read_compound(&mut Cursor::new(encoded.as_slice())) else {
+        panic!("test block entity NBT must reborrow");
+    };
+    block_entity.load_additional(&borrowed);
+
+    let player = test_player(Arc::clone(&world));
+    player.base.set_position_local(DVec3::new(8.5, 64.0, 8.5));
+    player
+        .inventory
+        .lock()
+        .set_selected_item(ItemStack::new(&vanilla_items::NETHERITE_AXE));
+    let mut block_breaking = player.block_breaking.lock();
+    block_breaking.handle_block_break_action(
+        &player,
+        &world,
+        pos,
+        BlockBreakAction::Start,
+        Direction::Up,
+    );
+    block_breaking.handle_block_break_action(
+        &player,
+        &world,
+        pos,
+        BlockBreakAction::Stop,
+        Direction::Up,
+    );
+    for _ in 0..64 {
+        if world.get_block_state(pos).is_air() {
+            break;
+        }
+        block_breaking.tick(&player, &world);
+    }
+    drop(block_breaking);
+
+    assert!(world.get_block_state(pos).is_air());
+    let drops = world.get_entities_in_aabb_matching(
+        &WorldAabb::new(6.0, 62.0, 6.0, 11.0, 68.0, 11.0),
+        |entity| entity.entity_type() == &vanilla_entities::ITEM,
+    );
+    assert!(drops.iter().any(|entity| {
+        entity
+            .as_ref()
+            .downcast_ref::<ItemEntity>()
+            .is_some_and(|item| item.get_item().get(CUSTOM_NAME) == Some(&custom_name))
+    }));
 }

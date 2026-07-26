@@ -20,6 +20,20 @@ impl World {
             .unwrap_or_else(|| REGISTRY.blocks.get_base_state_id(&vanilla_blocks::AIR))
     }
 
+    /// Gets a block state only when its full chunk is loaded.
+    ///
+    /// Vanilla block predicates fail for unloaded positions rather than treating them as air.
+    pub(crate) fn get_loaded_block_state(&self, pos: BlockPos) -> Option<BlockStateId> {
+        if !self.is_in_valid_bounds(pos) {
+            return None;
+        }
+
+        self.chunk_map
+            .with_full_chunk(Self::chunk_pos_for_block(pos), |chunk| {
+                chunk.get_block_state(pos)
+            })
+    }
+
     pub(crate) fn is_entity_ticking_chunk_loaded(&self, pos: BlockPos) -> bool {
         self.chunk_map
             .is_entity_ticking_full_chunk_loaded(Self::chunk_pos_for_block(pos))

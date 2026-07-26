@@ -1,5 +1,6 @@
 use rustc_hash::FxHashSet;
 
+use super::conditions::validate_block_predicate;
 use super::{
     ConditionalLootFunction, CopySource, EnchantmentOptions, ExplorationMapRequest,
     InstrumentOptions, LootCondition, LootEntry, LootError, LootFunction, LootResult, LootTable,
@@ -260,7 +261,7 @@ fn validate_function(
     Ok(())
 }
 
-fn validate_conditions(conditions: &[LootCondition]) -> LootResult<()> {
+pub(crate) fn validate_conditions(conditions: &[LootCondition]) -> LootResult<()> {
     for condition in conditions {
         match condition {
             LootCondition::Inverted(inner) => validate_conditions(std::slice::from_ref(*inner))?,
@@ -271,10 +272,8 @@ fn validate_conditions(conditions: &[LootCondition]) -> LootResult<()> {
                 if let Some(biomes) = &predicate.biomes {
                     biomes.validate()?;
                 }
-                if predicate.block.is_some() {
-                    return Err(LootError::UnsupportedCondition(
-                        "location_check with a block predicate requires world access",
-                    ));
+                if let Some(block) = &predicate.block {
+                    validate_block_predicate(block)?;
                 }
             }
             LootCondition::TimeCheck { value, .. } => validate_range(value)?,

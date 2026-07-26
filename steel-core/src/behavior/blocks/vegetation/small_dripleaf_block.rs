@@ -3,12 +3,15 @@ use std::sync::Arc;
 use steel_macros::block_behavior;
 use steel_registry::blocks::block_state_ext::BlockStateExt;
 use steel_registry::blocks::properties::{BlockStateProperties, Direction, DoubleBlockHalf};
+use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_block_tags::BlockTag;
 use steel_utils::{BlockPos, BlockStateId, types::UpdateFlags};
 
 use crate::behavior::block::{BlockBehavior, schedule_water_tick_if_waterlogged};
 use crate::behavior::context::{BlockPlaceContext, PlacementSource};
+use crate::block_entity::SharedBlockEntity;
 use crate::fluid::{FluidStateExt, get_fluid_state_from_block};
+use crate::player::Player;
 use crate::world::{LevelReader, ScheduledTickAccess, World};
 
 use super::{BlockRef, DoublePlantBlock};
@@ -33,6 +36,30 @@ impl SmallDripleafBlock {
 }
 
 impl BlockBehavior for SmallDripleafBlock {
+    fn player_will_destroy(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+    ) -> BlockStateId {
+        self.double_plant
+            .player_will_destroy(state, world, pos, player)
+    }
+
+    fn player_destroy(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+        block_entity: Option<SharedBlockEntity>,
+        destroyed_with: &ItemStack,
+    ) {
+        self.double_plant
+            .player_destroy(state, world, pos, player, block_entity, destroyed_with);
+    }
+
     fn update_shape(
         &self,
         state: BlockStateId,

@@ -1,8 +1,17 @@
+use crate::blocks::{
+    Block,
+    properties::{BlockStateProperties, DoubleBlockHalf},
+};
+use crate::data_component_predicate::DataComponentMatchers;
 use crate::data_components::vanilla_components::INSTRUMENT;
+use crate::item_predicate::{
+    BlockPredicate, StatePropertiesPredicate, StatePropertyMatcher, StatePropertyValueMatcher,
+};
 use crate::vanilla_instrument_tags::InstrumentTag;
 use crate::vanilla_items;
 use crate::{
-    biome::BiomeRef, test_support::init_test_registry, vanilla_biomes, vanilla_loot_tables,
+    RegistryHolderSet, biome::BiomeRef, test_support::init_test_registry, vanilla_biomes,
+    vanilla_blocks, vanilla_loot_tables,
 };
 
 use super::*;
@@ -91,6 +100,25 @@ struct FixedBiomeLevel {
 impl LootLevel for FixedBiomeLevel {
     fn biome_at(&self, _pos: BlockPos) -> Option<BiomeRef> {
         Some(self.biome)
+    }
+
+    fn block_state_at(&self, _pos: BlockPos) -> Option<BlockStateId> {
+        None
+    }
+}
+
+struct FixedBlockLevel {
+    pos: BlockPos,
+    state: Option<BlockStateId>,
+}
+
+impl LootLevel for FixedBlockLevel {
+    fn biome_at(&self, _pos: BlockPos) -> Option<BiomeRef> {
+        None
+    }
+
+    fn block_state_at(&self, pos: BlockPos) -> Option<BlockStateId> {
+        (pos == self.pos).then_some(self.state).flatten()
     }
 }
 
@@ -426,6 +454,113 @@ fn all_vanilla_chest_tables_have_a_supported_preflight() {
     assert!(map_tables > 0);
 }
 
+fn validate_generated_function_conditions(functions: &[ConditionalLootFunction]) -> LootResult<()> {
+    for function in functions {
+        super::requirements::validate_conditions(function.conditions)?;
+        match &function.function {
+            LootFunction::SetContents { entries, .. } => {
+                for entry in *entries {
+                    validate_generated_entry_conditions(entry)?;
+                }
+            }
+            LootFunction::ModifyContents { modifier, .. }
+            | LootFunction::Sequence {
+                functions: modifier,
+            } => validate_generated_function_conditions(modifier)?,
+            LootFunction::Filtered { modifier, .. } => {
+                validate_generated_function_conditions(std::slice::from_ref(*modifier))?;
+            }
+            LootFunction::SetCount { .. }
+            | LootFunction::ExplosionDecay
+            | LootFunction::ApplyBonus { .. }
+            | LootFunction::EnchantedCountIncrease { .. }
+            | LootFunction::LimitCount { .. }
+            | LootFunction::SetDamage { .. }
+            | LootFunction::EnchantRandomly { .. }
+            | LootFunction::EnchantWithLevels { .. }
+            | LootFunction::CopyComponents { .. }
+            | LootFunction::CopyState { .. }
+            | LootFunction::SetComponents { .. }
+            | LootFunction::SetCustomData { .. }
+            | LootFunction::FurnaceSmelt { .. }
+            | LootFunction::ExplorationMap { .. }
+            | LootFunction::SetName { .. }
+            | LootFunction::SetOminousBottleAmplifier { .. }
+            | LootFunction::SetPotion { .. }
+            | LootFunction::SetStewEffect { .. }
+            | LootFunction::SetInstrument { .. }
+            | LootFunction::SetEnchantments { .. }
+            | LootFunction::SetItem { .. }
+            | LootFunction::CopyName { .. }
+            | LootFunction::SetLore { .. }
+            | LootFunction::SetLootTable { .. }
+            | LootFunction::SetAttributes { .. }
+            | LootFunction::FillPlayerHead { .. }
+            | LootFunction::CopyCustomData { .. }
+            | LootFunction::SetBannerPattern { .. }
+            | LootFunction::SetFireworks { .. }
+            | LootFunction::SetFireworkExplosion { .. }
+            | LootFunction::SetBookCover { .. }
+            | LootFunction::SetWrittenBookPages { .. }
+            | LootFunction::SetWritableBookPages { .. }
+            | LootFunction::ToggleTooltips { .. }
+            | LootFunction::Discard
+            | LootFunction::Reference(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_generated_entry_conditions(entry: &LootEntry) -> LootResult<()> {
+    super::requirements::validate_conditions(entry.conditions())?;
+    validate_generated_function_conditions(entry.functions())?;
+    match entry {
+        LootEntry::InlineLootTable { pools, .. } => {
+            for pool in *pools {
+                validate_generated_pool_conditions(pool)?;
+            }
+        }
+        LootEntry::Alternatives { children, .. }
+        | LootEntry::Group { children, .. }
+        | LootEntry::Sequence { children, .. } => {
+            for child in *children {
+                validate_generated_entry_conditions(child)?;
+            }
+        }
+        LootEntry::Item { .. }
+        | LootEntry::LootTableRef { .. }
+        | LootEntry::Tag { .. }
+        | LootEntry::Empty { .. }
+        | LootEntry::Dynamic { .. }
+        | LootEntry::Slots { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_generated_pool_conditions(pool: &LootPool) -> LootResult<()> {
+    super::requirements::validate_conditions(pool.conditions)?;
+    validate_generated_function_conditions(pool.functions)?;
+    for entry in pool.entries {
+        validate_generated_entry_conditions(entry)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn all_generated_loot_conditions_have_supported_preflight() {
+    init_test_registries();
+
+    for (_, table) in REGISTRY.loot_tables.iter() {
+        validate_generated_function_conditions(table.functions)
+            .unwrap_or_else(|error| panic!("{} has unsupported conditions: {error}", table.key));
+        for pool in table.pools {
+            validate_generated_pool_conditions(pool).unwrap_or_else(|error| {
+                panic!("{} has unsupported conditions: {error}", table.key)
+            });
+        }
+    }
+}
+
 #[test]
 fn exploration_map_defaults_match_vanilla_structure_tag_and_radius() {
     init_test_registries();
@@ -477,6 +612,76 @@ fn abandoned_mineshaft_bounce_disc_requires_sulfur_caves() {
                 .expect("biome location condition should evaluate"),
             expected
         );
+    }
+}
+
+#[test]
+fn location_check_block_predicate_matches_loaded_offset_state() {
+    static BLOCKS: [&Block; 1] = [&vanilla_blocks::TALL_GRASS];
+    static UPPER_STATE: [StatePropertyMatcher; 1] = [StatePropertyMatcher::borrowed(
+        "half",
+        StatePropertyValueMatcher::borrowed_exact("upper"),
+    )];
+
+    init_test_registries();
+    let target_pos = BlockPos::new(4, 21, 8);
+    let upper = vanilla_blocks::TALL_GRASS.default_state().set_value(
+        &BlockStateProperties::DOUBLE_BLOCK_HALF,
+        DoubleBlockHalf::Upper,
+    );
+    let lower = vanilla_blocks::TALL_GRASS.default_state().set_value(
+        &BlockStateProperties::DOUBLE_BLOCK_HALF,
+        DoubleBlockHalf::Lower,
+    );
+
+    for blocks in [
+        RegistryHolderSet::borrowed_direct(&BLOCKS),
+        RegistryHolderSet::Tag(Identifier::vanilla_static("replaceable")),
+    ] {
+        let condition = LootCondition::LocationCheck {
+            offset_x: 0,
+            offset_y: 1,
+            offset_z: 0,
+            predicate: LocationPredicate {
+                biomes: None,
+                block: Some(BlockPredicate::new(
+                    Some(blocks),
+                    Some(StatePropertiesPredicate::borrowed(&UPPER_STATE)),
+                    None,
+                    DataComponentMatchers::ANY,
+                )),
+            },
+        };
+        for (state, expected) in [(Some(upper), true), (Some(lower), false), (None, false)] {
+            let level = FixedBlockLevel {
+                pos: target_pos,
+                state,
+            };
+            let mut random = test_rng();
+            let mut context = LootContext::new(&mut random)
+                .with_origin(4.5, 20.5, 8.5)
+                .with_level(&level);
+            assert_eq!(
+                condition
+                    .test(&mut context)
+                    .expect("block location condition should evaluate"),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_block_location_tables_have_supported_preflight() {
+    init_test_registries();
+
+    for table in [
+        &vanilla_loot_tables::BLOCKS_TALL_GRASS,
+        &vanilla_loot_tables::BLOCKS_LARGE_FERN,
+    ] {
+        table
+            .requirements()
+            .unwrap_or_else(|error| panic!("{} failed preflight: {error}", table.key));
     }
 }
 

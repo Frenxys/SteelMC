@@ -324,6 +324,10 @@ impl LootLevel for World {
     fn biome_at(&self, pos: BlockPos) -> Option<BiomeRef> {
         Self::biome_at(self, pos)
     }
+
+    fn block_state_at(&self, pos: BlockPos) -> Option<BlockStateId> {
+        self.get_loaded_block_state(pos)
+    }
 }
 
 impl World {

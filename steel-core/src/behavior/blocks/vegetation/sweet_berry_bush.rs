@@ -142,7 +142,9 @@ impl BlockBehavior for SweetBerryBushBlock {
         }
         let loot_table = &vanilla_loot_tables::HARVEST_SWEET_BERRY_BUSH;
         let items = world.with_loot_random(0, loot_table.random_sequence.as_ref(), |random| {
-            let mut ctx = LootContext::new(random).with_block_state(state);
+            let mut ctx = LootContext::new(random)
+                .with_level(world.as_ref())
+                .with_block_state(state);
             loot_table.get_random_items(&mut ctx)
         });
         let items = items.unwrap_or_else(|error| {

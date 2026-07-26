@@ -8,6 +8,7 @@ use steel_registry::{
         block_state_ext::BlockStateExt,
         properties::{BlockStateProperties, DoubleBlockHalf, EnumProperty, IntProperty},
     },
+    item_stack::ItemStack,
     vanilla_block_tags::BlockTag,
     vanilla_blocks,
 };
@@ -17,13 +18,15 @@ use crate::{
     behavior::{
         BlockBehavior, BlockPlaceContext,
         blocks::vegetation::{
-            Vegetation,
+            DoublePlantBlock, Vegetation,
             bonemealable::Bonemealable,
             crop_block::destroy_crop_on_ravager_contact,
             vegetation_block::{double_plant_can_survive, double_plant_update_shape},
         },
     },
+    block_entity::SharedBlockEntity,
     entity::{Entity, InsideBlockEffectCollector},
+    player::Player,
     world::{LevelReader, ScheduledTickAccess, World},
 };
 
@@ -158,6 +161,28 @@ impl PitcherCropBlock {
 }
 
 impl BlockBehavior for PitcherCropBlock {
+    fn player_will_destroy(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+    ) -> BlockStateId {
+        DoublePlantBlock::player_will_destroy_base(state, world, pos, player)
+    }
+
+    fn player_destroy(
+        &self,
+        _state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+        _block_entity: Option<SharedBlockEntity>,
+        destroyed_with: &ItemStack,
+    ) {
+        DoublePlantBlock::player_destroy_base(world, pos, player, destroyed_with);
+    }
+
     fn get_state_for_placement(&self, context: &BlockPlaceContext<'_>) -> Option<BlockStateId> {
         if self.may_place_on(
             context.world.get_block_state(context.place_pos().below()),

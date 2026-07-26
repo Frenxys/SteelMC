@@ -3,15 +3,23 @@ use std::sync::Arc;
 use steel_macros::block_behavior;
 use steel_registry::blocks::block_state_ext::BlockStateExt;
 use steel_registry::blocks::properties::{BlockStateProperties, Direction, DoubleBlockHalf};
+use steel_registry::item_stack::ItemStack;
 use steel_registry::vanilla_blocks;
-use steel_utils::{BlockPos, BlockStateId, axis::Axis, types::UpdateFlags};
+use steel_utils::{
+    BlockPos, BlockStateId,
+    axis::Axis,
+    types::{InteractionHand, UpdateFlags},
+};
 
 use crate::behavior::block::BlockBehavior;
 use crate::behavior::blocks::vegetation::Vegetation;
 use crate::behavior::blocks::vegetation::default_surviving_state;
 use crate::behavior::blocks::vegetation::vegetation_block::double_plant_can_survive;
 use crate::behavior::context::{BlockPlaceContext, PlacementSource};
-use crate::fluid::{FluidStateExt as _, get_fluid_state};
+use crate::block_entity::SharedBlockEntity;
+use crate::entity::Entity;
+use crate::fluid::{FluidStateExt as _, fluid_state_to_block, get_fluid_state};
+use crate::player::Player;
 use crate::world::{LevelReader, ScheduledTickAccess, World};
 
 use super::BlockRef;
@@ -45,6 +53,68 @@ impl DoublePlantBlock {
         } else {
             state
         }
+    }
+
+    pub(in crate::behavior::blocks) fn prevent_drop_from_bottom_part(
+        world: &Arc<World>,
+        pos: BlockPos,
+        state: BlockStateId,
+        player: &Player,
+    ) {
+        if state.get_value(&BlockStateProperties::DOUBLE_BLOCK_HALF) != DoubleBlockHalf::Upper {
+            return;
+        }
+
+        let bottom_pos = pos.below();
+        let bottom_state = world.get_block_state(bottom_pos);
+        if bottom_state.get_block() != state.get_block()
+            || bottom_state.get_value(&BlockStateProperties::DOUBLE_BLOCK_HALF)
+                != DoubleBlockHalf::Lower
+        {
+            return;
+        }
+
+        let replacement = fluid_state_to_block(bottom_state.get_fluid_state());
+        world.set_block(
+            bottom_pos,
+            replacement,
+            UpdateFlags::UPDATE_ALL | UpdateFlags::UPDATE_SUPPRESS_DROPS,
+        );
+        world.destroy_block_effect(bottom_pos, u32::from(bottom_state.0), Some(player.id()));
+    }
+
+    pub(in crate::behavior::blocks) fn player_will_destroy_base(
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+    ) -> BlockStateId {
+        if player.has_infinite_materials() {
+            Self::prevent_drop_from_bottom_part(world, pos, state, player);
+        } else {
+            let destroyed_with = {
+                let inventory = player.inventory.lock();
+                let main_hand = inventory.get_item_in_hand(InteractionHand::MainHand);
+                main_hand.copy_with_count(main_hand.count)
+            };
+            world.drop_resources_for_player(state, pos, player, None, &destroyed_with);
+        }
+        state
+    }
+
+    pub(in crate::behavior::blocks) fn player_destroy_base(
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+        destroyed_with: &ItemStack,
+    ) {
+        world.drop_resources_for_player(
+            vanilla_blocks::AIR.default_state(),
+            pos,
+            player,
+            None,
+            destroyed_with,
+        );
     }
 
     /// Runs Vanilla `DoublePlantBlock.updateShape` while preserving virtual
@@ -83,6 +153,28 @@ impl DoublePlantBlock {
 impl Vegetation for DoublePlantBlock {}
 
 impl BlockBehavior for DoublePlantBlock {
+    fn player_will_destroy(
+        &self,
+        state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+    ) -> BlockStateId {
+        Self::player_will_destroy_base(state, world, pos, player)
+    }
+
+    fn player_destroy(
+        &self,
+        _state: BlockStateId,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+        _block_entity: Option<SharedBlockEntity>,
+        destroyed_with: &ItemStack,
+    ) {
+        Self::player_destroy_base(world, pos, player, destroyed_with);
+    }
+
     fn update_shape(
         &self,
         state: BlockStateId,

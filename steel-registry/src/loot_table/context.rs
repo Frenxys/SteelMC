@@ -9,6 +9,9 @@ use steel_utils::BlockPos;
 pub trait LootLevel: Sync {
     /// Returns the biome at a loaded block position, or `None` when it is unavailable.
     fn biome_at(&self, pos: BlockPos) -> Option<BiomeRef>;
+
+    /// Returns the state at a loaded block position, or `None` when it is unavailable.
+    fn block_state_at(&self, pos: BlockPos) -> Option<BlockStateId>;
 }
 
 /// Resolves the world-dependent result of an exploration-map loot function.

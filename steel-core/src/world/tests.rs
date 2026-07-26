@@ -4,6 +4,7 @@ use std::{
     thread,
 };
 
+use steel_registry::blocks::properties::DoubleBlockHalf;
 use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::{
     sound_events, test_support::init_test_registry, vanilla_entities, vanilla_fluids, vanilla_items,
@@ -12,6 +13,7 @@ use steel_utils::random::{Random, legacy_random::LegacyRandom, xoroshiro::Xorosh
 use uuid::Uuid;
 
 use crate::behavior::init_behaviors;
+use crate::chunk::chunk_holder::TickingReadiness;
 use crate::chunk::chunk_ticket_manager::{ChunkTicket, ChunkTicketLevel};
 use crate::entity::{EntityBase, entities::PigEntity};
 use crate::test_support::{fresh_test_world, insert_ready_full_chunk, test_world};
@@ -178,6 +180,57 @@ fn entity_breaker_is_available_to_chorus_flower_loot() {
     assert!(
         BlockLootContext::new(&world, pos)
             .get_drops(state)
+            .is_empty()
+    );
+}
+
+#[test]
+fn block_loot_location_predicate_reads_full_chunk_before_ticking_readiness() {
+    init_test_registry();
+    init_behaviors();
+
+    let world = fresh_test_world("block_loot_location_predicate");
+    let lower_pos = BlockPos::new(8, 64, 8);
+    let upper_pos = lower_pos.above();
+    let chunk_pos = ChunkPos::from_block_pos(lower_pos);
+    let holder = insert_ready_full_chunk(&world, chunk_pos);
+    assert_eq!(
+        holder.transition_ticking_readiness(TickingReadiness::Unready),
+        Some(TickingReadiness::BlockTicking)
+    );
+    assert!(
+        !world
+            .chunk_map
+            .is_block_ticking_full_chunk_loaded(chunk_pos)
+    );
+    let lower = vanilla_blocks::TALL_GRASS.default_state().set_value(
+        &BlockStateProperties::DOUBLE_BLOCK_HALF,
+        DoubleBlockHalf::Lower,
+    );
+    let upper = vanilla_blocks::TALL_GRASS.default_state().set_value(
+        &BlockStateProperties::DOUBLE_BLOCK_HALF,
+        DoubleBlockHalf::Upper,
+    );
+    let placement_flags = UpdateFlags::UPDATE_NONE | UpdateFlags::UPDATE_KNOWN_SHAPE;
+    assert!(world.set_block(lower_pos, lower, placement_flags));
+    assert!(world.set_block(upper_pos, upper, placement_flags));
+
+    let shears = ItemStack::new(&vanilla_items::SHEARS);
+    for (state, pos) in [(lower, lower_pos), (upper, upper_pos)] {
+        let drops = BlockLootContext::new(&world, pos)
+            .with_tool(&shears)
+            .get_drops(state);
+        assert_eq!(drops.len(), 1);
+        assert!(drops[0].is(&vanilla_items::SHORT_GRASS));
+        assert_eq!(drops[0].count(), 2);
+    }
+
+    let orphan_pos = BlockPos::new(10, 64, 8);
+    assert!(world.set_block(orphan_pos, lower, placement_flags));
+    assert!(
+        BlockLootContext::new(&world, orphan_pos)
+            .with_tool(&shears)
+            .get_drops(lower)
             .is_empty()
     );
 }

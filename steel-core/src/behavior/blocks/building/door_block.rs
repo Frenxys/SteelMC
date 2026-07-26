@@ -25,13 +25,13 @@ use steel_utils::{
 
 use super::weathering_block::{WeatherState, WeatheringCopper};
 use crate::{
+    behavior::blocks::vegetation::DoublePlantBlock,
     behavior::{
         BlockBehavior, BlockHitResult, BlockPlaceContext, InteractionResult, InventoryAccess,
         PlacementSource,
     },
     entity::Entity,
     entity::ai::path::PathComputationType,
-    fluid::fluid_state_to_block,
     player::Player,
     world::{
         Explosion, LevelReader, ScheduledTickAccess, SignalGetter as _, World,
@@ -147,34 +147,6 @@ impl DoorBlock {
         let main_hand = inv.get_item_in_hand(InteractionHand::MainHand);
         main_hand.is_correct_tool_for_drops(state)
             || !state.get_block().config.requires_correct_tool_for_drops
-    }
-
-    fn prevent_drop_from_bottom_part(
-        world: &Arc<World>,
-        pos: BlockPos,
-        state: BlockStateId,
-        player: &Player,
-    ) {
-        if state.get_value(&BlockStateProperties::DOUBLE_BLOCK_HALF) != DoubleBlockHalf::Upper {
-            return;
-        }
-
-        let bottom_pos = pos.below();
-        let bottom_state = world.get_block_state(bottom_pos);
-        if bottom_state.get_block() != state.get_block()
-            || bottom_state.get_value(&BlockStateProperties::DOUBLE_BLOCK_HALF)
-                != DoubleBlockHalf::Lower
-        {
-            return;
-        }
-
-        let replacement = fluid_state_to_block(bottom_state.get_fluid_state());
-        world.set_block(
-            bottom_pos,
-            replacement,
-            UpdateFlags::UPDATE_ALL | UpdateFlags::UPDATE_SUPPRESS_DROPS,
-        );
-        world.destroy_block_effect(bottom_pos, u32::from(bottom_state.0), Some(player.id()));
     }
 
     fn play_sound(&self, world: &Arc<World>, pos: BlockPos, open: bool, exclude: Option<i32>) {
@@ -325,7 +297,7 @@ impl BlockBehavior for DoorBlock {
         player: &Player,
     ) -> BlockStateId {
         if player.has_infinite_materials() || !Self::has_correct_tool_for_drops(player, state) {
-            Self::prevent_drop_from_bottom_part(world, pos, state, player);
+            DoublePlantBlock::prevent_drop_from_bottom_part(world, pos, state, player);
         }
         state
     }

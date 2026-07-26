@@ -58,10 +58,10 @@ enum EnchantmentOptionsJson {
     List(Vec<String>),
 }
 
-/// A biome holder set encoded as either one ID/tag or a direct list.
+/// A registry holder set encoded as either one ID/tag or a direct list.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
-enum BiomeOptionsJson {
+enum HolderSetJson {
     Single(String),
     List(Vec<String>),
 }
@@ -272,7 +272,7 @@ const fn default_true() -> bool {
 #[serde(deny_unknown_fields)]
 struct LocationPredicateJson {
     #[serde(default)]
-    biomes: Option<BiomeOptionsJson>,
+    biomes: Option<HolderSetJson>,
     #[serde(default)]
     block: Option<BlockPredicateJson>,
 }
@@ -281,9 +281,25 @@ struct LocationPredicateJson {
 #[serde(deny_unknown_fields)]
 struct BlockPredicateJson {
     #[serde(default)]
-    blocks: Option<String>,
+    blocks: Option<HolderSetJson>,
     #[serde(default)]
-    state: Option<FxHashMap<String, String>>,
+    state: Option<FxHashMap<String, StatePropertyValueMatcherJson>>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum StatePropertyValueMatcherJson {
+    Exact(String),
+    Range(StatePropertyRangeJson),
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+struct StatePropertyRangeJson {
+    #[serde(default)]
+    min: Option<String>,
+    #[serde(default)]
+    max: Option<String>,
 }
 
 /// Entity predicate - can have many fields
@@ -552,13 +568,19 @@ pub(crate) fn build() -> TokenStream {
     // Imports
     stream.extend(quote! {
         use crate::loot_table::{
-            BiomeOptions, BlockPredicate, BonusFormula, ConditionalLootFunction, CopySource, DamageSourcePredicate,
+            BiomeOptions, BonusFormula, ConditionalLootFunction, CopySource, DamageSourcePredicate,
             DamageTagPredicate, DyeColor, EnchantedChance, EnchantmentOptions, EntityEquipment,
             EntityFlags, EntityPredicate, EquipmentSlotGroup, InstrumentOptions, LocationPredicate,
             LootCondition, LootContextEntity, LootEntry, LootFunction, LootPool, LootTable,
             LootTableRef, LootTableRegistry, LootText, LootType, NameTarget, NumberProvider,
             PropertyCheck, StewEffect, ToolPredicate,
         };
+        use crate::data_component_predicate::DataComponentMatchers;
+        use crate::item_predicate::{
+            BlockPredicate, StatePropertiesPredicate, StatePropertyMatcher,
+            StatePropertyValueMatcher,
+        };
+        use crate::{RegistryHolderSet, vanilla_blocks};
         use steel_utils::Identifier;
     });
 
