@@ -44,7 +44,10 @@ pub use profile::{
     is_valid_player_name, offline_uuid,
 };
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
-use std::sync::{Arc, Weak};
+use std::{
+    ptr,
+    sync::{Arc, Weak},
+};
 use steel_protocol::packets::game::{
     AttributeSnapshot, CEntityEvent, CPlayerCombatKill, CPlayerLookAt, CRespawn,
     CSetDefaultSpawnPosition, CSetHealth, CSetHeldSlot, CSetPassengers, ClientCommandAction,
@@ -129,6 +132,12 @@ use crate::inventory::container::Container;
 
 const RESPAWN_SEARCH_READY_CANDIDATE_BUDGET: usize = 8;
 
+#[derive(Default)]
+struct DeferredContainerOpenState {
+    next_token: u64,
+    active_token: Option<u64>,
+}
+
 use crate::chunk::player_chunk_view::PlayerChunkView;
 use crate::player::chunk_sender::ChunkSender;
 use crate::portal::{
@@ -198,6 +207,9 @@ pub struct Player {
 
     /// Counter for generating container IDs (1-100, wraps around).
     container_counter: SyncMutex<ContainerCounter>,
+
+    /// Latest menu-open request waiting on deferred container preparation.
+    deferred_container_open: SyncMutex<DeferredContainerOpenState>,
 
     /// Pending server-initiated teleport state (ID, position, timeout).
     teleport_state: SyncMutex<TeleportState>,
@@ -281,6 +293,45 @@ impl Player {
         self.game_modes.lock().current()
     }
 
+    /// Resolves this player to the shared instance currently registered in `world`.
+    pub(crate) fn shared_in_world(&self, world: &World) -> Option<Arc<Self>> {
+        world
+            .players
+            .get_by_uuid(&self.gameprofile.id)
+            .filter(|shared| ptr::eq(shared.as_ref(), self))
+    }
+
+    /// Replaces any older deferred container-open request and returns its token.
+    pub(crate) fn begin_deferred_container_open(&self) -> u64 {
+        let mut state = self.deferred_container_open.lock();
+        state.next_token = state.next_token.wrapping_add(1);
+        if state.next_token == 0 {
+            state.next_token = 1;
+        }
+        state.active_token = Some(state.next_token);
+        state.next_token
+    }
+
+    /// Returns whether `token` still owns the player's deferred open request.
+    pub(crate) fn has_deferred_container_open(&self, token: u64) -> bool {
+        self.deferred_container_open.lock().active_token == Some(token)
+    }
+
+    /// Completes `token` if it is still the latest deferred open request.
+    pub(crate) fn finish_deferred_container_open(&self, token: u64) -> bool {
+        let mut state = self.deferred_container_open.lock();
+        if state.active_token != Some(token) {
+            return false;
+        }
+        state.active_token = None;
+        true
+    }
+
+    /// Invalidates any deferred container-open request.
+    pub(crate) fn cancel_deferred_container_open(&self) {
+        self.deferred_container_open.lock().active_token = None;
+    }
+
     /// Returns the player's previous game mode.
     #[must_use]
     pub fn previous_game_mode(&self) -> Option<GameType> {
@@ -355,6 +406,7 @@ impl Player {
             inventory_menu: SyncMutex::new(inventory_menu(inventory)),
             open_menu: SyncMutex::new(player_inventory::OpenMenuState::new()),
             container_counter: SyncMutex::new(ContainerCounter::new()),
+            deferred_container_open: SyncMutex::new(DeferredContainerOpenState::default()),
             teleport_state: SyncMutex::new(TeleportState::new()),
             item_cooldowns: SyncMutex::new(ItemCooldowns::default()),
             tick_state: SyncMutex::new(PlayerTickState::new()),
@@ -454,6 +506,7 @@ impl Player {
         self.tick_open_menu();
         self.flush_inventory_resync();
         self.broadcast_inventory_changes();
+        self.synchronize_carried_maps();
         self.update_pose();
 
         {

@@ -1,8 +1,8 @@
 use super::{
-    BlockPredicateJson, DamageSourcePredicateJson, EnchantmentOptionsJson, EntityEquipmentJson,
-    EntityFlagsJson, EntityPredicateJson, EquipmentSlotJson, FromStr, Ident, Identifier,
-    LocationPredicateJson, NumberProviderJson, PredicateJson, Span, ToShoutySnakeCase, TokenStream,
-    quote,
+    BiomeOptionsJson, BlockPredicateJson, DamageSourcePredicateJson, EnchantmentOptionsJson,
+    EntityEquipmentJson, EntityFlagsJson, EntityPredicateJson, EquipmentSlotJson, FromStr, Ident,
+    Identifier, LocationPredicateJson, NumberProviderJson, PredicateJson, Span, ToShoutySnakeCase,
+    TokenStream, quote,
 };
 
 pub(super) fn generate_number_provider(value: &NumberProviderJson) -> TokenStream {
@@ -171,11 +171,17 @@ pub(super) fn generate_enchantment_options(
     options: &Option<EnchantmentOptionsJson>,
 ) -> TokenStream {
     match options {
-        Some(EnchantmentOptionsJson::Tag(s)) => {
+        Some(EnchantmentOptionsJson::Tag(s)) if s.starts_with('#') => {
             let tag = s
                 .strip_prefix("#minecraft:")
                 .unwrap_or(s.strip_prefix("minecraft:").unwrap_or(s));
             quote! { EnchantmentOptions::Tag(Identifier::vanilla_static(#tag)) }
+        }
+        Some(EnchantmentOptionsJson::Tag(s)) => {
+            let enchantment = s.strip_prefix("minecraft:").unwrap_or(s);
+            quote! {
+                EnchantmentOptions::List(&[Identifier::vanilla_static(#enchantment)])
+            }
         }
         Some(EnchantmentOptionsJson::List(arr)) => {
             let enchants: Vec<TokenStream> = arr
@@ -435,6 +441,26 @@ pub(super) fn generate_block_predicate(predicate: &BlockPredicateJson) -> TokenS
 }
 
 pub(super) fn generate_location_predicate(predicate: &LocationPredicateJson) -> TokenStream {
+    let biomes = predicate.biomes.as_ref().map_or_else(
+        || quote! { None },
+        |biomes| {
+            let values = match biomes {
+                BiomeOptionsJson::Single(value) => std::slice::from_ref(value),
+                BiomeOptionsJson::List(values) => values.as_slice(),
+            };
+            if values.len() == 1 && values[0].starts_with('#') {
+                let tag = values[0].trim_start_matches('#');
+                let tag = tag.strip_prefix("minecraft:").unwrap_or(tag);
+                quote! { Some(BiomeOptions::Tag(Identifier::vanilla_static(#tag))) }
+            } else {
+                let values = values.iter().map(|value| {
+                    let value = value.strip_prefix("minecraft:").unwrap_or(value);
+                    quote! { Identifier::vanilla_static(#value) }
+                });
+                quote! { Some(BiomeOptions::List(&[#(#values),*])) }
+            }
+        },
+    );
     let block = if let Some(b) = &predicate.block {
         let block_pred = generate_block_predicate(b);
         quote! { Some(#block_pred) }
@@ -444,6 +470,7 @@ pub(super) fn generate_location_predicate(predicate: &LocationPredicateJson) -> 
 
     quote! {
         LocationPredicate {
+            biomes: #biomes,
             block: #block,
         }
     }

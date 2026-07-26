@@ -26,6 +26,7 @@ use crate::{
         },
         slots::CraftingHandler,
     },
+    map::CarriedMap,
     player::{Player, connection::NetworkConnection as _},
     world::World,
 };
@@ -449,6 +450,7 @@ impl Player {
         title: impl Into<TextComponent>,
         create: impl FnOnce(u8, &Arc<World>) -> Menu,
     ) {
+        self.cancel_deferred_container_open();
         if !self.begin_menu_open_operation() {
             return;
         }
@@ -794,6 +796,24 @@ impl Player {
                 .lock()
                 .behavior_mut()
                 .broadcast_changes(&self.connection);
+        }
+    }
+
+    /// Synchronizes Vanilla filled-map colors and decorations for carried maps.
+    pub(in crate::player) fn synchronize_carried_maps(&self) {
+        let carried = self
+            .inventory
+            .lock()
+            .items()
+            .iter()
+            .filter_map(CarriedMap::from_item)
+            .collect::<Vec<_>>();
+        let world = self.get_world();
+        let Some(player) = self.shared_in_world(&world) else {
+            return;
+        };
+        for packet in world.map_data().synchronize_player(&player, &carried) {
+            self.send_packet(packet);
         }
     }
 

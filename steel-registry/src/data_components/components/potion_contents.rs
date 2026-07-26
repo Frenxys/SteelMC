@@ -70,6 +70,14 @@ impl PotionContents {
         self.custom_name.as_deref()
     }
 
+    /// Vanilla `PotionContents::withPotion`.
+    #[must_use]
+    pub fn with_potion(&self, potion: RegistryReference<Potion>) -> Self {
+        let mut contents = self.clone();
+        contents.potion = Some(potion);
+        contents
+    }
+
     fn to_nbt_tag_ref(&self) -> NbtTag {
         let mut compound = NbtCompound::new();
         if let Some(potion) = self.potion {

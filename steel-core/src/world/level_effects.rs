@@ -350,23 +350,31 @@ impl World {
             return Vec::new();
         };
 
-        let mut rng = rand::rng();
-        let mut ctx = LootContext::new(&mut rng)
-            .with_luck(context.luck())
-            .with_block_state(state)
-            .with_origin(
-                f64::from(context.pos().x()),
-                f64::from(context.pos().y()),
-                f64::from(context.pos().z()),
-            );
-        if let Some(tool) = context.tool() {
-            ctx = ctx.with_tool(tool);
-        }
-        if let Some(entity) = context.entity() {
-            ctx = ctx.with_this_entity(entity_loot_ref(entity));
-        }
+        let result =
+            context
+                .world()
+                .with_loot_random(0, loot_table.random_sequence.as_ref(), |random| {
+                    let mut ctx = LootContext::new(random)
+                        .with_luck(context.luck())
+                        .with_block_state(state)
+                        .with_origin(
+                            f64::from(context.pos().x()),
+                            f64::from(context.pos().y()),
+                            f64::from(context.pos().z()),
+                        );
+                    if let Some(tool) = context.tool() {
+                        ctx = ctx.with_tool(tool);
+                    }
+                    if let Some(entity) = context.entity() {
+                        ctx = ctx.with_this_entity(entity_loot_ref(entity));
+                    }
 
-        loot_table.get_random_items(&mut ctx)
+                    loot_table.get_random_items(&mut ctx)
+                });
+        result.unwrap_or_else(|error| {
+            log::error!("Failed to evaluate block loot table {loot_key}: {error}");
+            Vec::new()
+        })
     }
 
     /// Plays a sound at a specific position, broadcasting to nearby players.

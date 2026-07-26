@@ -277,11 +277,13 @@ mod tests {
         let domains = [
             ResolvedDomainConfig {
                 name: "alpha".to_owned(),
+                seed: 1,
                 default_world: alpha_source.key.clone(),
                 worlds: vec![alpha_source.key.clone(), alpha_target.key.clone()],
             },
             ResolvedDomainConfig {
                 name: "beta".to_owned(),
+                seed: 2,
                 default_world: beta_target.key.clone(),
                 worlds: vec![beta_target.key.clone()],
             },

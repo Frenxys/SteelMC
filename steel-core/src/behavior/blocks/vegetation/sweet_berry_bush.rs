@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use glam::DVec3;
-use rand::RngExt;
 use steel_macros::block_behavior;
 use steel_registry::{
     blocks::{BlockRef, block_state_ext::BlockStateExt, properties::BlockStateProperties},
@@ -13,6 +12,7 @@ use steel_registry::{
 };
 use steel_utils::{
     BlockPos, BlockStateId,
+    random::Random as _,
     types::{InteractionHand, UpdateFlags},
 };
 
@@ -140,19 +140,25 @@ impl BlockBehavior for SweetBerryBushBlock {
         if age <= 1 {
             return InteractionResult::Pass;
         }
-        let mut rng = rand::rng();
-        let mut ctx = LootContext::new(&mut rng).with_block_state(state);
-
-        let items = vanilla_loot_tables::HARVEST_SWEET_BERRY_BUSH.get_random_items(&mut ctx);
+        let loot_table = &vanilla_loot_tables::HARVEST_SWEET_BERRY_BUSH;
+        let items = world.with_loot_random(0, loot_table.random_sequence.as_ref(), |random| {
+            let mut ctx = LootContext::new(random).with_block_state(state);
+            loot_table.get_random_items(&mut ctx)
+        });
+        let items = items.unwrap_or_else(|error| {
+            log::error!("Failed to evaluate sweet berry harvest loot: {error}");
+            Vec::new()
+        });
         for item in items {
             world.drop_item_stack(pos, item);
         }
 
+        let pitch = world.with_loot_random(0, None, |random| 0.8 + random.next_f32() * 0.4);
         world.play_block_sound(
             &sound_events::BLOCK_SWEET_BERRY_BUSH_PICK_BERRIES,
             pos,
             1.0,
-            0.8 + rng.random::<f32>() * 0.4,
+            pitch,
             Some(player.id()),
         );
 

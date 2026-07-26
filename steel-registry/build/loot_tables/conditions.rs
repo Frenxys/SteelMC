@@ -219,6 +219,7 @@ pub(super) fn generate_condition(condition: &LootConditionJson) -> TokenStream {
                 } else {
                     quote! {
                         LocationPredicate {
+                            biomes: None,
                             block: None,
                         }
                     }
@@ -226,6 +227,7 @@ pub(super) fn generate_condition(condition: &LootConditionJson) -> TokenStream {
             } else {
                 quote! {
                     LocationPredicate {
+                        biomes: None,
                         block: None,
                     }
                 }

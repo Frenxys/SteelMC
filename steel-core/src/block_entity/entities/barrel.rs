@@ -14,7 +14,7 @@ use steel_registry::{sound_events, vanilla_block_entity_types};
 use steel_utils::types::UpdateFlags;
 use steel_utils::{
     BlockPos, BlockStateId, DowncastType, DowncastTypeKey, locks::SyncMutex,
-    translations::CONTAINER_BARREL,
+    translations::CONTAINER_BARREL, types::GameType,
 };
 use text_components::TextComponent;
 
@@ -23,6 +23,7 @@ use crate::block_entity::{
     BlockEntity, BlockEntityBase, ContainerOpeners, ContainerOpenersCounter,
 };
 use crate::inventory::lock::{ContainerId, ContainerRef, SharedContainer};
+use crate::player::Player;
 use crate::world::World;
 
 /// Number of slots in a barrel (3 rows of 9).
@@ -71,21 +72,14 @@ impl BarrelBlockEntity {
             .display_name(TextComponent::translated(CONTAINER_BARREL.msg()))
     }
 
-    /// Returns whether opening can proceed without an unavailable foundation.
+    /// Returns whether opening is permitted by the implemented lock validation.
     #[must_use]
-    pub fn menu_is_ready(&self) -> bool {
+    pub fn menu_is_ready(&self, player: &Player) -> bool {
         let container = self.container.lock();
-        // TODO: Use a shared `ItemPredicate` matcher, spectator bypass, and
-        // Vanilla's locked-container feedback once open validation supports them.
-        // TODO: Unpack the loot table on first access once deterministic
-        // `LootTable.fill` and zero-seed random sequences are implemented.
-        !container.has_lock() && !container.has_pending_loot()
-    }
-
-    /// Returns whether this barrel still needs deterministic loot generation.
-    #[must_use]
-    pub fn has_pending_loot(&self) -> bool {
-        self.container.lock().has_pending_loot()
+        let spectator = player.game_mode() == GameType::Spectator;
+        // TODO: Use a shared `ItemPredicate` matcher and send Vanilla's
+        // locked-container feedback once open validation supports them.
+        (!container.has_lock() || spectator) && (!container.has_pending_loot() || !spectator)
     }
 
     fn play_sound(&self, world: &World, state: BlockStateId, opening: bool) {
@@ -125,15 +119,10 @@ impl BlockEntity for BarrelBlockEntity {
     }
 
     fn pre_remove_side_effects(&self, pos: BlockPos, _state: BlockStateId) {
+        self.container_ref.prepare_access(None);
         let items = {
             let mut container = self.container.lock();
-            if container.has_pending_loot() {
-                // TODO: Vanilla unpacks pending container loot before dropping
-                // contents. This awaits deterministic `LootTable.fill`.
-                Vec::new()
-            } else {
-                container.take_items()
-            }
+            container.remove_and_take_ready_items()
         };
         let Some(world) = self.get_level() else {
             return;

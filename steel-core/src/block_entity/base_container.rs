@@ -36,20 +36,25 @@ impl BaseContainer {
     }
 
     pub(crate) fn load_items(&mut self, nbt: &NbtCompoundView<'_, '_>) {
-        self.clear_items();
+        self.items = Self::items_from_nbt(nbt, self.items.len());
+    }
+
+    pub(crate) fn items_from_nbt(nbt: &NbtCompoundView<'_, '_>, size: usize) -> Vec<ItemStack> {
+        let mut result = vec![ItemStack::empty(); size];
         let Some(items) = nbt.list("Items").and_then(|items| items.compounds()) else {
-            return;
+            return result;
         };
         for compound in items {
             let Some(slot) = compound.byte("Slot").map(|slot| slot as u8 as usize) else {
                 continue;
             };
-            if slot < self.items.len()
+            if slot < result.len()
                 && let Some(item) = ItemStack::from_borrowed_compound(&compound)
             {
-                self.items[slot] = item;
+                result[slot] = item;
             }
         }
+        result
     }
 
     pub(crate) fn save_metadata(&self, nbt: &mut NbtCompound) {
@@ -62,8 +67,12 @@ impl BaseContainer {
     }
 
     pub(crate) fn save_items(&self, nbt: &mut NbtCompound) {
+        Self::save_item_slice(nbt, &self.items);
+    }
+
+    pub(crate) fn save_item_slice(nbt: &mut NbtCompound, item_slice: &[ItemStack]) {
         let mut items = Vec::new();
-        for (slot, item) in self.items.iter().enumerate() {
+        for (slot, item) in item_slice.iter().enumerate() {
             if item.is_empty() {
                 continue;
             }
@@ -74,6 +83,14 @@ impl BaseContainer {
             items.push(item_nbt);
         }
         nbt.insert("Items", NbtList::Compound(items));
+    }
+
+    pub(crate) fn replace_items(&mut self, items: Vec<ItemStack>) -> Result<(), Vec<ItemStack>> {
+        if items.len() != self.items.len() {
+            return Err(items);
+        }
+        self.items = items;
+        Ok(())
     }
 
     #[must_use]

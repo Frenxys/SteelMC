@@ -2,6 +2,7 @@
 #![feature(thread_id_value)]
 
 use std::backtrace::{Backtrace, BacktraceStatus};
+use std::collections::BTreeSet;
 use std::num::NonZero;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
@@ -432,16 +433,75 @@ async fn shutdown_worlds(server: &Arc<Server>) {
         Err(error) => log::error!("Failed to save domain command storage: {error}"),
     }
     let mut total_saved = 0;
+    let mut domains_with_map_save_failures = BTreeSet::new();
+    let mut domains_with_chunk_save_failures = BTreeSet::new();
+    let mut domains = server.worlds.domain_names().collect::<Vec<_>>();
+    domains.sort_unstable();
+    for domain in &domains {
+        match server.save_map_data(domain).await {
+            Ok(true) => log::info!("Saved map data for domain {domain}"),
+            Ok(false) => {}
+            Err(error) => {
+                domains_with_map_save_failures.insert((*domain).to_owned());
+                log::error!("Failed to save map data for domain {domain}: {error}");
+            }
+        }
+    }
     for world in server.worlds.values() {
-        world.cleanup(&mut total_saved).await;
+        if domains_with_map_save_failures.contains(world.domain()) {
+            log::warn!(
+                "Skipping shutdown saves for world {} after its domain map-data save failed",
+                world.key
+            );
+            if let Err(error) = world.close_chunk_storage_without_saving().await {
+                log::error!(
+                    "Failed to close chunk storage for world {} after skipping its save: {error}",
+                    world.key
+                );
+            }
+            continue;
+        }
+        let outcome = world.cleanup().await;
+        total_saved += outcome.saved;
+        if outcome.failures > 0 {
+            domains_with_chunk_save_failures.insert(world.domain().to_owned());
+            log::error!(
+                "World {} had {} shutdown chunk-save failures",
+                world.key,
+                outcome.failures
+            );
+        }
     }
     log::info!("Saved {total_saved} chunks");
+    for domain in domains {
+        if domains_with_map_save_failures.contains(domain)
+            || domains_with_chunk_save_failures.contains(domain)
+        {
+            log::warn!(
+                "Skipping random-sequence save for domain {domain} after an earlier save failure"
+            );
+            continue;
+        }
+        match server.save_random_sequences(domain).await {
+            Ok(true) => log::info!("Saved random sequences for domain {domain}"),
+            Ok(false) => {}
+            Err(error) => {
+                log::error!("Failed to save random sequences for domain {domain}: {error}");
+            }
+        }
+    }
 
     // Save all player data before shutdown
     log::info!("Saving player data...");
     let mut saved = 0;
     for (player, domain, data) in players_to_save {
         let uuid = player.gameprofile.id;
+        if domains_with_map_save_failures.contains(domain.as_str()) {
+            log::warn!(
+                "Skipping player {uuid} data save for domain {domain} after its map-data save failed"
+            );
+            continue;
+        }
         match server
             .player_data_storage
             .save_domain_data(&domain, uuid, &data)

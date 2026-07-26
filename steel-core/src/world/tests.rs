@@ -8,6 +8,7 @@ use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::{
     sound_events, test_support::init_test_registry, vanilla_entities, vanilla_fluids, vanilla_items,
 };
+use steel_utils::random::{Random, legacy_random::LegacyRandom, xoroshiro::Xoroshiro};
 use uuid::Uuid;
 
 use crate::behavior::init_behaviors;
@@ -18,6 +19,23 @@ use crate::test_support::{fresh_test_world, insert_ready_full_chunk, test_world}
 const FIRST_HALF: BlockLocalAabb = BlockLocalAabb::new(0.0, 0.0, 0.0, 0.5, 1.0, 1.0);
 const SECOND_HALF: BlockLocalAabb = BlockLocalAabb::new(0.5, 0.0, 0.0, 1.0, 1.0, 1.0);
 static SPLIT_BLOCK: &[BlockLocalAabb] = &[FIRST_HALF, SECOND_HALF];
+
+#[test]
+fn loot_random_uses_explicit_seed_before_named_sequence() {
+    let world = fresh_test_world("loot_random_precedence");
+    let sequence = Identifier::vanilla_static("chests/simple_dungeon");
+
+    let explicit = world.with_loot_random(12_345, Some(&sequence), Random::next_i64);
+    let mut expected_explicit = LegacyRandom::from_seed(12_345);
+    assert_eq!(explicit, expected_explicit.next_i64());
+
+    let first_named = world.with_loot_random(0, Some(&sequence), Random::next_i64);
+    let second_named = world.with_loot_random(0, Some(&sequence), Random::next_i64);
+    let mut expected_named =
+        Xoroshiro::from_seed_with_key(world.seed() as u64, &sequence.to_string());
+    assert_eq!(first_named, expected_named.next_i64());
+    assert_eq!(second_named, expected_named.next_i64());
+}
 
 fn advance_scheduling_until(world: &Arc<World>, mut ready: impl FnMut() -> bool) {
     for _ in 0..10_000 {

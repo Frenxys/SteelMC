@@ -21,10 +21,13 @@ use crate::behavior::context::{
 use crate::block_entity::entities::{CHEST_SLOTS, ChestBlockEntity};
 use crate::block_entity::{BLOCK_ENTITIES, SharedBlockEntity};
 use crate::entity::ai::path::PathComputationType;
-use crate::inventory::container::calculate_redstone_signal_from_containers;
-use crate::inventory::lock::{ContainerLockGuard, ContainerRef};
+use crate::inventory::container::{
+    ContainerAccessResult, ContainerReadiness, calculate_redstone_signal_from_containers,
+};
+use crate::inventory::lock::{ContainerId, ContainerLockGuard, ContainerRef};
 use crate::inventory::menu::kinds::chest_with_openers;
 use crate::player::Player;
+use crate::server::jobs::{JobPoll, ServerJob, ServerJobContext};
 use crate::world::{LevelReader, ScheduledTickAccess, World};
 
 struct ChestCombination {
@@ -39,19 +42,11 @@ impl ChestCombination {
             .collect()
     }
 
-    fn menu_is_ready(&self) -> bool {
+    fn menu_is_ready(&self, player: &Player) -> bool {
         self.entities.iter().all(|entity| {
             entity
                 .downcast_ref::<ChestBlockEntity>()
-                .is_some_and(ChestBlockEntity::menu_is_ready)
-        })
-    }
-
-    fn has_pending_loot(&self) -> bool {
-        self.entities.iter().any(|entity| {
-            entity
-                .downcast_ref::<ChestBlockEntity>()
-                .is_some_and(ChestBlockEntity::has_pending_loot)
+                .is_some_and(|chest| chest.menu_is_ready(player))
         })
     }
 
@@ -82,6 +77,17 @@ pub struct ChestBlock {
     close_sound: SoundEventRef,
 }
 
+struct DeferredChestOpenJob {
+    world: Arc<World>,
+    pos: BlockPos,
+    block: BlockRef,
+    open_sound: SoundEventRef,
+    close_sound: SoundEventRef,
+    container_ids: Vec<ContainerId>,
+    player: Weak<Player>,
+    token: u64,
+}
+
 impl ChestBlock {
     /// Creates standard chest behavior from extracted class arguments.
     #[must_use]
@@ -94,6 +100,51 @@ impl ChestBlock {
             block,
             open_sound,
             close_sound,
+        }
+    }
+
+    fn open_combination(player: &Player, combination: ChestCombination) {
+        let Some(containers) = combination.container_refs() else {
+            return;
+        };
+        let Some(title) = combination.title() else {
+            return;
+        };
+        let rows = containers.len() * 3;
+        let sections = containers
+            .into_iter()
+            .map(|container| (container, CHEST_SLOTS))
+            .collect();
+        let openers = combination.entities;
+        let inventory = player.inventory.clone();
+        player.open_menu(title, move |id, _world| {
+            chest_with_openers(inventory, id, sections, rows, openers)
+        });
+    }
+
+    fn defer_open(
+        &self,
+        world: &Arc<World>,
+        pos: BlockPos,
+        player: &Player,
+        containers: &[ContainerRef],
+    ) {
+        let Some(player) = player.shared_in_world(world) else {
+            return;
+        };
+        let token = player.begin_deferred_container_open();
+        let job = DeferredChestOpenJob {
+            world: Arc::clone(world),
+            pos,
+            block: self.block,
+            open_sound: self.open_sound,
+            close_sound: self.close_sound,
+            container_ids: containers.iter().map(ContainerRef::container_id).collect(),
+            player: Arc::downgrade(&player),
+            token,
+        };
+        if !world.spawn_server_job(job) {
+            player.finish_deferred_container_open(token);
         }
     }
 
@@ -213,6 +264,77 @@ impl ChestBlock {
     }
 }
 
+impl ServerJob for DeferredChestOpenJob {
+    fn poll(&mut self, _context: &mut ServerJobContext) -> JobPoll {
+        let Some(player) = self.player.upgrade() else {
+            return JobPoll::Finished;
+        };
+        if !player.has_deferred_container_open(self.token)
+            || !Arc::ptr_eq(&player.world.load_full(), &self.world)
+            || player.shared_in_world(&self.world).is_none()
+            || player.has_container_open()
+        {
+            player.finish_deferred_container_open(self.token);
+            return JobPoll::Finished;
+        }
+        let state = self.world.get_block_state(self.pos);
+        if state.get_block() != self.block {
+            player.finish_deferred_container_open(self.token);
+            return JobPoll::Finished;
+        }
+        let behavior = ChestBlock::new(self.block, self.open_sound, self.close_sound);
+        let Some(combination) = behavior.combination(state, self.world.as_ref(), self.pos, false)
+        else {
+            player.finish_deferred_container_open(self.token);
+            return JobPoll::Finished;
+        };
+        if !combination.menu_is_ready(&player) {
+            player.finish_deferred_container_open(self.token);
+            return JobPoll::Finished;
+        }
+        let Some(containers) = combination.container_refs() else {
+            player.finish_deferred_container_open(self.token);
+            return JobPoll::Finished;
+        };
+        let container_ids = containers
+            .iter()
+            .map(ContainerRef::container_id)
+            .collect::<Vec<_>>();
+        if container_ids != self.container_ids
+            || !containers
+                .iter()
+                .all(|container| container.still_valid(&player))
+        {
+            player.finish_deferred_container_open(self.token);
+            return JobPoll::Finished;
+        }
+        let mut pending = false;
+        for container in &containers {
+            match container.preparation_readiness() {
+                ContainerReadiness::Ready => {}
+                ContainerReadiness::Pending => pending = true,
+                ContainerReadiness::NeedsPreparation => {
+                    player.finish_deferred_container_open(self.token);
+                    return JobPoll::Finished;
+                }
+            }
+        }
+        if pending {
+            return JobPoll::Pending;
+        }
+        if player.finish_deferred_container_open(self.token) {
+            ChestBlock::open_combination(&player, combination);
+        }
+        JobPoll::Finished
+    }
+
+    fn cancel(&mut self) {
+        if let Some(player) = self.player.upgrade() {
+            player.finish_deferred_container_open(self.token);
+        }
+    }
+}
+
 impl BlockBehavior for ChestBlock {
     fn chest_open_sound(&self) -> Option<SoundEventRef> {
         Some(self.open_sound)
@@ -299,27 +421,28 @@ impl BlockBehavior for ChestBlock {
         _hit_result: &BlockHitResult,
         _inv: &mut InventoryAccess,
     ) -> InteractionResult {
+        player.cancel_deferred_container_open();
         let Some(combination) = self.combination(state, world, pos, false) else {
             return InteractionResult::Success;
         };
-        if !combination.menu_is_ready() {
+        if !combination.menu_is_ready(player) {
             return InteractionResult::Success;
         }
-        let Some(title) = combination.title() else {
-            return InteractionResult::Success;
-        };
         let Some(containers) = combination.container_refs() else {
             return InteractionResult::Success;
         };
-        let rows = containers.len() * 3;
-        let sections = containers
-            .into_iter()
-            .map(|container| (container, CHEST_SLOTS))
-            .collect();
-        let openers = combination.entities;
-        player.open_menu(title, move |id, _world| {
-            chest_with_openers(player.inventory.clone(), id, sections, rows, openers)
-        });
+        let results = containers
+            .iter()
+            .map(|container| container.prepare_access(Some(player)))
+            .collect::<Vec<_>>();
+        if results.contains(&ContainerAccessResult::Failed) {
+            return InteractionResult::Success;
+        }
+        if results.contains(&ContainerAccessResult::Pending) {
+            self.defer_open(world, pos, player, &containers);
+            return InteractionResult::Success;
+        }
+        Self::open_combination(player, combination);
 
         // TODO: Award OPEN_CHEST and anger nearby piglins once those systems exist.
         InteractionResult::Success
@@ -393,14 +516,15 @@ impl BlockBehavior for ChestBlock {
         let Some(combination) = self.combination(state, world, pos, false) else {
             return 0;
         };
-        if combination.has_pending_loot() {
-            // TODO: Vanilla comparator access unpacks both loot tables. Return
-            // an empty signal until deterministic `LootTable.fill` is available.
-            return 0;
-        }
         let Some(containers) = combination.container_refs() else {
             return 0;
         };
+        if !containers
+            .iter()
+            .all(|container| container.prepare_access(None) == ContainerAccessResult::Ready)
+        {
+            return 0;
+        }
         let guard = ContainerLockGuard::lock_all(&containers);
         let locked = containers
             .iter()

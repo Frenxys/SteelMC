@@ -16,7 +16,10 @@ use steel_registry::item_stack::ItemStack;
 use steel_registry::packets::play::{C_ADD_ENTITY, C_PLAYER_INFO_UPDATE, C_SYSTEM_CHAT};
 use steel_registry::{vanilla_dimension_types, vanilla_entities, vanilla_items};
 use steel_utils::ChunkPos;
-use steel_utils::{codec::VarInt, serial::ReadFrom, text::DisplayResolutor};
+use steel_utils::{
+    Identifier, codec::VarInt, random::Random, random::xoroshiro::Xoroshiro, serial::ReadFrom,
+    text::DisplayResolutor,
+};
 use text_components::TextComponent;
 use tokio::{fs, runtime::Builder, time::sleep};
 use uuid::Uuid;
@@ -44,10 +47,10 @@ use super::known_players::{
 use super::player_admission::PendingPlayerJoin;
 use super::{
     AsyncMutex, CancellationToken, CommandRegistry, CommandRequestQueue, DomainCommandStorage,
-    DomainPlayerData, DomainPlayerState, DomainScoreboards, FxHashMap, KeyStore,
-    KnownPlayerCacheState, KnownPlayers, Notify, PacketProcessor, PersistentPlayerData,
-    PlayerDataStorage, PlayerDisconnectQueue, PlayerJoinQueue, PlayerMap, PreparedSpawn,
-    RegistryCache, Server, ServerJobQueue, SyncMutex, SyncRwLock, TabListTickStats,
+    DomainMapData, DomainPlayerData, DomainPlayerState, DomainRandomSequences, DomainScoreboards,
+    FxHashMap, KeyStore, KnownPlayerCacheState, KnownPlayers, Notify, PacketProcessor,
+    PersistentPlayerData, PlayerDataStorage, PlayerDisconnectQueue, PlayerJoinQueue, PlayerMap,
+    PreparedSpawn, RegistryCache, Server, ServerJobQueue, SyncMutex, SyncRwLock, TabListTickStats,
     TickRateManager, UnpreparedDomainPlayerData, UnpreparedDomainPlayerState, WorldMap,
     can_entity_return_from_end_to_overworld, cap_positive_thread_count,
     create_registered_dispatcher, is_allowed_to_enter_portal_target, is_end_return_transition,
@@ -158,6 +161,7 @@ async fn test_server(
 ) -> Result<Arc<Server>, String> {
     let domain = ResolvedDomainConfig {
         name: world.domain().to_owned(),
+        seed: world.seed(),
         default_world: world.key.clone(),
         worlds: vec![world.key.clone()],
     };
@@ -205,6 +209,23 @@ async fn test_server_with_worlds(
         .map_err(|error| format!("test permission groups should resolve: {error}"))?;
     let config = test_runtime_config();
     let registry_cache = RegistryCache::new(config.compression);
+    let random_sequences = DomainRandomSequences::ephemeral(domains);
+    let map_data = DomainMapData::ephemeral(domains);
+    let jobs = Arc::new(ServerJobQueue::new());
+    for world in worlds.values() {
+        let Some(sequences) = random_sequences.get(world.domain()) else {
+            return Err(format!(
+                "test world {} has no random-sequence owner",
+                world.key
+            ));
+        };
+        world.bind_random_sequences(Arc::clone(sequences));
+        let Some(maps) = map_data.get(world.domain()) else {
+            return Err(format!("test world {} has no map-data owner", world.key));
+        };
+        world.bind_map_data(Arc::clone(maps));
+        world.bind_server_jobs(Arc::downgrade(&jobs));
+    }
 
     Ok(Arc::new(Server {
         config,
@@ -213,6 +234,8 @@ async fn test_server_with_worlds(
         key_store: KeyStore::create(),
         registry_cache,
         worlds,
+        random_sequences,
+        map_data,
         online_players: PlayerMap::new(),
         player_admissions: SyncMutex::new(FxHashMap::default()),
         tick_rate_manager: SyncRwLock::new(TickRateManager::new()),
@@ -228,7 +251,7 @@ async fn test_server_with_worlds(
                 .build()
                 .expect("test chunk encoding pool should initialize"),
         ),
-        jobs: ServerJobQueue::new(),
+        jobs,
         player_data_storage,
         player_permission_states: SyncRwLock::new(player_permission_states),
         player_permission_updates: AsyncMutex::new(()),
@@ -240,6 +263,65 @@ async fn test_server_with_worlds(
         pending_world_changes: SyncMutex::new(Vec::new()),
         pending_domain_switches: SyncMutex::new(Vec::new()),
     }))
+}
+
+#[test]
+fn named_random_sequences_are_shared_within_and_isolated_between_domains() {
+    let alpha_overworld = fresh_test_world_in_domain("alpha", "overworld");
+    let alpha_nether = fresh_test_world_in_domain("alpha", "the_nether");
+    let beta_overworld = fresh_test_world_in_domain("beta", "overworld");
+    let domains = [
+        ResolvedDomainConfig {
+            name: "alpha".to_owned(),
+            seed: 42,
+            default_world: alpha_overworld.key.clone(),
+            worlds: vec![alpha_overworld.key.clone(), alpha_nether.key.clone()],
+        },
+        ResolvedDomainConfig {
+            name: "beta".to_owned(),
+            seed: 42,
+            default_world: beta_overworld.key.clone(),
+            worlds: vec![beta_overworld.key.clone()],
+        },
+    ];
+    let loaded_worlds = [
+        Arc::clone(&alpha_overworld),
+        Arc::clone(&alpha_nether),
+        Arc::clone(&beta_overworld),
+    ];
+    let runtime = Builder::new_current_thread().enable_all().build();
+    let Ok(runtime) = runtime else {
+        panic!("test runtime should initialize");
+    };
+    runtime.block_on(async {
+        let storage_root = test_storage_root("domain-random-sequences");
+        let server = test_server_with_worlds(
+            "alpha".to_owned(),
+            &domains,
+            &loaded_worlds,
+            PermissionSubjectIndex::new(),
+            &storage_root,
+        )
+        .await;
+        let Ok(server) = server else {
+            panic!("test server should initialize");
+        };
+        let key = Identifier::vanilla_static("chests/simple_dungeon");
+        let first_alpha = alpha_overworld.with_loot_random(0, Some(&key), Random::next_i64);
+        let second_alpha = alpha_nether.with_loot_random(0, Some(&key), Random::next_i64);
+        let first_beta = beta_overworld.with_loot_random(0, Some(&key), Random::next_i64);
+        let mut expected = Xoroshiro::from_seed_with_key(42, &key.to_string());
+
+        assert_eq!(first_alpha, expected.next_i64());
+        assert_eq!(second_alpha, expected.next_i64());
+        let mut expected_beta = Xoroshiro::from_seed_with_key(42, &key.to_string());
+        assert_eq!(first_beta, expected_beta.next_i64());
+
+        drop(server);
+        if let Err(error) = fs::remove_dir_all(&storage_root).await {
+            panic!("test storage should be removed: {error}");
+        }
+    });
 }
 
 #[test]
@@ -257,6 +339,7 @@ fn saved_location_planning_honors_explicit_world_selection() {
     runtime.block_on(async {
         let domain = ResolvedDomainConfig {
             name: "target".to_owned(),
+            seed: saved_world.seed(),
             default_world: saved_world.key.clone(),
             worlds: vec![saved_world.key.clone(), selected_world.key.clone()],
         };
@@ -450,11 +533,13 @@ fn domain_switch_job_progresses_across_chunk_scheduling_boundaries() {
         let domains = [
             ResolvedDomainConfig {
                 name: "source".to_owned(),
+                seed: source_world.seed(),
                 default_world: source_world.key.clone(),
                 worlds: vec![source_world.key.clone()],
             },
             ResolvedDomainConfig {
                 name: "target".to_owned(),
+                seed: target_world.seed(),
                 default_world: target_world.key.clone(),
                 worlds: vec![target_world.key.clone()],
             },
@@ -606,11 +691,13 @@ fn first_domain_visit_resets_domain_scoped_player_data() {
         let domains = [
             ResolvedDomainConfig {
                 name: "source".to_owned(),
+                seed: source_world.seed(),
                 default_world: source_world.key.clone(),
                 worlds: vec![source_world.key.clone()],
             },
             ResolvedDomainConfig {
                 name: "target".to_owned(),
+                seed: target_world.seed(),
                 default_world: target_world.key.clone(),
                 worlds: vec![target_world.key.clone()],
             },
@@ -674,11 +761,13 @@ fn command_world_scope_survives_entity_transforms() {
     let domains = [
         ResolvedDomainConfig {
             name: "alpha".to_owned(),
+            seed: alpha.seed(),
             default_world: alpha.key.clone(),
             worlds: vec![alpha.key.clone()],
         },
         ResolvedDomainConfig {
             name: "beta".to_owned(),
+            seed: beta.seed(),
             default_world: beta.key.clone(),
             worlds: vec![beta.key.clone()],
         },

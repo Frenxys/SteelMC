@@ -58,6 +58,14 @@ enum EnchantmentOptionsJson {
     List(Vec<String>),
 }
 
+/// A biome holder set encoded as either one ID/tag or a direct list.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+enum BiomeOptionsJson {
+    Single(String),
+    List(Vec<String>),
+}
+
 /// Loot table value can be a string reference or inline loot table.
 #[derive(Deserialize, Debug, Clone)]
 #[serde(untagged)]
@@ -264,6 +272,8 @@ const fn default_true() -> bool {
 #[serde(deny_unknown_fields)]
 struct LocationPredicateJson {
     #[serde(default)]
+    biomes: Option<BiomeOptionsJson>,
+    #[serde(default)]
     block: Option<BlockPredicateJson>,
 }
 
@@ -412,6 +422,8 @@ struct LootFunctionJson {
     #[serde(default)]
     zoom: Option<i32>,
     #[serde(default)]
+    search_radius: Option<i32>,
+    #[serde(default)]
     skip_existing_chunks: Option<bool>,
     // set_name (keep as raw value for text component)
     #[serde(default)]
@@ -538,12 +550,12 @@ pub(crate) fn build() -> TokenStream {
     // Imports
     stream.extend(quote! {
         use crate::loot_table::{
-            BlockPredicate, BonusFormula, ConditionalLootFunction, CopySource, DamageSourcePredicate,
+            BiomeOptions, BlockPredicate, BonusFormula, ConditionalLootFunction, CopySource, DamageSourcePredicate,
             DamageTagPredicate, DyeColor, EnchantedChance, EnchantmentOptions, EntityEquipment,
             EntityFlags, EntityPredicate, EquipmentSlotGroup, InstrumentOptions, LocationPredicate,
             LootCondition, LootContextEntity, LootEntry, LootFunction, LootPool, LootTable,
-            LootTableRef, LootTableRegistry, LootType, NameTarget, NumberProvider, PropertyCheck,
-            StewEffect, ToolPredicate,
+            LootTableRef, LootTableRegistry, LootText, LootType, NameTarget, NumberProvider,
+            PropertyCheck, StewEffect, ToolPredicate,
         };
         use steel_utils::Identifier;
     });
