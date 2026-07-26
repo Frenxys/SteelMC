@@ -1,4 +1,4 @@
-//! Vanilla block-state NBT codec shape used by block entities.
+//! Vanilla block-state NBT codec shape shared by persisted world objects.
 
 use std::str::FromStr;
 

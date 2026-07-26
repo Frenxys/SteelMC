@@ -376,7 +376,8 @@ fn base_state_caches_fluid_contact() {
     assert!(!base.was_eye_in_water());
 
     base.set_fluid_contact(water_contact);
-    base.set_fluid_contact_for_base_tick(air_contact);
+    base.advance_eye_water_history_for_base_tick();
+    base.set_fluid_contact(air_contact);
 
     assert_eq!(base.fluid_contact(), air_contact);
     assert!(base.was_eye_in_water());

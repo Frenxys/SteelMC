@@ -2,6 +2,10 @@
 //!
 //! Vanilla splits fire into `BaseFireBlock` (portal logic, placement checks) and `FireBlock`
 //! (spreading, aging). This combines the portal-relevant parts from `BaseFireBlock`.
+//!
+//! TODO: When shared fire spread/burn ticking is implemented, its burn-out callback must prime
+//! TNT after replacing or removing it, matching Vanilla `FireBlock.checkBurnOut`. Lava ignition
+//! reaches TNT through that same fire foundation.
 
 use std::sync::Arc;
 use steel_macros::block_behavior;

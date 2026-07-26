@@ -1641,14 +1641,10 @@ impl EntityBase {
         self.state.lock().fluid_contact = fluid_contact;
     }
 
-    /// Stores fluid contact for a vanilla base-tick refresh.
-    ///
-    /// Vanilla updates `wasEyeInWater` from the previous fluid interaction
-    /// before scanning the current one.
-    pub fn set_fluid_contact_for_base_tick(&self, fluid_contact: EntityFluidContact) {
+    /// Advances vanilla `wasEyeInWater` before the base-tick fluid interaction.
+    pub fn advance_eye_water_history_for_base_tick(&self) {
         let mut state = self.state.lock();
         state.was_eye_in_water = state.fluid_contact.eye_in_water();
-        state.fluid_contact = fluid_contact;
     }
 
     /// Sets ground and horizontal collision flags from an accepted client move.

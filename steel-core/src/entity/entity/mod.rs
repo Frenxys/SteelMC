@@ -984,9 +984,9 @@ pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
         self.base().advance_base_tick_state();
         self.handle_portal();
         self.base().advance_powder_snow_contact_for_base_tick();
-        self.refresh_fluid_contact_for_base_tick();
+        self.base().advance_eye_water_history_for_base_tick();
+        self.update_fluid_interaction();
         self.update_swimming();
-        self.base().reset_fall_distance_in_water();
         if self
             .base()
             .advance_fire_tick(self.fire_immune(), self.is_in_lava())
@@ -2194,24 +2194,22 @@ pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
         self.scan_and_store_fluid_contact(false)
     }
 
-    /// Refreshes cached fluid contact with vanilla base-tick eye-water history.
-    fn refresh_fluid_contact_for_base_tick(&self) -> EntityFluidContact {
-        self.scan_and_store_fluid_contact(true)
+    /// Applies the server-side state and motion from vanilla `updateFluidInteraction`.
+    fn update_fluid_interaction(&self) -> EntityFluidContact {
+        let contact = self.scan_and_store_fluid_contact(true);
+        self.base().reset_fall_distance_in_water();
+        contact
     }
 
     /// Scans current fluid contact and stores it on the entity base.
-    fn scan_and_store_fluid_contact(&self, advance_eye_water_history: bool) -> EntityFluidContact {
+    fn scan_and_store_fluid_contact(&self, include_currents: bool) -> EntityFluidContact {
         let Some(world) = self.level() else {
             let contact = EntityFluidContact::default();
-            if advance_eye_water_history {
-                self.base().set_fluid_contact_for_base_tick(contact);
-            } else {
-                self.base().set_fluid_contact(contact);
-            }
+            self.base().set_fluid_contact(contact);
             return contact;
         };
 
-        let contact = if advance_eye_water_history {
+        let contact = if include_currents {
             EntityFluidContact::scan_with_currents(
                 &world,
                 self.position(),
@@ -2227,17 +2225,15 @@ pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
                 self.bounding_box(),
             )
         };
-        if advance_eye_water_history {
-            self.base().set_fluid_contact_for_base_tick(contact);
-            self.apply_fluid_current_for_base_tick(&world, contact);
-        } else {
-            self.base().set_fluid_contact(contact);
+        self.base().set_fluid_contact(contact);
+        if include_currents {
+            self.apply_fluid_current(&world, contact);
         }
         contact
     }
 
-    /// Applies vanilla water/lava current impulses from the base-tick fluid scan.
-    fn apply_fluid_current_for_base_tick(&self, world: &Arc<World>, contact: EntityFluidContact) {
+    /// Applies vanilla water/lava current impulses from a fluid-interaction scan.
+    fn apply_fluid_current(&self, world: &Arc<World>, contact: EntityFluidContact) {
         if !self.is_pushed_by_fluid() {
             return;
         }

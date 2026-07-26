@@ -24,7 +24,6 @@
 //! ```
 
 mod base_container;
-pub(crate) mod block_state_nbt;
 mod container_openers_counter;
 pub mod entities;
 mod fuel_values;

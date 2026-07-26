@@ -18,8 +18,8 @@ use steel_utils::{
 };
 
 use crate::behavior::{BLOCK_BEHAVIORS, BlockCollisionBoxes, BlockCollisionContext};
-use crate::block_entity::block_state_nbt;
 use crate::block_entity::{BlockEntity, BlockEntityBase, BlockEntityLifecycleExt as _};
+use crate::block_state_nbt;
 use crate::entity::Entity;
 use crate::physics::MoverType;
 use crate::world::{LevelReader, World};
