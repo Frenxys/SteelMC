@@ -402,7 +402,7 @@ impl Entity for FireworkRocketEntity {
         self.get_owner().map_or(0, |owner| owner.id())
     }
 
-    fn restore_owner_reference(&self, owner: &SharedEntity) {
+    fn cache_owner_reference(&self, owner: &SharedEntity) {
         self.cache_owner_entity(owner);
     }
 

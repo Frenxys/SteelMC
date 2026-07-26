@@ -13,6 +13,31 @@ fn default_tick_runs_vanilla_entity_base_tick() {
 }
 
 #[test]
+fn successful_teleport_calls_entity_completion_hook_once() {
+    let world = fresh_test_world("teleport_completion_hook");
+    let entity = TeleportHookTestEntity::shared(&world);
+    let shared: SharedEntity = entity.clone();
+    let transition = TeleportTransition {
+        target_world: Arc::clone(&world),
+        position: DVec3::new(4.0, 70.0, -2.0),
+        rotation: (30.0, 10.0),
+        velocity: DVec3::ZERO,
+        relatives: RelativeMovement::NONE,
+        portal_cooldown: 0,
+        as_passenger: false,
+        post_transition: TeleportPostTransition::do_nothing(),
+    };
+
+    let Some(changed) = change_entity_world(shared, &transition) else {
+        panic!("same-world teleport should complete");
+    };
+
+    let expected: SharedEntity = entity.clone();
+    assert!(Arc::ptr_eq(&changed, &expected));
+    assert_eq!(entity.teleported.load(Ordering::Relaxed), 1);
+}
+
+#[test]
 fn can_use_portal_requires_alive_entity() {
     let entity = PushableTestEntity::shared(1, DVec3::ZERO);
     assert!(entity.can_use_portal(false));

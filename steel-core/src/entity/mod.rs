@@ -753,6 +753,7 @@ mod manager;
 mod mob;
 mod movement_sync;
 pub mod projectile;
+mod reference;
 mod registry;
 mod spawn;
 mod storage;
@@ -809,6 +810,7 @@ pub use projectile::{
     EntityHitResult, Projectile, ProjectileBase, ProjectileDeflection, ProjectileEventSource,
     ProjectileHit, ThrowableItemProjectile, ThrowableProjectile, compute_margin,
 };
+pub use reference::EntityReference;
 #[cfg(test)]
 pub(crate) use registry::init_test_entities;
 pub use registry::{ENTITIES, EntityLoadRequest, EntityRegistry, init_entities};
@@ -923,7 +925,7 @@ pub(crate) fn change_entity_world(
         return None;
     }
 
-    if entity.as_player().is_some() {
+    let changed_entity = if entity.as_player().is_some() {
         let Some(player) = source_world.players.get_by_entity_id(entity.id()) else {
             tracing::error!(
                 entity_id = entity.id(),
@@ -936,10 +938,13 @@ pub(crate) fn change_entity_world(
         if !player.change_world_within_domain(teleport_transition) {
             return None;
         }
-        return Some(entity);
-    }
+        entity
+    } else {
+        change_non_player_entity_world(entity, teleport_transition)?
+    };
 
-    change_non_player_entity_world(entity, teleport_transition)
+    changed_entity.on_teleported();
+    Some(changed_entity)
 }
 
 fn change_non_player_entity_world(
@@ -1124,9 +1129,7 @@ fn teleport_entity_cross_world(
         );
         return None;
     };
-    if let Some(owner) = &projectile_owner {
-        new_entity.restore_owner_reference(owner);
-    }
+    new_entity.restore_references_from(entity.as_ref());
 
     if let Err(error) = teleport_set_position(
         new_entity.as_ref(),

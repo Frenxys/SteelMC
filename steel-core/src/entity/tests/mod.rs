@@ -1,4 +1,7 @@
-use std::sync::{Arc, Weak};
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use glam::DVec3;
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
@@ -34,7 +37,7 @@ use crate::entity::damage::DamageSource;
 use crate::entity::entities::{ChestMinecartEntity, PigEntity};
 use crate::entity::mob::Mob;
 use crate::inventory::equipment::EquipmentSlot;
-use crate::portal::PortalKind;
+use crate::portal::{PortalKind, TeleportPostTransition, TeleportTransition};
 use crate::test_support::{
     cross_world_damage_test_world, fresh_test_world, insert_ready_full_chunk, test_world,
 };
@@ -49,15 +52,51 @@ use super::{
     EntityVerticalMovementStateUpdate, InsideBlockEffectCollector, InsideBlockEffectType,
     LivingEntity, LivingEntityBase, LivingTravelInput, MobEffectInstance, RemovalReason,
     SPEED_MODIFIER_POWDER_SNOW_ID, SharedEntity, block_state_suffocates_eye_box,
-    closest_open_space_direction, fall_damage_reset_clip_target, fall_flying_collision_damage,
-    fall_flying_free_fall_interval, get_input_vector, indirect_passengers,
-    passenger_transition_position, passenger_transition_rotation, remove_after_changing_dimensions,
-    should_apply_entity_cramming_damage, should_apply_resolved_movement, start_riding_entities,
-    transfer_leashables_to_holder, trapdoor_usable_as_ladder_state,
+    change_entity_world, closest_open_space_direction, fall_damage_reset_clip_target,
+    fall_flying_collision_damage, fall_flying_free_fall_interval, get_input_vector,
+    indirect_passengers, passenger_transition_position, passenger_transition_rotation,
+    remove_after_changing_dimensions, should_apply_entity_cramming_damage,
+    should_apply_resolved_movement, start_riding_entities, transfer_leashables_to_holder,
+    trapdoor_usable_as_ladder_state,
 };
 
 struct PushableTestEntity {
     base: EntityBase,
+}
+
+struct TeleportHookTestEntity {
+    base: EntityBase,
+    teleported: AtomicUsize,
+}
+
+impl TeleportHookTestEntity {
+    fn shared(world: &Arc<World>) -> Arc<Self> {
+        Arc::new(Self {
+            base: EntityBase::new(
+                1,
+                DVec3::ZERO,
+                vanilla_entities::ITEM.dimensions,
+                Arc::downgrade(world),
+            ),
+            teleported: AtomicUsize::new(0),
+        })
+    }
+}
+
+crate::entity::impl_test_downcast_type!(TeleportHookTestEntity);
+
+impl Entity for TeleportHookTestEntity {
+    fn base(&self) -> &EntityBase {
+        &self.base
+    }
+
+    fn entity_type(&self) -> EntityTypeRef {
+        &vanilla_entities::ITEM
+    }
+
+    fn on_teleported(&self) {
+        self.teleported.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl PushableTestEntity {

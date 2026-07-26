@@ -23,8 +23,8 @@ use steel_registry::items::ItemRef;
 use steel_registry::vanilla_entity_data::EnderPearlEntityData;
 use steel_registry::vanilla_game_rules::ENDER_PEARLS_VANISH_ON_DEATH;
 use steel_registry::{sound_events, vanilla_damage_types, vanilla_items};
-use steel_utils::ChunkPos;
 use steel_utils::locks::SyncMutex;
+use steel_utils::{BlockPos, ChunkPos};
 use steel_utils::{DowncastType, DowncastTypeKey};
 
 use crate::chunk::chunk_map::ENDER_PEARL_TICKET_TIMEOUT;
@@ -253,8 +253,14 @@ impl Entity for EnderPearlEntity {
         self.get_owner().map_or(0, |owner| owner.id())
     }
 
-    fn restore_owner_reference(&self, owner: &SharedEntity) {
+    fn cache_owner_reference(&self, owner: &SharedEntity) {
         self.cache_owner_entity(owner);
+    }
+
+    fn on_teleported(&self) {
+        if let Some(world) = self.level() {
+            world.place_portal_ticket(BlockPos::from(self.position()));
+        }
     }
 
     fn projectile_owner_uuid(&self) -> Option<uuid::Uuid> {
@@ -358,12 +364,18 @@ impl ThrowableItemProjectile for EnderPearlEntity {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Weak;
+    use std::sync::{Arc, Weak};
 
     use glam::DVec3;
+    use steel_protocol::packets::game::RelativeMovement;
     use steel_registry::{test_support::init_test_registry, vanilla_entities, vanilla_items};
+    use steel_utils::ChunkPos;
 
-    use crate::entity::{Entity, Projectile, ThrowableItemProjectile};
+    use crate::entity::{
+        Entity, Projectile, SharedEntity, ThrowableItemProjectile, change_entity_world,
+    };
+    use crate::portal::{TeleportPostTransition, TeleportTransition};
+    use crate::test_support::fresh_test_world;
     use crate::world::World;
 
     use super::EnderPearlEntity;
@@ -402,6 +414,48 @@ mod tests {
         pearl.set_owner_uuid(Some(uuid));
         assert_eq!(pearl.owner_uuid(), Some(uuid));
         assert_eq!(pearl.projectile_owner_uuid(), Some(uuid));
+    }
+
+    #[test]
+    fn successful_teleport_places_portal_ticket_at_destination() {
+        init_test_registry();
+
+        let world = fresh_test_world("ender_pearl_teleport_ticket");
+        let destination = DVec3::new(65.5, 70.0, -32.5);
+        let pearl: SharedEntity = Arc::new(EnderPearlEntity::new(
+            &vanilla_entities::ENDER_PEARL,
+            1,
+            DVec3::ZERO,
+            Arc::downgrade(&world),
+        ));
+        let transition = TeleportTransition {
+            target_world: Arc::clone(&world),
+            position: destination,
+            rotation: (0.0, 0.0),
+            velocity: DVec3::ZERO,
+            relatives: RelativeMovement::NONE,
+            portal_cooldown: 0,
+            as_passenger: false,
+            post_transition: TeleportPostTransition::do_nothing(),
+        };
+
+        let Some(teleported) = change_entity_world(pearl, &transition) else {
+            panic!("same-world ender pearl teleport should complete");
+        };
+        assert_eq!(teleported.position(), destination);
+
+        let Ok(saved_tickets) = serde_json::to_value(world.chunk_map.persistent_chunk_tickets())
+        else {
+            panic!("portal tickets should serialize for inspection");
+        };
+        let Some(tickets) = saved_tickets["tickets"].as_array() else {
+            panic!("serialized portal tickets should be an array");
+        };
+        assert_eq!(tickets.len(), 1);
+        let destination_chunk = ChunkPos::from_entity_pos(destination);
+        assert_eq!(tickets[0]["type"], "portal");
+        assert_eq!(tickets[0]["chunk_x"], destination_chunk.0.x);
+        assert_eq!(tickets[0]["chunk_z"], destination_chunk.0.y);
     }
 
     #[test]
