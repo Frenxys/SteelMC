@@ -229,9 +229,30 @@ fn block_region_volume(region: &BoundingBox) -> i64 {
 }
 
 // Steel's synchronous command runner rejects unloaded region chunks instead of loading them.
-fn ensure_region_chunks_loaded(
+pub(in crate::command::builtins) fn ensure_region_chunks_loaded(
     world: &World,
     region: &BoundingBox,
+) -> Result<(), CommandSyntaxError> {
+    ensure_region_chunks_available(world, region, RegionChunkAvailability::Full)
+}
+
+pub(in crate::command::builtins) fn ensure_region_chunks_block_ticking(
+    world: &World,
+    region: &BoundingBox,
+) -> Result<(), CommandSyntaxError> {
+    ensure_region_chunks_available(world, region, RegionChunkAvailability::BlockTicking)
+}
+
+#[derive(Clone, Copy)]
+enum RegionChunkAvailability {
+    Full,
+    BlockTicking,
+}
+
+fn ensure_region_chunks_available(
+    world: &World,
+    region: &BoundingBox,
+    availability: RegionChunkAvailability,
 ) -> Result<(), CommandSyntaxError> {
     if region.max_y() < world.get_min_y() || region.min_y() > world.get_max_y() {
         return Ok(());
@@ -246,7 +267,11 @@ fn ensure_region_chunks_loaded(
                 continue;
             }
             let pos = BlockPos::new(chunk_x * 16, world.get_min_y(), chunk_z * 16);
-            if !world.is_full_chunk_loaded_at(pos) {
+            let available = match availability {
+                RegionChunkAvailability::Full => world.is_full_chunk_loaded_at(pos),
+                RegionChunkAvailability::BlockTicking => world.is_block_ticking_chunk_loaded(pos),
+            };
+            if !available {
                 return Err(unloaded_position());
             }
         }
@@ -342,17 +367,7 @@ fn block_matches(context: &SteelCommandContext<CommandSource>) -> Result<bool, C
         .block_predicate("block")
         .ok_or_else(|| missing_argument("block"))?;
     let world = context.source().world();
-    if !predicate.matches_state(world.get_block_state(position)) {
-        return Ok(false);
-    }
-    let Some(expected_nbt) = predicate.nbt() else {
-        return Ok(true);
-    };
-    let Some(block_entity) = world.get_block_entity(position) else {
-        return Ok(false);
-    };
-    let actual_nbt = block_entity.save_with_full_metadata();
-    Ok(compare_nbt_compounds(expected_nbt, &actual_nbt, true))
+    Ok(predicate.matches(world, position))
 }
 
 fn biome_condition(expected: bool) -> Builder {
@@ -382,7 +397,7 @@ fn biome_matches(context: &SteelCommandContext<CommandSource>) -> Result<bool, C
     Ok(expected.matches(biome))
 }
 
-pub(super) fn loaded_block_position(
+pub(in crate::command::builtins) fn loaded_block_position(
     context: &SteelCommandContext<CommandSource>,
     name: &str,
 ) -> Result<steel_utils::BlockPos, CommandSyntaxError> {

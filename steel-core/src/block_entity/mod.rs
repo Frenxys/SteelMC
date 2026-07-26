@@ -32,7 +32,9 @@ mod registry;
 mod storage;
 
 use std::{
-    io, ptr,
+    io,
+    io::Cursor,
+    ptr,
     sync::{
         Arc, Weak,
         atomic::{AtomicBool, Ordering},
@@ -42,6 +44,7 @@ use std::{
 use simdnbt::FromNbtTag as _;
 use simdnbt::borrow::{
     BaseNbtCompound as BorrowedNbtCompound, NbtCompound as BorrowedNbtCompoundView,
+    read_compound as read_borrowed_compound,
 };
 use simdnbt::owned::NbtCompound;
 use smallvec::SmallVec;
@@ -428,6 +431,19 @@ pub trait BlockEntity: ErasedType + Send + Sync {
     fn load_with_components(&self, nbt: &BorrowedNbtCompound<'_>) {
         self.load_additional(nbt);
         self.base().load_components(nbt);
+    }
+
+    /// Loads entity data from an owned command/runtime compound.
+    ///
+    /// `simdnbt` keeps its read-facing representation borrowed, so this
+    /// performs a checked in-memory encode/decode bridge rather than making
+    /// every command caller duplicate that conversion.
+    fn load_with_owned_components(&self, nbt: &NbtCompound) -> Result<(), simdnbt::Error> {
+        let mut encoded = Vec::new();
+        nbt.write(&mut encoded);
+        let borrowed = read_borrowed_compound(&mut Cursor::new(encoded.as_slice()))?;
+        self.load_with_components(&borrowed);
+        Ok(())
     }
 
     /// Saves additional data to NBT.
