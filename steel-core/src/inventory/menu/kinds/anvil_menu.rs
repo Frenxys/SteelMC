@@ -133,7 +133,10 @@ impl AnvilKind {
     /// # Panics
     /// Panics if the input container is not exactly two slots.
     #[tracing::instrument(skip(self, behavior, player, guard), level = "info", fields(player = %player.gameprofile.name))]
-    #[expect(clippy::too_many_lines, reason = "not my choice its so long .-.")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "mirrors Vanilla's ordered createResult flow in one auditable calculation"
+    )]
     pub(crate) fn create_result(
         &mut self,
         behavior: &mut MenuBehavior,

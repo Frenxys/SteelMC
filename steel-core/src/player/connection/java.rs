@@ -11,14 +11,14 @@ use steel_protocol::packets::common::{
     SPingRequest,
 };
 use steel_protocol::packets::game::{
-    CBundleDelimiter, CCommandSuggestions, PlayerAction, PlayerCommandAction, SAcceptTeleportation,
-    SAttack, SChangeDifficulty, SChangeGameMode, SChat, SChatAck, SChatCommand, SChatSessionUpdate,
-    SChunkBatchReceived, SClientCommand, SClientTickEnd, SCommandSuggestion, SContainerButtonClick,
-    SContainerClick, SContainerClose, SContainerSlotStateChanged, SInteract, SMovePlayer,
-    SMovePlayerPos, SMovePlayerPosRot, SMovePlayerRot, SMovePlayerStatusOnly, SMoveVehicle,
-    SPickItemFromBlock, SPlayerAbilities, SPlayerAction, SPlayerCommand, SPlayerInput, SPlayerLoad,
-    SRenameItem, SSetCarriedItem, SSetCreativeModeSlot, SSignUpdate, SSpectatorAction, SSwing,
-    SUseItem, SUseItemOn,
+    CBundleDelimiter, CCommandSuggestions, ClientCommandAction, PlayerAction, PlayerCommandAction,
+    SAcceptTeleportation, SAttack, SChangeDifficulty, SChangeGameMode, SChat, SChatAck,
+    SChatCommand, SChatSessionUpdate, SChunkBatchReceived, SClientCommand, SClientTickEnd,
+    SCommandSuggestion, SContainerButtonClick, SContainerClick, SContainerClose,
+    SContainerSlotStateChanged, SInteract, SMovePlayer, SMovePlayerPos, SMovePlayerPosRot,
+    SMovePlayerRot, SMovePlayerStatusOnly, SMoveVehicle, SPickItemFromBlock, SPlayerAbilities,
+    SPlayerAction, SPlayerCommand, SPlayerInput, SPlayerLoad, SRenameItem, SSetCarriedItem,
+    SSetCreativeModeSlot, SSignUpdate, SSpectatorAction, SSwing, SUseItem, SUseItemOn,
 };
 
 use steel_protocol::utils::{ConnectionProtocol, PacketError, RawPacket};
@@ -125,6 +125,23 @@ impl ScheduledPlayPacket {
             self.0,
             ScheduledPlayPacketKind::AcceptTeleportation(_) | ScheduledPlayPacketKind::PlayerLoaded
         )
+    }
+
+    /// Returns whether this is the death screen's one-shot respawn request.
+    pub(crate) const fn is_perform_respawn(&self) -> bool {
+        matches!(
+            self.0,
+            ScheduledPlayPacketKind::ClientCommand(SClientCommand {
+                action: ClientCommandAction::PerformRespawn,
+            })
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn perform_respawn_for_test() -> Self {
+        Self(ScheduledPlayPacketKind::ClientCommand(SClientCommand {
+            action: ClientCommandAction::PerformRespawn,
+        }))
     }
 
     /// Returns the handler's audited cross-player concurrency class.
@@ -576,14 +593,12 @@ impl JavaConnection {
             return Ok(());
         }
 
-        let maintenance_packet = matches!(packet.id, play::S_KEEP_ALIVE | play::S_PING_REQUEST);
-        let handshake_packet = Self::can_process_during_domain_handshake(packet.id);
-        if !maintenance_packet && !player.domain_switch_allows_packet(handshake_packet) {
-            return Ok(());
-        }
-
         let payload_bytes = packet.payload.len();
-        match Self::decode_play_packet(packet)? {
+        let Some(packet) = Self::decode_domain_gated_packet(packet, &player)? else {
+            return Ok(());
+        };
+
+        match packet {
             DecodedPlayPacket::Scheduled(packet) => {
                 server.schedule_play_packet(player, packet, payload_bytes);
             }
@@ -592,6 +607,31 @@ impl JavaConnection {
             }
         }
         Ok(())
+    }
+
+    fn decode_domain_gated_packet(
+        packet: RawPacket,
+        player: &Player,
+    ) -> Result<Option<DecodedPlayPacket>, PacketError> {
+        let maintenance_packet = matches!(packet.id, play::S_KEEP_ALIVE | play::S_PING_REQUEST);
+        let handshake_packet = Self::can_process_during_domain_handshake(packet.id);
+        if packet.id == play::S_CLIENT_COMMAND {
+            let decoded = Self::decode_play_packet(packet)?;
+            let perform_respawn = matches!(
+                &decoded,
+                DecodedPlayPacket::Scheduled(packet) if packet.is_perform_respawn()
+            );
+            if player.gate_domain_switch_packet(false, perform_respawn) {
+                return Ok(Some(decoded));
+            }
+            return Ok(None);
+        }
+
+        if !maintenance_packet && !player.gate_domain_switch_packet(handshake_packet, false) {
+            return Ok(None);
+        }
+
+        Self::decode_play_packet(packet).map(Some)
     }
 
     #[expect(
@@ -923,6 +963,10 @@ impl NetworkConnection for JavaConnection {
 mod tests {
     use std::array;
 
+    use crate::{
+        entity::{Entity as _, LivingEntity as _},
+        test_support::{TestPlayerBuilder, fresh_test_world},
+    };
     use rustc_hash::FxHashMap;
     use steel_protocol::packets::common::{ChatVisibility, HumanoidArm, ParticleStatus};
     use steel_protocol::packets::game::{ClickType, ClientCommandAction, HashedStack};
@@ -951,6 +995,40 @@ mod tests {
         assert!(!JavaConnection::can_process_before_join(
             play::C_CUSTOM_PAYLOAD
         ));
+    }
+
+    #[test]
+    fn queued_domain_switch_records_only_perform_respawn_at_connection_gate() {
+        let world = fresh_test_world("queued_domain_switch_respawn_packet");
+        let player = TestPlayerBuilder::new(world, Uuid::from_u128(1), "RespawnTester", 1).build();
+        let Some(token) = player.begin_pending_world_change() else {
+            panic!("test player should acquire a world-change token");
+        };
+        assert!(player.begin_domain_switch(token));
+        player.set_health(0.0);
+
+        let request_stats = JavaConnection::decode_domain_gated_packet(
+            RawPacket {
+                id: play::S_CLIENT_COMMAND,
+                payload: vec![ClientCommandAction::RequestStats as u8],
+            },
+            &player,
+        );
+        assert!(matches!(request_stats, Ok(None)));
+        assert!(!player.has_deferred_death_respawn_for_test());
+
+        let perform_respawn = JavaConnection::decode_domain_gated_packet(
+            RawPacket {
+                id: play::S_CLIENT_COMMAND,
+                payload: vec![ClientCommandAction::PerformRespawn as u8],
+            },
+            &player,
+        );
+        assert!(matches!(perform_respawn, Ok(None)));
+        assert!(player.has_deferred_death_respawn_for_test());
+
+        assert!(player.finish_domain_switch(token));
+        assert!(player.finish_pending_world_change(token));
     }
 
     #[test]

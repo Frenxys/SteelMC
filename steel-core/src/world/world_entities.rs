@@ -68,6 +68,14 @@ impl World {
         true
     }
 
+    fn take_player_for_removal(&self, player: &Arc<Player>) -> Option<Arc<Player>> {
+        if !self.contains_player(player) {
+            return None;
+        }
+        self.chunk_map.remove_player(player);
+        self.players.remove_player_sync(player)
+    }
+
     fn attach_player_entity_callback(self: &Arc<Self>, player: &Arc<Player>) {
         let callback = Arc::new(PlayerEntityCallback::new(player.id(), Arc::downgrade(self)));
         player.set_level_callback(callback);
@@ -165,7 +173,7 @@ impl World {
             "disconnect menu removal must run at the packet-processing safe point"
         );
 
-        let Some(player) = self.players.remove_player_sync(&player) else {
+        let Some(player) = self.take_player_for_removal(&player) else {
             // End credits and failed target admission deliberately have no live
             // world membership but still need one authoritative disconnect save.
             let domain = self.domain().to_owned();
@@ -185,7 +193,6 @@ impl World {
         self.entity_tracker().on_player_leave(entity_id);
 
         self.player_area_map.on_player_leave(&player);
-        self.chunk_map.remove_player(&player);
 
         (player, domain, player_data)
     }
@@ -195,7 +202,7 @@ impl World {
     /// Unlike `remove_player`, this is synchronous and skips player data saving and tab list
     /// removal — the player stays in the global tab list since they are only switching worlds.
     pub(crate) fn remove_player_for_world_change(self: &Arc<Self>, player: &Arc<Player>) {
-        let Some(player) = self.players.remove_player_sync(player) else {
+        let Some(player) = self.take_player_for_removal(player) else {
             return;
         };
         self.map_data().clear_player_terrain_requests(player.uuid());
@@ -206,7 +213,6 @@ impl World {
         self.entity_tracker().on_player_leave(entity_id);
         self.player_area_map.on_player_leave(&player);
         // Note: no CRemovePlayerInfo — player stays in the global tab list
-        self.chunk_map.remove_player(&player);
     }
 
     /// Detaches a player for a domain switch and returns its persistence snapshot.
@@ -214,7 +220,7 @@ impl World {
         self: &Arc<Self>,
         player: &Arc<Player>,
     ) -> Option<(PersistentPlayerData, DomainResidenceToken)> {
-        let player = self.players.remove_player_sync(player)?;
+        let player = self.take_player_for_removal(player)?;
         self.map_data().remove_player_tracking(player.uuid());
         let entity_id = player.id();
         let player_data = PersistentPlayerData::from_player(&player);
@@ -224,7 +230,6 @@ impl World {
         self.unregister_player_entity(&player);
         self.entity_tracker().on_player_leave(entity_id);
         self.player_area_map.on_player_leave(&player);
-        self.chunk_map.remove_player(&player);
         let residence_token = player.advance_domain_residence();
         Some((player_data, residence_token))
     }

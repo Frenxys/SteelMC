@@ -442,7 +442,16 @@ impl Server {
         let compression = connection.compression();
         let encoded = ChunkSender::encode_batch(&batch, encode_cache, compression, encoding_pool);
 
-        // Phase 3: commit (brief lock + generation check)
+        // Phase 3: commit while holding the tracking view that world detachment invalidates.
+        // This makes membership validation, packet commit, and tracker refresh one side of
+        // the same synchronization boundary.
+        let tracking_view = player.last_tracking_view.lock();
+        let Some(view) = *tracking_view else {
+            return;
+        };
+        if !world.contains_player(player) {
+            return;
+        }
         let sent_chunks = {
             let mut sender = player.chunk_sender.lock();
             sender.commit_batch(&batch, encoded, connection, &player.chunk_send_epoch)
@@ -452,9 +461,6 @@ impl Server {
             return;
         }
 
-        let Some(view) = *player.last_tracking_view.lock() else {
-            return;
-        };
         let sent_chunks = player.chunk_sender.lock().sent_chunks_snapshot();
         world
             .entity_tracker()
@@ -565,5 +571,48 @@ impl Server {
                 "Server jobs pending"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rustc_hash::FxHashMap;
+    use uuid::Uuid;
+
+    use super::Server;
+    use crate::{
+        player::ResetReason,
+        test_support::{TestPlayerBuilder, fresh_test_world, insert_ready_full_chunk},
+    };
+    use steel_utils::ChunkPos;
+
+    #[test]
+    fn chunk_send_commit_rechecks_live_world_membership() {
+        let world = fresh_test_world("chunk_send_membership_revalidation");
+        let center = ChunkPos::new(0, 0);
+        insert_ready_full_chunk(&world, center);
+        let player =
+            TestPlayerBuilder::new(Arc::clone(&world), Uuid::from_u128(1), "ChunkTester", 1)
+                .build();
+        assert!(world.add_player(Arc::clone(&player), ResetReason::InitialJoin));
+        assert!(world.players.remove_player_sync(&player).is_some());
+
+        let encoding_pool = rayon::ThreadPoolBuilder::new().num_threads(1).build();
+        let Ok(encoding_pool) = encoding_pool else {
+            panic!("test chunk encoding pool should initialize");
+        };
+        let mut encode_cache = FxHashMap::default();
+        Server::send_chunks_for_player(&player, &world, &mut encode_cache, &encoding_pool);
+
+        let sender = player.chunk_sender.lock();
+        assert!(sender.pending_chunks.contains(&center));
+        assert!(!sender.is_chunk_sent(center));
+        assert_eq!(sender.unacknowledged_batches, 0);
+        drop(sender);
+
+        assert!(world.players.insert(Arc::clone(&player)));
+        world.remove_player_for_world_change(&player);
     }
 }

@@ -17,16 +17,19 @@ use steel_protocol::utils::ConnectionProtocol;
 use steel_registry::entity_type::EntityTypeRef;
 use steel_registry::item_stack::ItemStack;
 use steel_registry::packets::play::{C_ADD_ENTITY, C_PLAYER_INFO_UPDATE, C_SYSTEM_CHAT};
-use steel_registry::{vanilla_dimension_types, vanilla_entities, vanilla_items};
-use steel_utils::ChunkPos;
+use steel_registry::{
+    vanilla_blocks, vanilla_dimension_types, vanilla_entities, vanilla_game_rules::RESPAWN_RADIUS,
+    vanilla_items,
+};
 use steel_utils::{
-    Identifier, codec::VarInt, random::Random, random::xoroshiro::Xoroshiro, serial::ReadFrom,
-    text::DisplayResolutor,
+    BlockPos, ChunkPos, Identifier, codec::VarInt, random::Random, random::xoroshiro::Xoroshiro,
+    serial::ReadFrom, text::DisplayResolutor, types::UpdateFlags,
 };
 use text_components::TextComponent;
 use tokio::{fs, runtime::Builder, task::JoinSet, time::sleep};
 use uuid::Uuid;
 
+use crate::behavior::init_behaviors;
 use crate::command::execution::{
     CommandArgumentSource, CommandPermissionSource, CommandSource, ExecutionCommandSource,
     parse_entity_selector_text,
@@ -44,7 +47,8 @@ use crate::player::player_data::PersistentSlot;
 use crate::player::{Player, PlayerConnection, ResetReason};
 use crate::portal::WorldChangeRequest;
 use crate::test_support::{
-    TestPlayerBuilder, fresh_test_world, fresh_test_world_in_domain, test_world,
+    TestPlayerBuilder, fresh_test_world, fresh_test_world_in_domain, insert_ready_full_chunk,
+    test_world,
 };
 use crate::world::World;
 
@@ -53,8 +57,8 @@ use super::known_players::{
 };
 use super::player_admission::{PendingPlayerJoin, PlayerAdmissionState};
 use super::{
-    AsyncMutex, CancellationToken, CommandRegistry, CommandRequest, CommandRequestQueue,
-    DomainCommandStorage, DomainMapData, DomainPlayerData, DomainPlayerState,
+    AsyncMutex, CancellationToken, ChunkSender, CommandRegistry, CommandRequest,
+    CommandRequestQueue, DomainCommandStorage, DomainMapData, DomainPlayerData, DomainPlayerState,
     DomainRandomSequences, DomainScoreboards, EnderPearlRestoreJob, FxHashMap, KeyStore,
     KnownPlayerCacheState, KnownPlayers, Notify, PacketProcessor, PersistentEnderPearl,
     PersistentEntity, PersistentPlayerData, PersistentRootVehicle, PlayerDataStorage,
@@ -813,6 +817,79 @@ fn domain_detach_snapshots_pending_restores_before_stale_jobs_finish() {
         );
         assert!(player.pending_root_vehicle_for_current_world().is_none());
         assert!(player.pending_ender_pearls().is_empty());
+        assert!(server.online_players.remove_player_sync(&player).is_some());
+
+        drop(player);
+        drop(server);
+        if let Err(error) = fs::remove_dir_all(&storage_root).await {
+            panic!("test storage should be removed: {error}");
+        }
+    });
+}
+
+#[test]
+fn domain_detach_invalidates_an_encoded_source_chunk_batch() {
+    let world = fresh_test_world_in_domain("source", "chunk_epoch");
+    let center = ChunkPos::new(0, 0);
+    insert_ready_full_chunk(&world, center);
+    let runtime = Builder::new_current_thread().enable_all().build();
+    let Ok(runtime) = runtime else {
+        panic!("test runtime should initialize");
+    };
+    runtime.block_on(async {
+        let storage_root = test_storage_root("detached-chunk-epoch");
+        let server = test_server(
+            Arc::clone(&world),
+            PermissionSubjectIndex::new(),
+            &storage_root,
+        )
+        .await;
+        let Ok(server) = server else {
+            panic!("test server should initialize");
+        };
+        let (player, sent_packets) = test_player_with_packets(
+            &server,
+            Arc::clone(&world),
+            Uuid::from_u128(1),
+            "ChunkTester",
+            1,
+        );
+        assert!(server.online_players.insert(Arc::clone(&player)));
+        assert!(world.add_player(Arc::clone(&player), ResetReason::InitialJoin));
+        let _ = player.mark_joined_world();
+
+        let old_epoch = *player.chunk_send_epoch.lock();
+        let batch = {
+            let mut sender = player.chunk_sender.lock();
+            sender.prepare_batch(&world, center, &player.chunk_send_epoch)
+        };
+        let Some(batch) = batch else {
+            panic!("ready source chunk should produce a batch");
+        };
+        let mut encode_cache = FxHashMap::default();
+        let encoded = ChunkSender::encode_batch(
+            &batch,
+            &mut encode_cache,
+            None,
+            server.chunk_encoding_pool.as_ref(),
+        );
+        assert!(!encoded.is_empty());
+        sent_packets.lock().clear();
+
+        let detached = world.detach_player_for_domain_switch(&player);
+        assert!(detached.is_some());
+        assert_eq!(*player.chunk_send_epoch.lock(), old_epoch.wrapping_add(1));
+        assert!(player.last_tracking_view.lock().is_none());
+        assert!(player.chunk_sender.lock().pending_chunks.is_empty());
+
+        let committed = player.chunk_sender.lock().commit_batch(
+            &batch,
+            encoded,
+            &player.connection,
+            &player.chunk_send_epoch,
+        );
+        assert!(committed.is_empty());
+        assert!(sent_packets.lock().is_empty());
         assert!(server.online_players.remove_player_sync(&player).is_some());
 
         drop(player);
@@ -1859,8 +1936,15 @@ fn player_world_selection_uses_one_token_owned_route() {
                 .is_ok()
         );
         server.process_world_changes(0, true);
-        assert!(!player.is_world_change_pending());
+        assert!(player.is_world_change_pending());
         assert!(source_world.contains_player(&player));
+        assert_eq!(
+            server.jobs.len(),
+            1,
+            "a cold world spawn should remain a tick-polled job"
+        );
+        server.jobs.cancel_all();
+        assert!(!player.is_world_change_pending());
 
         assert!(
             server
@@ -1880,6 +1964,108 @@ fn player_world_selection_uses_one_token_owned_route() {
         );
         assert!(player.finish_domain_switch(request.pending_token));
         assert!(player.finish_pending_world_change(request.pending_token));
+
+        drop((player, server));
+        if let Err(error) = fs::remove_dir_all(&storage_root).await {
+            panic!("test storage should be removed: {error}");
+        }
+    });
+}
+
+#[test]
+fn same_domain_world_selection_waits_for_safe_spawn_and_full_chunk_square() {
+    let source_world = fresh_test_world_in_domain("alpha", "safe_source");
+    let target_world = fresh_test_world_in_domain("alpha", "safe_target");
+    init_behaviors();
+    {
+        let mut level_data = target_world.level_data.write();
+        level_data.data_mut().set_spawn_pos(BlockPos::new(0, 64, 0));
+        level_data.data_mut().spawn.angle = 37.0;
+    }
+    assert!(target_world.set_game_rule(&RESPAWN_RADIUS, 0));
+
+    let domain = ResolvedDomainConfig {
+        name: "alpha".to_owned(),
+        seed: source_world.seed(),
+        default_world: source_world.key.clone(),
+        worlds: vec![source_world.key.clone(), target_world.key.clone()],
+    };
+    let loaded_worlds = [Arc::clone(&source_world), Arc::clone(&target_world)];
+    let storage_root = test_storage_root("safe-same-domain-selection");
+    let runtime = Builder::new_current_thread().enable_all().build();
+    let Ok(runtime) = runtime else {
+        panic!("test runtime should initialize");
+    };
+    runtime.block_on(async {
+        let server = test_server_with_worlds(
+            domain.name.clone(),
+            slice::from_ref(&domain),
+            &loaded_worlds,
+            PermissionSubjectIndex::new(),
+            &storage_root,
+        )
+        .await;
+        let Ok(server) = server else {
+            panic!("test server should initialize");
+        };
+        let player = test_player(&server, Arc::clone(&source_world), Uuid::from_u128(51));
+        assert!(server.online_players.insert(Arc::clone(&player)));
+        assert!(source_world.players.insert(Arc::clone(&player)));
+        let _ = player.mark_joined_world();
+
+        assert!(
+            server
+                .queue_player_world_selection(Arc::clone(&player), Arc::clone(&target_world))
+                .is_ok()
+        );
+        server.process_world_changes(0, true);
+        assert!(player.is_world_change_pending());
+        assert!(source_world.contains_player(&player));
+        assert!(!target_world.contains_player(&player));
+        assert_eq!(server.jobs.len(), 1);
+
+        for z in -3..=3 {
+            for x in -3..=3 {
+                insert_ready_full_chunk(&target_world, ChunkPos::new(x, z));
+            }
+        }
+        assert!(target_world.set_block(
+            BlockPos::new(0, 64, 0),
+            vanilla_blocks::STONE.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        ));
+        assert!(target_world.set_block(
+            BlockPos::new(0, 65, 0),
+            vanilla_blocks::STONE.default_state(),
+            UpdateFlags::UPDATE_ALL,
+        ));
+
+        for tick in 1..=1_000 {
+            target_world.chunk_map.advance_scheduling();
+            server.tick_jobs(tick, true);
+            if server.jobs.is_empty() {
+                break;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+
+        assert!(server.jobs.is_empty());
+        assert!(!player.is_world_change_pending());
+        assert!(!source_world.contains_player(&player));
+        assert!(target_world.contains_player(&player));
+        assert_eq!(player.position(), DVec3::new(0.5, 66.0, 0.5));
+        assert_eq!(player.rotation(), (37.0, 0.0));
+
+        target_world.remove_player_for_world_change(&player);
+        assert!(server.online_players.remove_player_sync(&player).is_some());
+        source_world.chunk_map.stop_generation_refill_loop();
+        target_world.chunk_map.stop_generation_refill_loop();
+        source_world.chunk_map.task_tracker.close();
+        target_world.chunk_map.task_tracker.close();
+        tokio::join!(
+            source_world.chunk_map.task_tracker.wait(),
+            target_world.chunk_map.task_tracker.wait(),
+        );
 
         drop((player, server));
         if let Err(error) = fs::remove_dir_all(&storage_root).await {

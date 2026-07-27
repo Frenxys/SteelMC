@@ -217,20 +217,6 @@ fn apply_default_spawn(player: &Arc<Player>, world: &Arc<World>, spawn: Prepared
         .update_for_game_mode(world.default_gamemode);
 }
 
-fn world_spawn_transition(world: Arc<World>) -> TeleportTransition {
-    let spawn = local_respawn_data_for_world(&world);
-    TeleportTransition {
-        target_world: world,
-        position: respawn_position(&spawn),
-        rotation: (spawn.yaw, spawn.pitch),
-        velocity: DVec3::ZERO,
-        relatives: RelativeMovement::NONE,
-        portal_cooldown: 0,
-        as_passenger: false,
-        post_transition: TeleportPostTransition::do_nothing(),
-    }
-}
-
 fn is_allowed_to_enter_portal(source_world: &World, target_world: &World) -> bool {
     is_allowed_to_enter_portal_target(
         is_nether_dimension_type(target_world),
@@ -311,15 +297,6 @@ fn local_respawn_data_for_world(world: &World) -> RespawnData {
     let level_data = world.level_data.read();
     let data = level_data.data();
     RespawnData::of(world.key.clone(), data.spawn_pos(), data.spawn.angle, 0.0)
-}
-
-fn respawn_position(respawn_data: &RespawnData) -> DVec3 {
-    let pos = respawn_data.pos();
-    DVec3::new(
-        f64::from(pos.x()) + 0.5,
-        f64::from(pos.y()),
-        f64::from(pos.z()) + 0.5,
-    )
 }
 
 fn generation_settings_for_world(
@@ -416,7 +393,8 @@ mod world_changes;
 use jobs::domain_switch::DomainSwitchJob;
 use jobs::teleport::{
     EndGatewayTeleportJob, EndPortalTeleportJob, EnderPearlRestoreJob, NetherPortalTeleportJob,
-    RootVehicleRestoreJob, clear_pending_world_change, portal_entity_still_valid,
+    RootVehicleRestoreJob, WorldSpawnTeleportJob, clear_pending_world_change,
+    portal_entity_still_valid,
 };
 
 /// The main server struct.

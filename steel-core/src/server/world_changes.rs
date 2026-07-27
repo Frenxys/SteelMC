@@ -2,10 +2,9 @@ use super::{
     Arc, BlockPos, DomainSwitchJob, DomainSwitchRequest, EndGatewayTeleportJob,
     EndPortalTeleportJob, Entity, MenuRemovalStatus, NetherPortalTeleportJob, NetworkConnection,
     PendingWorldChangeToken, Player, PlayerAdmissionState, PortalKind, RespawnData, Server,
-    SharedEntity, World, WorldChangeRequest, can_teleport_between_worlds, change_entity_world,
-    clear_pending_world_change, is_allowed_to_enter_portal, is_end_dimension_type,
-    is_nether_dimension_type, mem, nether_portal, portal_entity_still_valid,
-    world_spawn_transition,
+    SharedEntity, World, WorldChangeRequest, WorldSpawnTeleportJob, can_teleport_between_worlds,
+    change_entity_world, clear_pending_world_change, is_allowed_to_enter_portal,
+    is_end_dimension_type, is_nether_dimension_type, mem, nether_portal, portal_entity_still_valid,
 };
 use crate::entity::LivingEntity as _;
 
@@ -27,7 +26,13 @@ impl Server {
                 WorldChangeRequest::WorldSpawn {
                     target_world,
                     pending_token,
-                } => self.process_player_world_selection(entity, target_world, pending_token),
+                } => self.process_player_world_selection(
+                    entity,
+                    target_world,
+                    pending_token,
+                    tick_count,
+                    runs_normally,
+                ),
                 WorldChangeRequest::Portal {
                     portal: PortalKind::Nether,
                     source_world,
@@ -553,10 +558,12 @@ impl Server {
     }
 
     fn process_player_world_selection(
-        &self,
+        self: &Arc<Self>,
         entity: SharedEntity,
         target_world: Arc<World>,
         pending_token: PendingWorldChangeToken,
+        tick_count: u64,
+        runs_normally: bool,
     ) {
         if !entity.is_world_change_token_pending(pending_token) {
             return;
@@ -566,24 +573,25 @@ impl Server {
             clear_pending_world_change(&entity, pending_token);
             return;
         };
-        let target_is_current = self
-            .worlds
-            .get(&target_world.key)
-            .is_some_and(|registered| Arc::ptr_eq(registered, &target_world));
-        let source_world = self.live_world_for_player(player);
-        let valid = !entity.is_removed()
-            && !player.connection.closed()
-            && player.get_health() > 0.0
-            && !player.has_won_game()
-            && target_is_current
-            && source_world
-                .as_ref()
-                .is_some_and(|source| source.domain() == target_world.domain());
-        if valid {
-            let transition = world_spawn_transition(target_world);
-            change_entity_world(Arc::clone(&entity), &transition);
-        }
-        clear_pending_world_change(&entity, pending_token);
+        let Some(source_world) = self.live_world_for_player(player) else {
+            clear_pending_world_change(&entity, pending_token);
+            return;
+        };
+        let job = match WorldSpawnTeleportJob::new(
+            Arc::clone(&entity),
+            source_world,
+            target_world,
+            pending_token,
+        ) {
+            Ok(job) => job,
+            Err(error) => {
+                clear_pending_world_change(&entity, pending_token);
+                log::warn!("Did not start player world selection: {error}");
+                return;
+            }
+        };
+        self.jobs
+            .poll_now_or_spawn(Arc::downgrade(self), tick_count, runs_normally, job);
     }
 
     /// Queues a world change to be processed after the current tick.

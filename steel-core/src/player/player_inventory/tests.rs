@@ -1388,6 +1388,84 @@ fn malformed_quickcraft_encoding_resets_active_drag() {
 }
 
 #[test]
+fn malformed_non_quickcraft_click_resets_active_drag() {
+    init_test_registry();
+    let probe_state = Arc::new(LockProbeState {
+        armed: AtomicBool::new(false),
+        saw_packet: AtomicBool::new(false),
+        all_callbacks_saw_container_unlocked: AtomicBool::new(true),
+    });
+    let connection = Arc::new(PlayerConnection::Other(Box::new(LockProbeConnection {
+        state: Arc::clone(&probe_state),
+        container: SimpleContainer::new(1).into_shared(),
+    })));
+    let player = TestPlayerBuilder::new(
+        Arc::clone(test_world()),
+        Uuid::from_u128(1),
+        "TestPlayer",
+        1,
+    )
+    .connection(connection)
+    .build();
+    player.set_client_loaded(true);
+    let out_of_range_slot = {
+        let mut menu = player.inventory_menu.lock();
+        *menu.behavior_mut().carried_mut() = ItemStack::with_count(&vanilla_items::STONE, 2);
+        menu.clicked(
+            Click::QuickCraft(QuickCraft::Start {
+                kind: DragKind::Left,
+            }),
+            &player,
+        );
+        menu.clicked(Click::QuickCraft(QuickCraft::AddSlot { slot: 36 }), &player);
+        assert_eq!(menu.behavior().quickcraft(), Some(DragKind::Left));
+        i16::try_from(menu.behavior().slot_count()).expect("inventory menu should fit in i16")
+    };
+
+    probe_state.armed.store(true, Ordering::Release);
+    player.handle_container_click(SContainerClick {
+        container_id: 0,
+        state_id: 1,
+        slot_num: out_of_range_slot,
+        button_num: 0,
+        click_type: ClickType::Pickup,
+        changed_slots: FxHashMap::default(),
+        carried_item: HashedStack::Empty,
+    });
+    assert_eq!(
+        player.inventory_menu.lock().behavior().quickcraft(),
+        Some(DragKind::Left)
+    );
+    assert!(!probe_state.saw_packet.load(Ordering::Acquire));
+    probe_state.armed.store(false, Ordering::Release);
+
+    player.handle_container_click(SContainerClick {
+        container_id: 0,
+        state_id: 0,
+        slot_num: 36,
+        button_num: 2,
+        click_type: ClickType::Pickup,
+        changed_slots: FxHashMap::default(),
+        carried_item: HashedStack::Empty,
+    });
+    assert_eq!(player.inventory_menu.lock().behavior().quickcraft(), None);
+    player.handle_container_click(SContainerClick {
+        container_id: 0,
+        state_id: 0,
+        slot_num: -999,
+        button_num: 2,
+        click_type: ClickType::QuickCraft,
+        changed_slots: FxHashMap::default(),
+        carried_item: HashedStack::Empty,
+    });
+
+    let menu = player.inventory_menu.lock();
+    assert_eq!(menu.behavior().quickcraft(), None);
+    assert_eq!(menu.behavior().carried().count(), 2);
+    assert!(player.inventory.lock().get_item(0).is_empty());
+}
+
+#[test]
 fn closing_menu_while_dead_does_not_return_items_to_inventory() {
     init_test_registry();
     let world = fresh_test_world("dead_menu_close");

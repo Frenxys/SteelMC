@@ -119,7 +119,11 @@ impl PlayerLifecycleState {
     }
 
     #[must_use]
-    pub(super) const fn domain_switch_allows_packet(self, handshake_packet: bool) -> bool {
+    pub(super) const fn gate_domain_switch_packet(
+        &mut self,
+        handshake_packet: bool,
+        defer_death_respawn: bool,
+    ) -> bool {
         match self.domain_switch {
             None
             | Some(DomainSwitchState {
@@ -133,7 +137,12 @@ impl PlayerLifecycleState {
             Some(DomainSwitchState {
                 phase: DomainSwitchPhase::Queued | DomainSwitchPhase::Detached,
                 ..
-            }) => false,
+            }) => {
+                if defer_death_respawn && self.respawn.is_none() {
+                    self.deferred_death_respawn = true;
+                }
+                false
+            }
         }
     }
 
@@ -365,11 +374,24 @@ impl Player {
         self.lifecycle.lock().domain_switch_blocks_gameplay()
     }
 
-    /// Returns whether the current domain phase accepts this packet class.
-    pub(crate) fn domain_switch_allows_packet(&self, handshake_packet: bool) -> bool {
+    /// Gates a packet against the current domain phase.
+    ///
+    /// A dead player's one-shot respawn request is retained while a queued or
+    /// detached switch blocks normal gameplay packets.
+    pub(crate) fn gate_domain_switch_packet(
+        &self,
+        handshake_packet: bool,
+        perform_respawn: bool,
+    ) -> bool {
+        let defer_death_respawn = perform_respawn && self.get_health() <= 0.0;
         self.lifecycle
             .lock()
-            .domain_switch_allows_packet(handshake_packet)
+            .gate_domain_switch_packet(handshake_packet, defer_death_respawn)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_deferred_death_respawn_for_test(&self) -> bool {
+        self.lifecycle.lock().deferred_death_respawn
     }
 
     /// Returns whether the server has inserted this player into a world.
@@ -451,8 +473,8 @@ mod tests {
         assert!(state.domain_switch_queued(first));
         assert!(!state.domain_switch_queued(second));
         assert!(state.domain_switch_blocks_gameplay());
-        assert!(!state.domain_switch_allows_packet(false));
-        assert!(!state.domain_switch_allows_packet(true));
+        assert!(!state.gate_domain_switch_packet(false, false));
+        assert!(!state.gate_domain_switch_packet(true, false));
 
         assert!(!state.mark_domain_switch_detached(second));
         assert!(state.mark_domain_switch_detached(first));
@@ -460,17 +482,19 @@ mod tests {
         assert!(state.domain_switch_detached(first));
         assert!(!state.domain_switch_detached(second));
         assert!(state.domain_switch_blocks_gameplay());
+        assert!(!state.gate_domain_switch_packet(false, true));
+        assert!(state.deferred_death_respawn);
 
         assert!(!state.mark_domain_switch_live(second));
         assert!(!state.mark_domain_switch_live(first));
         assert!(!state.mark_domain_switch_target_handshake(second));
         assert!(state.mark_domain_switch_target_handshake(first));
         assert!(state.domain_switch_blocks_gameplay());
-        assert!(!state.domain_switch_allows_packet(false));
-        assert!(state.domain_switch_allows_packet(true));
+        assert!(!state.gate_domain_switch_packet(false, false));
+        assert!(state.gate_domain_switch_packet(true, false));
         assert!(state.mark_domain_switch_live(first));
         assert!(!state.domain_switch_blocks_gameplay());
-        assert!(state.domain_switch_allows_packet(false));
+        assert!(state.gate_domain_switch_packet(false, false));
         assert!(!state.finish_domain_switch(second));
         assert!(state.domain_switching());
         assert!(state.begin_respawn(second));

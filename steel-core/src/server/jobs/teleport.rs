@@ -2,11 +2,12 @@ use super::super::{
     Arc, BlockPos, ChunkPos, ChunkRequest, ChunkRequestHandle, ChunkRequestState, ChunkStatus,
     ChunkStorage, ChunkTicketKind, DVec3, DomainResidenceToken, EntityBase, NetworkConnection,
     PendingWorldChangeToken, PersistentEntity, PersistentRootVehicle, Player, PlayerSpawnSearch,
-    PlayerSpawnSearchPoll, RemovalReason, RespawnData, SharedEntity, Uuid, World,
-    change_entity_world, end_gateway, end_portal, is_allowed_to_enter_portal, nether_portal,
-    vanilla_entities,
+    PlayerSpawnSearchPoll, PreparedSpawn, RelativeMovement, RemovalReason, RespawnData, Server,
+    SharedEntity, TeleportPostTransition, TeleportTransition, Uuid, World, change_entity_world,
+    end_gateway, end_portal, is_allowed_to_enter_portal, nether_portal, vanilla_entities,
 };
 use super::{JobPoll, ServerJob, ServerJobContext};
+use crate::entity::LivingEntity as _;
 
 pub(in crate::server) struct RootVehicleRestoreJob {
     player: Arc<Player>,
@@ -147,6 +148,159 @@ fn poll_portal_chunks_until_ready(
             } else {
                 Some(JobPoll::Pending)
             }
+        }
+    }
+}
+
+const WORLD_SPAWN_SEARCH_READY_CANDIDATE_BUDGET: usize = 8;
+
+pub(in crate::server) struct WorldSpawnTeleportJob {
+    entity: SharedEntity,
+    source_world: Arc<World>,
+    target_world: Arc<World>,
+    pending_token: PendingWorldChangeToken,
+    rotation: (f32, f32),
+    phase: WorldSpawnTeleportPhase,
+}
+
+enum WorldSpawnTeleportPhase {
+    Searching(PlayerSpawnSearch),
+    Loading {
+        spawn: PreparedSpawn,
+        request: ChunkRequestHandle,
+    },
+}
+
+impl WorldSpawnTeleportJob {
+    pub(in crate::server) fn new(
+        entity: SharedEntity,
+        source_world: Arc<World>,
+        target_world: Arc<World>,
+        pending_token: PendingWorldChangeToken,
+    ) -> Result<Self, String> {
+        if entity.as_player().is_none() {
+            return Err("world spawn selection does not belong to a player".to_owned());
+        }
+        let (spawn_suggestion, rotation) = {
+            let level_data = target_world.level_data.read();
+            let data = level_data.data();
+            (data.spawn_pos(), (data.spawn.angle, 0.0))
+        };
+        let search = PlayerSpawnSearch::new(
+            &target_world,
+            spawn_suggestion,
+            target_world.default_gamemode,
+        )?;
+        Ok(Self {
+            entity,
+            source_world,
+            target_world,
+            pending_token,
+            rotation,
+            phase: WorldSpawnTeleportPhase::Searching(search),
+        })
+    }
+
+    fn still_valid(&self, server: &Server) -> bool {
+        let Some(player) = self.entity.as_player() else {
+            return false;
+        };
+        !self.entity.is_removed()
+            && !player.connection.closed()
+            && player.get_health() > 0.0
+            && !player.has_won_game()
+            && self
+                .entity
+                .is_world_change_token_pending(self.pending_token)
+            && self
+                .entity
+                .level()
+                .is_some_and(|world| Arc::ptr_eq(&world, &self.source_world))
+            && self.source_world.contains_player(player)
+            && self.source_world.domain() == self.target_world.domain()
+            && server
+                .worlds
+                .get(&self.target_world.key)
+                .is_some_and(|registered| Arc::ptr_eq(registered, &self.target_world))
+    }
+
+    fn finish_pending(&self) {
+        clear_pending_world_change(&self.entity, self.pending_token);
+    }
+}
+
+impl ServerJob for WorldSpawnTeleportJob {
+    fn poll(&mut self, context: &mut ServerJobContext) -> JobPoll {
+        let Some(server) = context.server() else {
+            self.finish_pending();
+            return JobPoll::Finished;
+        };
+        if !self.still_valid(&server) {
+            self.finish_pending();
+            return JobPoll::Finished;
+        }
+
+        loop {
+            match &mut self.phase {
+                WorldSpawnTeleportPhase::Searching(search) => {
+                    match search.poll_with_ready_candidate_budget(
+                        &self.target_world,
+                        WORLD_SPAWN_SEARCH_READY_CANDIDATE_BUDGET,
+                    ) {
+                        PlayerSpawnSearchPoll::Pending => return JobPoll::Pending,
+                        PlayerSpawnSearchPoll::Cancelled => {
+                            self.finish_pending();
+                            return JobPoll::Finished;
+                        }
+                        PlayerSpawnSearchPoll::Ready(position) => {
+                            let spawn = PreparedSpawn {
+                                position,
+                                rotation: self.rotation,
+                            };
+                            let request = self
+                                .target_world
+                                .request_player_spawn_chunks(spawn.position);
+                            self.phase = WorldSpawnTeleportPhase::Loading { spawn, request };
+                        }
+                    }
+                }
+                WorldSpawnTeleportPhase::Loading { spawn, request } => match request.poll() {
+                    ChunkRequestState::Pending { .. } => return JobPoll::Pending,
+                    ChunkRequestState::Cancelled => {
+                        self.finish_pending();
+                        return JobPoll::Finished;
+                    }
+                    ChunkRequestState::Ready => {
+                        if request.ready_chunks().is_none() {
+                            return JobPoll::Pending;
+                        }
+                        let transition = TeleportTransition {
+                            target_world: Arc::clone(&self.target_world),
+                            position: spawn.position,
+                            rotation: spawn.rotation,
+                            velocity: DVec3::ZERO,
+                            relatives: RelativeMovement::NONE,
+                            portal_cooldown: 0,
+                            as_passenger: false,
+                            post_transition: TeleportPostTransition::do_nothing(),
+                        };
+                        let changed_entity =
+                            change_entity_world(Arc::clone(&self.entity), &transition);
+                        return finish_portal_world_change(
+                            &self.entity,
+                            self.pending_token,
+                            changed_entity,
+                        );
+                    }
+                },
+            }
+        }
+    }
+
+    fn cancel(&mut self) {
+        self.finish_pending();
+        if let WorldSpawnTeleportPhase::Loading { request, .. } = &mut self.phase {
+            request.cancel();
         }
     }
 }

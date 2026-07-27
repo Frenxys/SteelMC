@@ -1,8 +1,8 @@
 use super::{
     Arc, BlockBreakingManager, CContainerClose, CGameEvent, CRespawn, CSetDefaultSpawnPosition,
-    CSetHeldSlot, CSetPassengers, ChunkPos, ChunkSender, DVec3, Entity, GameEventType, GameType,
-    MenuRemovalStatus, MobEffectSyncChange, MobEffectSyncPacket, Player, RegistryEntry,
-    RelativeMovement, ResetReason, World,
+    CSetHeldSlot, CSetPassengers, DVec3, Entity, GameEventType, GameType, MenuRemovalStatus,
+    MobEffectSyncChange, MobEffectSyncPacket, Player, RegistryEntry, RelativeMovement, ResetReason,
+    World,
 };
 
 impl Player {
@@ -63,6 +63,8 @@ impl Player {
                 old_world.remove_player_for_world_change(self);
             }
             self.set_world(new_world.clone());
+        } else if !source_world_detached {
+            old_world.chunk_map.remove_player(self);
         }
 
         self.set_client_loaded(false);
@@ -71,16 +73,6 @@ impl Player {
         self.set_on_ground(false);
         self.reset_entity_state();
         *self.block_breaking.lock() = BlockBreakingManager::new();
-
-        // Reset chunk tracking — bump generation counter so the chunk sending tick
-        // discards any in-flight batch encoded against the old world.
-        {
-            let mut chunk_send_epoch = self.chunk_send_epoch.lock();
-            *chunk_send_epoch = chunk_send_epoch.wrapping_add(1);
-        }
-        *self.chunk_sender.lock() = ChunkSender::default();
-        *self.last_tracking_view.lock() = None;
-        *self.last_chunk_pos.lock() = ChunkPos::new(i32::MAX, i32::MAX);
 
         restore_state();
 
@@ -212,8 +204,8 @@ impl Player {
                 }
 
                 // Same world — re-enter chunk tracking
-                world.player_area_map.remove_by_entity_id(self.id());
                 world.chunk_map.remove_player(self);
+                world.player_area_map.remove_by_entity_id(self.id());
                 world.entity_tracker().on_player_leave(self.id());
 
                 self.send_packet(CGameEvent {

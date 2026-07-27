@@ -240,13 +240,25 @@ impl Player {
             return;
         }
 
-        // Parse and validate the raw click fields once. A malformed click
-        // (out-of-range slot, bad button, invalid drag encoding — including
-        // the -1 "no slot" clicks Java accepts) is not applied, but the state
-        // sync below still runs so the client's prediction gets corrected.
+        // Vanilla rejects positive out-of-range slots before applying client
+        // prediction hashes or resynchronizing the menu. Its validity check
+        // admits every negative slot because each is less than the slot count.
         let slot_count = menu.behavior().slot_count();
-        let packet_slot_in_bounds = packet.slot_num < 0
+        let packet_slot_is_valid = packet.slot_num < 0
             || usize::try_from(packet.slot_num).is_ok_and(|slot| slot < slot_count);
+        if !packet_slot_is_valid {
+            log::debug!(
+                "Player {} clicked invalid slot index: {}, available slots: {}",
+                self.gameprofile.name,
+                packet.slot_num,
+                slot_count
+            );
+            return;
+        }
+
+        // Parse and validate the remaining raw click fields once. A malformed
+        // button or drag encoding is not applied, but the state sync below
+        // still runs so the client's prediction gets corrected.
         let click = Click::parse(
             packet.slot_num,
             packet.button_num,
@@ -261,11 +273,14 @@ impl Player {
                 packet.button_num,
                 packet.click_type
             );
+            // Vanilla rejects positive out-of-range slots before `doClick`.
+            // Once admitted, any non-QuickCraft input cancels an active drag,
+            // and malformed QuickCraft headers/types reset their own state.
             let quick_craft_header = packet.button_num & 3;
             let quick_craft_type = (packet.button_num >> 2) & 3;
-            if packet_slot_in_bounds
-                && packet.click_type == ClickType::QuickCraft
-                && (quick_craft_header == 3 || (quick_craft_header == 0 && quick_craft_type == 3))
+            if packet.click_type != ClickType::QuickCraft
+                || quick_craft_header == 3
+                || (quick_craft_header == 0 && quick_craft_type == 3)
             {
                 menu.behavior_mut().reset_quick_craft();
             }

@@ -42,11 +42,7 @@ pub(super) fn potion_name(stack: &ItemStack) -> Cow<'_, TextComponent> {
     };
     let suffix = contents
         .custom_name()
-        .or_else(|| {
-            contents
-                .potion()
-                .map(|potion| potion.value().key.path.as_ref())
-        })
+        .or_else(|| contents.potion().map(|potion| potion.value().name))
         .unwrap_or("empty");
     translated(format!("{description_id}.effect.{suffix}"), None)
 }
@@ -84,39 +80,41 @@ mod tests {
     fn every_mc26_dynamic_item_name_override_uses_stack_components() {
         init_test_registry();
         init_behaviors();
-        let healing = REGISTRY
-            .potions
-            .by_key(&Identifier::vanilla_static("healing"))
-            .expect("healing potion should be registered");
-        for (item, expected) in [
-            (
-                &*vanilla_items::POTION,
-                "item.minecraft.potion.effect.healing",
-            ),
-            (
-                &*vanilla_items::SPLASH_POTION,
-                "item.minecraft.splash_potion.effect.healing",
-            ),
-            (
-                &*vanilla_items::LINGERING_POTION,
-                "item.minecraft.lingering_potion.effect.healing",
-            ),
-            (
-                &*vanilla_items::TIPPED_ARROW,
-                "item.minecraft.tipped_arrow.effect.healing",
-            ),
-        ] {
-            let mut stack = ItemStack::new(item);
-            stack.set(
-                POTION_CONTENTS,
-                PotionContents::new(
-                    Some(RegistryReference::new(healing)),
-                    None,
-                    Vec::new(),
-                    None,
+        for potion_key in ["long_swiftness", "strong_swiftness"] {
+            let potion = REGISTRY
+                .potions
+                .by_key(&Identifier::vanilla_static(potion_key))
+                .expect("swiftness potion variant should be registered");
+            for (item, expected) in [
+                (
+                    &*vanilla_items::POTION,
+                    "item.minecraft.potion.effect.swiftness",
                 ),
-            );
-            assert_eq!(translated_key(&stack), expected);
+                (
+                    &*vanilla_items::SPLASH_POTION,
+                    "item.minecraft.splash_potion.effect.swiftness",
+                ),
+                (
+                    &*vanilla_items::LINGERING_POTION,
+                    "item.minecraft.lingering_potion.effect.swiftness",
+                ),
+                (
+                    &*vanilla_items::TIPPED_ARROW,
+                    "item.minecraft.tipped_arrow.effect.swiftness",
+                ),
+            ] {
+                let mut stack = ItemStack::new(item);
+                stack.set(
+                    POTION_CONTENTS,
+                    PotionContents::new(
+                        Some(RegistryReference::new(potion)),
+                        None,
+                        Vec::new(),
+                        None,
+                    ),
+                );
+                assert_eq!(translated_key(&stack), expected);
+            }
         }
 
         let mut compass = ItemStack::new(&vanilla_items::COMPASS);

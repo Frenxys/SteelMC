@@ -224,7 +224,7 @@ fn rename_uses_java_blank_rules() {
 }
 
 #[test]
-fn unchanged_dynamic_potion_name_does_not_create_rename_result() {
+fn unchanged_extended_potion_name_does_not_create_rename_result() {
     let (_world, player, _pos, mut menu) = test_anvil("anvil_dynamic_potion_name");
     let Some(kind) = menu.kind().downcast_ref::<AnvilKind>() else {
         panic!("anvil builder should create an anvil menu");
@@ -234,15 +234,15 @@ fn unchanged_dynamic_potion_name_does_not_create_rename_result() {
         Arc::clone(&kind.result_container),
         kind.level_cost,
     );
-    let healing = REGISTRY
+    let long_swiftness = REGISTRY
         .potions
-        .by_key(&steel_utils::Identifier::vanilla_static("healing"))
-        .expect("healing potion should be registered");
+        .by_key(&steel_utils::Identifier::vanilla_static("long_swiftness"))
+        .expect("long swiftness potion should be registered");
     let mut potion = ItemStack::new(&vanilla_items::POTION);
     potion.set(
         POTION_CONTENTS,
         PotionContents::new(
-            Some(RegistryReference::new(healing)),
+            Some(RegistryReference::new(long_swiftness)),
             None,
             Vec::new(),
             None,
@@ -250,7 +250,7 @@ fn unchanged_dynamic_potion_name_does_not_create_rename_result() {
     );
     input_container.lock().set_item(0, potion);
 
-    menu.set_item_name("Potion of Healing", &player);
+    menu.set_item_name("Potion of Swiftness", &player);
 
     assert!(result_container.lock().get_item(0).is_empty());
     assert_eq!(level_cost.get(menu.behavior()), 0);

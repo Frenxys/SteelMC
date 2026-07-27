@@ -100,7 +100,10 @@ mod tests {
     use steel_registry::test_support::init_test_registry;
     use steel_utils::Identifier;
 
-    #[expect(clippy::too_many_lines, reason = "its fine")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one cohesive test keeps the expected command graph shape auditable"
+    )]
     #[test]
     fn first_builtin_slice_has_the_expected_graph_shape() {
         init_test_registry();
