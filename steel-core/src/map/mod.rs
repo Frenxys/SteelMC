@@ -1,6 +1,7 @@
 //! Domain-scoped map saved data.
 
 pub(crate) mod biome_preview;
+mod terrain;
 mod tracking;
 
 use std::{collections::BTreeMap, io, sync::Arc};

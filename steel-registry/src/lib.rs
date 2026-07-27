@@ -66,6 +66,7 @@ pub mod items;
 pub mod jukebox_song;
 pub mod loot_table;
 mod macros;
+pub mod map_color;
 pub mod map_decoration_type;
 pub mod menu_type;
 pub mod mob_effect;
