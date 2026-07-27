@@ -68,6 +68,27 @@ pub(crate) struct NewMapData {
     pub(crate) colors: Vec<u8>,
 }
 
+impl NewMapData {
+    /// Creates blank map data matching Vanilla `MapItem.create`.
+    pub(crate) fn blank(
+        world: &World,
+        origin: BlockPos,
+        scale: i8,
+        tracking_position: bool,
+        unlimited_tracking: bool,
+    ) -> Self {
+        Self {
+            origin,
+            scale,
+            tracking_position,
+            unlimited_tracking,
+            world: world.key.clone(),
+            dimension_type: world.dimension_type.key.clone(),
+            colors: vec![0; MAP_COLOR_COUNT],
+        }
+    }
+}
+
 #[derive(SchemaWrite, SchemaRead)]
 struct PersistentMapData {
     last_map_id: i32,
@@ -176,7 +197,6 @@ impl MapDataStore {
     }
 
     /// Allocates and stores a fresh map centered with Vanilla's grid formula.
-    #[cfg(test)]
     pub(crate) fn create_map(&self, map: NewMapData) -> io::Result<MapId> {
         let mut ids = self.create_maps(vec![map])?;
         ids.pop()
