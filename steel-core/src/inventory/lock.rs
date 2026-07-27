@@ -558,7 +558,7 @@ mod tests {
         .expect("barrel should expose a container capability");
         let player = TestPlayerBuilder::new(
             Arc::clone(&world),
-            Uuid::from_u128(0x5354_414c_45),
+            Uuid::from_u128(0x0053_5441_4c45),
             "Stale",
             91,
         )

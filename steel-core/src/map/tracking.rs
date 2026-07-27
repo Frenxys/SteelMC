@@ -729,6 +729,7 @@ fn remove_decoration(decorations: &mut Vec<(String, MapDecoration)>, id: &str) {
 mod tests {
     use std::{thread, time::Duration};
 
+    use futures::executor;
     use glam::DVec3;
     use steel_registry::{
         RegistryReference,
@@ -975,6 +976,11 @@ mod tests {
         let _ = world.detach_player_for_disconnect(player);
         let tracking = store.tracking.lock();
         assert!(tracking.maps[&map_id.id()].holders.is_empty());
+        drop(tracking);
+
+        world.chunk_map.stop_generation_refill_loop();
+        world.chunk_map.task_tracker.close();
+        executor::block_on(world.chunk_map.task_tracker.wait());
     }
 
     #[test]

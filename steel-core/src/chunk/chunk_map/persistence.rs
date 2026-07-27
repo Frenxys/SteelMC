@@ -1,3 +1,5 @@
+use std::io;
+
 use super::{
     Arc, ChunkHolder, ChunkMap, ChunkPos, ChunkSaveDependency, ChunkSaveOutcome, ChunkStatus,
     ChunkStorage, ClearedBlockEntities, FinalizedBlockEntityUnload, FxHashSet, instrument, mem,
@@ -6,7 +8,7 @@ use crate::chunk_saver::PreparedChunkSave;
 use tokio::sync::oneshot;
 
 impl ChunkMap {
-    pub(crate) async fn close_storage_without_saving(&self) -> std::io::Result<()> {
+    pub(crate) async fn close_storage_without_saving(&self) -> io::Result<()> {
         self.storage.close_all().await
     }
 

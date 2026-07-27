@@ -15,6 +15,7 @@ use futures::FutureExt;
 use steel::config::{self, LogConfig};
 use steel::logger::CommandLogger;
 use steel::{SERVER, SteelServer, logger::LoggerLayer};
+use steel_core::player::Player;
 use steel_core::player::player_data::PersistentPlayerData;
 use steel_core::player::player_data_storage::GlobalPlayerData;
 use steel_core::player::player_inventory::MenuRemovalStatus;
@@ -397,6 +398,16 @@ async fn shutdown_worlds(server: &Arc<Server>) {
         log::error!("Failed to flush known player cache during shutdown: {error}");
     }
 
+    let players_to_save = stop_worlds_and_snapshot_players(server).await;
+
+    log::info!("Saving world data...");
+    let domains_with_map_save_failures = save_world_data_for_shutdown(server).await;
+    save_player_data_for_shutdown(server, players_to_save, &domains_with_map_save_failures).await;
+}
+
+type PendingPlayerSave = (Arc<Player>, String, PersistentPlayerData);
+
+async fn stop_worlds_and_snapshot_players(server: &Arc<Server>) -> Vec<PendingPlayerSave> {
     let players = server.get_players();
     for player in &players {
         player.close_connection();
@@ -420,9 +431,10 @@ async fn shutdown_worlds(server: &Arc<Server>) {
         player.store_ender_pearls_with_player();
         players_to_save.push((player, domain, data));
     }
+    players_to_save
+}
 
-    // Save all dirty chunks before shutdown
-    log::info!("Saving world data...");
+async fn save_world_data_for_shutdown(server: &Arc<Server>) -> BTreeSet<String> {
     let command_data = server.save_command_data().await;
     match command_data.scoreboards {
         Ok(saved) => log::info!("Saved {saved} domain scoreboards"),
@@ -490,8 +502,14 @@ async fn shutdown_worlds(server: &Arc<Server>) {
             }
         }
     }
+    domains_with_map_save_failures
+}
 
-    // Save all player data before shutdown
+async fn save_player_data_for_shutdown(
+    server: &Arc<Server>,
+    players_to_save: Vec<PendingPlayerSave>,
+    domains_with_map_save_failures: &BTreeSet<String>,
+) {
     log::info!("Saving player data...");
     let mut saved = 0;
     for (player, domain, data) in players_to_save {
