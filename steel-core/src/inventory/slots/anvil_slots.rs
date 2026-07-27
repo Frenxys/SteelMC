@@ -13,7 +13,7 @@ use crate::{
     behavior::blocks::AnvilBlock,
     inventory::{
         container::{ResultContainer, SimpleContainer},
-        lock::{ContainerId, ContainerLockGuard},
+        lock::{ContainerId, ContainerLockGuard, ContainerRef},
         slots::ResultHandler,
     },
     player::Player,
@@ -69,6 +69,14 @@ impl AnvilResultHandler {
 }
 
 impl ResultHandler for AnvilResultHandler {
+    fn result_container(&self) -> ContainerRef {
+        ContainerRef::from(self.result_container.clone())
+    }
+
+    fn dependencies(&self) -> Vec<ContainerRef> {
+        vec![ContainerRef::from(self.input_container.clone())]
+    }
+
     fn update_result(&self, _guard: &mut ContainerLockGuard) {}
 
     fn on_result_taken(

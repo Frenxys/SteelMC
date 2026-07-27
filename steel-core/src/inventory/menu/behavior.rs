@@ -225,7 +225,7 @@ impl MenuBehavior {
 
         let backwards = direction == FillDirection::Backward;
         let mut anything_changed = false;
-        let source_key = self.slots[source_slot].container_key();
+        let source_key = self.slots[source_slot].storage().physical_key();
 
         // First pass: stack onto existing items.
         if item_stack.is_stackable() {
@@ -242,7 +242,7 @@ impl MenuBehavior {
 
                 let slot = &self.slots[dest_slot];
                 if dest_slot == source_slot
-                    || source_key.is_some_and(|key| slot.container_key() == Some(key))
+                    || source_key.is_some_and(|key| slot.storage().physical_key() == Some(key))
                 {
                     if backwards {
                         if dest_slot == 0 {
@@ -297,7 +297,7 @@ impl MenuBehavior {
             } {
                 let slot = &self.slots[dest_slot];
                 if dest_slot == source_slot
-                    || source_key.is_some_and(|key| slot.container_key() == Some(key))
+                    || source_key.is_some_and(|key| slot.storage().physical_key() == Some(key))
                 {
                     if backwards {
                         if dest_slot == 0 {
@@ -354,7 +354,7 @@ impl MenuBehavior {
             if slot.is_fake() {
                 continue;
             }
-            if let Some(key) = slot.container_key() {
+            if let Some(key) = slot.storage().physical_key() {
                 other_slots.insert(key, slot_index);
             }
         }
@@ -363,7 +363,7 @@ impl MenuBehavior {
             if slot.is_fake() {
                 continue;
             }
-            if let Some(key) = slot.container_key()
+            if let Some(key) = slot.storage().physical_key()
                 && let Some(&other_slot_index) = other_slots.get(&key)
             {
                 self.remote_slots[slot_index] = other.remote_slots[other_slot_index].clone();
@@ -573,7 +573,7 @@ impl MenuBehavior {
         // A drag must go Start -> AddSlot* -> End.
         let valid_transition = match action {
             QuickCraft::Start { .. } => self.quickcraft.is_none(),
-            QuickCraft::AddSlot { .. } | QuickCraft::End { .. } => self.quickcraft.is_some(),
+            QuickCraft::AddSlot { .. } | QuickCraft::End => self.quickcraft.is_some(),
         };
         if !valid_transition {
             self.reset_quick_craft();
@@ -595,9 +595,7 @@ impl MenuBehavior {
                 self.quickcraft = Some(kind);
                 self.quickcraft_slots.clear();
             }
-            QuickCraft::AddSlot {
-                slot: slot_index, ..
-            } => {
+            QuickCraft::AddSlot { slot: slot_index } => {
                 let slot = &self.slots[slot_index];
 
                 let guard = self.lock_all_containers();
@@ -613,7 +611,7 @@ impl MenuBehavior {
                     self.quickcraft_slots.push(slot_index);
                 }
             }
-            QuickCraft::End { .. } => self.finish_quick_craft(player, can_drag_to),
+            QuickCraft::End => self.finish_quick_craft(player, can_drag_to),
         }
     }
 
@@ -629,10 +627,12 @@ impl MenuBehavior {
                 // A single slot behaves as a regular pickup click.
                 let slot = self.quickcraft_slots[0];
                 self.reset_quick_craft();
-                let button = if kind == DragKind::Left {
-                    MouseButton::Left
-                } else {
-                    MouseButton::Right
+                let button = match kind {
+                    DragKind::Left => MouseButton::Left,
+                    DragKind::Right => MouseButton::Right,
+                    // Vanilla replays the clone drag type as a pickup button.
+                    // Pickup only accepts buttons 0 and 1, so type 2 is a no-op.
+                    DragKind::Clone => return,
                 };
                 self.do_pickup(slot, button, player);
                 return;
@@ -1063,11 +1063,8 @@ mod tests {
         }));
         let container_ref = ContainerRef::from(container);
         let mut builder = MenuBuilder::new(None, 1);
-        builder.custom_section(
-            [NormalSlot::new(container_ref.clone(), 0)],
-            [container_ref.clone()],
-        );
-        (builder.build(BasicKind {}), container_ref)
+        builder.section(container_ref.clone(), 1);
+        (builder.build(BasicKind), container_ref)
     }
 
     #[test]
@@ -1129,20 +1126,12 @@ mod tests {
         let container_ref = ContainerRef::from(container);
 
         let mut builder = MenuBuilder::new(None, 1);
-        builder.custom_boxed_section(
-            [
-                Box::new(NormalSlot::new(container_ref.clone(), 0)) as Box<dyn Slot>,
-                Box::new(RestrictedSlot::new(
-                    container_ref.clone(),
-                    0,
-                    Arc::new(|_, _| true),
-                    None,
-                )),
-                Box::new(NormalSlot::new(container_ref.clone(), 1)),
-            ],
-            [container_ref.clone()],
-        );
-        let menu = builder.build(BasicKind {});
+        builder.custom_boxed_section([
+            Box::new(NormalSlot::new(container_ref.clone(), 0)) as Box<dyn Slot>,
+            Box::new(RestrictedSlot::new(container_ref.clone(), 0, |_, _| true)),
+            Box::new(NormalSlot::new(container_ref.clone(), 1)),
+        ]);
+        let menu = builder.build(BasicKind);
         let behavior = menu.behavior();
         let mut guard = behavior.lock_all_containers();
         let clicked = behavior.slots()[0].get_item(&guard).clone();

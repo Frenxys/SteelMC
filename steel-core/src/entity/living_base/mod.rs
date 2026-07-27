@@ -1575,6 +1575,22 @@ impl LivingEntityBase {
     /// Resets state that vanilla gets from constructing a fresh living player for death respawn.
     pub fn reset_for_player_respawn(&self) {
         self.set_sprinting(false);
+
+        // Vanilla respawns with a newly constructed `LivingEntity`, whose
+        // equipment snapshots and related runtime bookkeeping start empty.
+        // Steel reuses the same `Player`, so reset those fields explicitly.
+        *self.last_equipment_items.lock() = array::from_fn(|_| ItemStack::empty());
+        *self.pending_equipment_changes.lock() = array::from_fn(|_| None);
+        {
+            let mut attributes = self.attributes.lock();
+            let mut installed_modifiers = self.equipment_attribute_modifiers.lock();
+            for modifiers in installed_modifiers.iter_mut() {
+                for key in modifiers.drain(..) {
+                    attributes.remove_modifier(key.attribute, &key.id);
+                }
+            }
+        }
+
         let removed_effects = {
             let mut effects = self.active_mob_effects.lock();
             let removed_effects = effects.keys().copied().collect::<Vec<_>>();

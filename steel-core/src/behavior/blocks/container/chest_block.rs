@@ -117,8 +117,8 @@ impl ChestBlock {
             .collect();
         let openers = combination.entities;
         let inventory = player.inventory.clone();
-        player.open_menu(title, move |id, _world| {
-            chest_with_openers(inventory, id, sections, rows, openers)
+        player.open_menu(title, move |context| {
+            chest_with_openers(inventory, context.container_id, sections, rows, openers)
         });
     }
 

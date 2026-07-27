@@ -39,10 +39,8 @@ fn partial_result_overflow_uses_the_default_drop_policy() {
     let Some(kind) = menu.kind().downcast_ref::<CraftingKind>() else {
         panic!("crafting builder should create a crafting menu");
     };
-    let (crafting_container, result_container) = (
-        kind.handler.crafting_container(),
-        kind.handler.result_container(),
-    );
+    let (crafting_container, result_id) =
+        (kind.handler.crafting_container(), kind.handler.result_id());
 
     *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::OAK_LOG);
     menu.clicked(
@@ -52,7 +50,13 @@ fn partial_result_overflow_uses_the_default_drop_policy() {
         },
         &player,
     );
-    let result = result_container.lock().get_item(0).clone();
+    let result = menu
+        .behavior()
+        .lock_all_containers()
+        .get(result_id)
+        .expect("result container is registered with the menu")
+        .get_item(0)
+        .clone();
     assert!(result.is(&vanilla_items::OAK_PLANKS));
     assert_eq!(result.count(), 4);
 
@@ -69,7 +73,14 @@ fn partial_result_overflow_uses_the_default_drop_policy() {
     menu.clicked(Click::QuickMove { slot: 0 }, &player);
 
     assert!(crafting_container.lock().get_item(0).is_empty());
-    assert!(result_container.lock().get_item(0).is_empty());
+    assert!(
+        menu.behavior()
+            .lock_all_containers()
+            .get(result_id)
+            .expect("result container is registered with the menu")
+            .get_item(0)
+            .is_empty()
+    );
     assert_eq!(player.inventory.lock().get_item(8).count(), 64);
     let dropped = world.get_entities_in_aabb_matching(
         &WorldAabb::new(-2.0, 62.0, -2.0, 2.0, 68.0, 2.0),

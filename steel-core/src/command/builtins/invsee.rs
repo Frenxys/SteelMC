@@ -19,11 +19,10 @@ use super::super::{
 use crate::entity::Entity;
 use crate::inventory::menu::Menu;
 use crate::inventory::prelude::*;
-use crate::inventory::slots::{
-    CraftingHandler, MayPickupFn, MayPlaceFn, NormalSlot, RestrictedSlot,
-};
+use crate::inventory::slots::CraftingHandler;
 use crate::permission::{PermissionExpr, PermissionKey, PermissionKeyError};
-use crate::player::{Player, connection::NetworkConnection, player_inventory::PlayerInventory};
+use crate::player::player_inventory::{PlayerInventory, armor_equipment};
+use crate::player::{Player, connection::NetworkConnection};
 
 const INVSEE_PERMISSION: &str = "steel.command.invsee";
 const MODIFY_PERMISSION: &str = "steel.command.invsee.modify";
@@ -37,10 +36,9 @@ pub(super) fn registration() -> Result<CommandRegistration<CommandSource>, Comma
             source,
         }
     })?;
-    let command_access = access_permission.clone();
     let command_modify = modify_permission.clone();
     Ok(
-        CommandRegistration::new(id, move |_| command(command_access, command_modify))
+        CommandRegistration::new(id, move |_| command(command_modify))
             .permission(access_permission),
     )
 }
@@ -52,7 +50,6 @@ fn invsee_permissions() -> Result<(PermissionExpr, PermissionExpr), PermissionKe
 }
 
 fn command(
-    access_permission: PermissionExpr,
     modify_permission: PermissionExpr,
 ) -> CommandNodeBuilder<CommandSource, SteelCommandRuntime> {
     literal("invsee").then(
@@ -64,14 +61,14 @@ fn command(
                 )));
             };
             ensure_same_domain(source, &target)?;
+            // Command permissions belong to the initiating authorization even
+            // when `/execute as` changes which player receives the menu. Capture
+            // the resulting mode once when the menu opens.
             let modify = ctx.source().has_permission(&modify_permission);
-            let required_permission = if modify {
-                modify_permission.clone()
-            } else {
-                access_permission.clone()
-            };
-            source.open_menu(target.display_name(), |container_id, _world| {
-                invsee(container_id, source, &target, modify, required_permission)
+            let opener = Arc::clone(source);
+            let menu_source = Arc::clone(source);
+            opener.open_menu(target.display_name(), move |context| {
+                invsee(context.container_id, &menu_source, &target, modify)
             });
             Ok(1)
         }),
@@ -94,50 +91,37 @@ fn ensure_same_domain(source: &Player, target: &Player) -> Result<(), CommandSyn
     ))
 }
 
-fn invsee(
-    container_id: u8,
-    source: &Arc<Player>,
-    target: &Arc<Player>,
-    modify: bool,
-    required_permission: PermissionExpr,
-) -> Menu {
+fn invsee(container_id: u8, source: &Arc<Player>, target: &Arc<Player>, modify: bool) -> Menu {
     let mut b = MenuBuilder::new(&vanilla_menu_types::GENERIC_9X5, container_id);
 
-    let target_ref = ContainerRef::from(target.inventory.clone());
-    let target_inventory = if modify {
-        b.player_inventory(&target.inventory).all()
+    let kind = if modify {
+        SectionKind::Normal
     } else {
-        readonly_section(&mut b, &target_ref, (9..36).chain(0..9))
+        SectionKind::Display
     };
 
-    let armor = if modify {
-        // Administrative modification is intentionally not constrained by equipment rules.
-        b.custom_section(
-            [39, 38, 37, 36].map(|index| NormalSlot::new(target_ref.clone(), index)),
-            [target_ref.clone()],
-        )
+    let target_inventory = b.player_inventory_with(&target.inventory, &kind);
+
+    let armor_kind = if modify {
+        SectionKind::restricted(|index, item| item.is_equippable_in_slot(armor_equipment(index)))
     } else {
-        readonly_section(&mut b, &target_ref, [39, 38, 37, 36])
+        SectionKind::Display
     };
-    let offhand = if modify {
-        b.custom_section(
-            [NormalSlot::new(target_ref.clone(), 40)],
-            [target_ref.clone()],
-        )
-    } else {
-        readonly_section(&mut b, &target_ref, [40])
-    };
+    let armor = b.section_at(
+        &target.inventory,
+        PlayerInventory::ARMOR_TOP_DOWN,
+        armor_kind,
+    );
+    let offhand = b.section_at(&target.inventory, [PlayerInventory::SLOT_OFFHAND], kind);
 
     let crafting_handler = target.inventory_crafting_handler();
     let crafting_container = crafting_handler.crafting_container();
-    let result_container = crafting_handler.result_container();
     let crafting = if modify {
-        // Crafting inputs may leave this menu but never enter through it.
-        b.restricted_section(crafting_container, 4, |_, _| false)
+        b.section_all_with(crafting_container, SectionKind::take_only())
     } else {
-        b.display_section(crafting_container, 4)
+        b.section_all_with(crafting_container, SectionKind::Display)
     };
-    b.register_container(result_container);
+    b.register_container(crafting_handler.result_container());
 
     let target_slots = 0..b.slot_count();
     let viewer = b.player_inventory(&source.inventory);
@@ -145,16 +129,20 @@ fn invsee(
     if modify {
         let inventories_alias = Arc::ptr_eq(&source.inventory, &target.inventory);
         if !inventories_alias {
-            b.route(target_inventory, [viewer.all()], FillDirection::Backward);
+            b.route(
+                target_inventory.all(),
+                viewer.all(),
+                FillDirection::Backward,
+            );
             b.route(
                 viewer.all(),
-                [target_inventory, armor, offhand],
+                [target_inventory.all(), armor, offhand],
                 FillDirection::Forward,
             );
         }
         b.route(
             [armor, offhand, crafting],
-            [viewer.all()],
+            viewer.all(),
             FillDirection::Backward,
         );
     }
@@ -163,7 +151,6 @@ fn invsee(
         target: Arc::downgrade(target),
         target_inventory_id: ContainerId::from_arc(&target.inventory),
         domain: target.get_world().domain().into(),
-        required_permission,
         modify,
         target_slots,
         crafting,
@@ -172,29 +159,10 @@ fn invsee(
     })
 }
 
-fn readonly_section(
-    builder: &mut MenuBuilder,
-    container: &ContainerRef,
-    indices: impl IntoIterator<Item = usize>,
-) -> Section {
-    let may_place: MayPlaceFn = Arc::new(|_, _| false);
-    let may_pickup: MayPickupFn = Arc::new(|_, _, _, _| false);
-    let slots = indices.into_iter().map(|index| {
-        RestrictedSlot::new(
-            container.clone(),
-            index,
-            may_place.clone(),
-            Some(may_pickup.clone()),
-        )
-    });
-    builder.custom_section(slots, [container.clone()])
-}
-
 struct InvseeMenuKind {
     target: Weak<Player>,
     target_inventory_id: ContainerId,
     domain: Box<str>,
-    required_permission: PermissionExpr,
     modify: bool,
     target_slots: Range<usize>,
     crafting: Section,
@@ -278,8 +246,7 @@ impl MenuKind for InvseeMenuKind {
         };
         let player_world = player.get_world();
         let target_world = target.get_world();
-        player.has_permission(&self.required_permission)
-            && !player.is_domain_switching()
+        !player.is_domain_switching()
             && !target.connection.closed()
             && !target.is_domain_switching()
             && player_world.domain() == self.domain.as_ref()

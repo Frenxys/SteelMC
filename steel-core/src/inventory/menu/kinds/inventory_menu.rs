@@ -13,9 +13,9 @@ use steel_utils::locks::{IntoShared, Shared};
 
 use crate::inventory::container::{CraftingContainer, ResultContainer};
 use crate::inventory::prelude::*;
-use crate::inventory::slots::{CraftingHandler, NormalSlot, armor_slots};
+use crate::inventory::slots::{ArmorSlot, CraftingHandler};
 use crate::player::Player;
-use crate::player::player_inventory::PlayerInventory;
+use crate::player::player_inventory::{PlayerInventory, armor_equipment};
 
 /// Container ID for the player inventory (always 0).
 pub const INVENTORY_MENU_CONTAINER_ID: u8 = 0;
@@ -35,16 +35,28 @@ pub fn inventory_menu(inventory: Shared<PlayerInventory>) -> Menu {
 
     let mut builder = MenuBuilder::new(None, INVENTORY_MENU_CONTAINER_ID);
 
-    let result = builder.result_slot(handler.clone(), result_container.clone());
-    let grid = builder.section(crafting_container, 4);
-    // Armor maps head, chest, legs, feet to inventory slots 39, 38, 37, 36.
-    let armor = builder.custom_section(armor_slots(&inventory), [inventory.clone()]);
+    let result = builder.result_slot(handler.clone());
+    let grid = builder.section_all(crafting_container);
+    let armor = builder.section_at(
+        &inventory,
+        PlayerInventory::ARMOR_TOP_DOWN,
+        SectionKind::custom(|container, index| {
+            Box::new(ArmorSlot::new(
+                container.clone(),
+                index,
+                armor_equipment(index),
+            ))
+        }),
+    );
     let player = builder.player_inventory(&inventory);
-    // Offhand is inventory slot 40.
-    let offhand = builder.custom_section([NormalSlot::new(inventory.clone(), 40)], [inventory]);
+    let offhand = builder.section_at(
+        &inventory,
+        [PlayerInventory::SLOT_OFFHAND],
+        SectionKind::Normal,
+    );
 
     // No routes: quick_move is a custom override. The grid drains on close.
-    builder.drain([grid]);
+    builder.drain(grid);
 
     builder.build(InventoryKind {
         result_container,

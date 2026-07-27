@@ -1,9 +1,14 @@
 //! Player inventory management.
 
+use std::sync::Arc;
+
 use text_components::TextComponent;
 
-use crate::inventory::lock::ContainerId;
-use crate::inventory::menu::Menu;
+use crate::{
+    inventory::{lock::ContainerId, menu::Menu},
+    player::Player,
+    world::World,
+};
 
 mod container;
 mod core;
@@ -11,8 +16,19 @@ mod equipment;
 mod player_handlers;
 
 pub use container::InvalidHotbarSlot;
+pub(crate) use container::armor_equipment;
 pub use core::PlayerInventory;
 pub use equipment::EquipmentSwapResult;
+
+/// Inputs supplied when an external menu factory is safe to execute.
+pub struct MenuOpenContext<'a> {
+    /// Wire container id allocated for this menu.
+    pub container_id: u8,
+    /// Player opening the menu.
+    pub player: &'a Player,
+    /// Player's world at factory execution time.
+    pub world: &'a Arc<World>,
+}
 
 /// Whether a terminal menu removal completed synchronously.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +117,15 @@ struct TerminalMenuRemoval {
 
 enum DeferredMenuAction {
     Close { send_packet: bool },
-    Open(Box<PreparedMenu>),
+    Open(Box<PendingMenuOpen>),
+    Install(Box<PreparedMenu>),
+}
+
+type MenuFactory = Box<dyn for<'a> FnOnce(MenuOpenContext<'a>) -> Menu + Send + 'static>;
+
+struct PendingMenuOpen {
+    title: TextComponent,
+    create: MenuFactory,
 }
 
 struct PreparedMenu {

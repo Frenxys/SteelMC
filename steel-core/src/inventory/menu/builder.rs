@@ -12,15 +12,15 @@
 //!     let items = vec![ItemStack::new(&vanilla_items::FLINT_AND_STEEL); 9];
 //!     let container = SimpleContainer::from_items(items).into_shared();
 //!
-//!     let section = builder.section(container, 9);
+//!     let section = builder.section_all(container);
 //!
 //!     let player = builder.player_inventory(&inventory);
 //!     let level_cost = builder.data_slot(0);
 //!
-//!     builder.route(section, [player.all()], FillDirection::Backward);
-//!     builder.route(player.all(), [section], FillDirection::Forward);
+//!     builder.route(section, player.all(), FillDirection::Backward);
+//!     builder.route(player.all(), section, FillDirection::Forward);
 //!
-//!     builder.build(BasicKind {})
+//!     builder.build(BasicKind)
 //! }
 //! ```
 
@@ -29,8 +29,8 @@ use std::fmt;
 use std::iter;
 use std::range::Range;
 use std::slice;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::vec;
 
 use steel_registry::{item_stack::ItemStack, menu_type::MenuTypeRef};
@@ -42,10 +42,7 @@ use crate::inventory::menu::kind::MenuKind;
 use crate::inventory::menu::layout::MenuLayout;
 use crate::inventory::{
     lock::{ContainerId, ContainerLockGuard, ContainerRef},
-    slots::{
-        MayPickupFn, MayPlaceFn, NormalSlot, RestrictedSlot, ResultHandler, ResultSlot, Slot,
-        add_standard_inventory_slots,
-    },
+    slots::{NormalSlot, RestrictedRules, RestrictedSlot, ResultHandler, ResultSlot, Slot},
 };
 use crate::player::Player;
 use crate::player::player_inventory::PlayerInventory;
@@ -296,6 +293,116 @@ impl SectionSource for &mut ContainerSlots {
     }
 }
 
+/// Produces the slot for one container index of a section.
+pub type SlotFactory = Arc<dyn Fn(&ContainerRef, usize) -> Box<dyn Slot> + Send + Sync>;
+
+/// How a section lowers container indices into menu slots.
+///
+/// The section methods pick the indices; the kind decides what each index
+/// becomes. Accepted by [`MenuBuilder::section_with`], [`MenuBuilder::section_at`],
+/// [`MenuBuilder::player_inventory_with`] and grid placements via
+/// [`PlacementBuilder::kind`](super::grid::PlacementBuilder::kind).
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum SectionKind {
+    /// Plain storage slots.
+    Normal,
+    /// Placement gated by the rules; pickup gated too when they carry a pickup
+    /// predicate. Built by [`restricted`](Self::restricted),
+    /// [`guarded`](Self::guarded) and [`take_only`](Self::take_only).
+    Restricted(Arc<RestrictedRules>),
+    /// No placement, no pickup; clicks are rejected and surface in
+    /// `MenuKind::on_slot_clicked`.
+    Display,
+    /// Slots produced by a caller-supplied factory.
+    Custom(SlotFactory),
+}
+
+impl SectionKind {
+    /// Placement gated by `may_place`, which receives the container-local slot
+    /// index; pickup stays allowed.
+    pub fn restricted(
+        may_place: impl Fn(usize, &ItemStack) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self::Restricted(RestrictedRules::place_only(may_place))
+    }
+
+    /// Like [`restricted`](Self::restricted), but pickup is also gated: items
+    /// only come out while `may_pickup` returns true.
+    pub fn guarded(
+        may_place: impl Fn(usize, &ItemStack) -> bool + Send + Sync + 'static,
+        may_pickup: impl Fn(usize, &ItemStack, &ContainerLockGuard, &Player) -> bool
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self::Restricted(RestrictedRules::guarded(may_place, may_pickup))
+    }
+
+    /// Slots produced by `factory` from the section's container and each
+    /// covered container index.
+    pub fn custom(
+        factory: impl Fn(&ContainerRef, usize) -> Box<dyn Slot> + Send + Sync + 'static,
+    ) -> Self {
+        Self::Custom(Arc::new(factory))
+    }
+
+    /// Pickup allowed, placement always rejected — take-only output-style
+    /// slots.
+    #[must_use]
+    pub fn take_only() -> Self {
+        Self::Restricted(deny_place_rules())
+    }
+
+    pub(crate) fn make(&self, container: &ContainerRef, index: usize) -> Box<dyn Slot> {
+        match self {
+            Self::Normal => Box::new(NormalSlot::new(container.clone(), index)),
+            Self::Restricted(rules) => Box::new(RestrictedSlot::with_rules(
+                container.clone(),
+                index,
+                Arc::clone(rules),
+            )),
+            Self::Display => Box::new(RestrictedSlot::with_rules(
+                container.clone(),
+                index,
+                deny_all_rules(),
+            )),
+            Self::Custom(factory) => factory(container, index),
+        }
+    }
+}
+
+impl fmt::Debug for SectionKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Normal => "SectionKind::Normal",
+            Self::Restricted(_) => "SectionKind::Restricted(..)",
+            Self::Display => "SectionKind::Display",
+            Self::Custom(_) => "SectionKind::Custom(..)",
+        })
+    }
+}
+
+impl From<&Self> for SectionKind {
+    fn from(kind: &Self) -> Self {
+        kind.clone()
+    }
+}
+
+/// Rules that reject placement and allow pickup, shared process-wide.
+fn deny_place_rules() -> Arc<RestrictedRules> {
+    static DENY: OnceLock<Arc<RestrictedRules>> = OnceLock::new();
+    DENY.get_or_init(|| RestrictedRules::place_only(|_, _| false))
+        .clone()
+}
+
+/// Rules that reject both placement and pickup, shared process-wide.
+fn deny_all_rules() -> Arc<RestrictedRules> {
+    static DENY: OnceLock<Arc<RestrictedRules>> = OnceLock::new();
+    DENY.get_or_init(|| RestrictedRules::guarded(|_, _| false, |_, _, _, _| false))
+        .clone()
+}
+
 /// The direction in which a slot range is walked when distributing items.
 ///
 /// Vanilla fills backwards when moving into the player inventory so existing
@@ -392,25 +499,33 @@ impl MenuBuilder {
     /// let ingredient = b.section(&mut stand, 1); // slot 3
     /// let fuel = b.section(&mut stand, 1); // slot 4
     ///
-    /// b.build(BasicKind {});
+    /// b.build(BasicKind);
     /// ```
     ///
     /// # Panics
     /// Panics if the sections carved from the returned handle take more slots
     /// than the container has.
     #[must_use]
+    #[expect(
+        clippy::unused_self,
+        reason = "split is intentionally builder-scoped as part of the menu DSL"
+    )]
     pub fn split(&mut self, container: impl Into<ContainerRef>) -> ContainerSlots {
         let container = container.into();
-        let size = ContainerLockGuard::lock_all(slice::from_ref(&container))
-            .get(container.container_id())
-            .expect("container was just locked")
-            .get_container_size();
-        self.register_container(container.clone());
+        let size = Self::container_size(&container);
         ContainerSlots {
             container,
             next: 0,
             size,
         }
+    }
+
+    /// The container's size, read under a short lock.
+    fn container_size(container: &ContainerRef) -> usize {
+        ContainerLockGuard::lock_all(slice::from_ref(container))
+            .get(container.container_id())
+            .expect("container was just locked")
+            .get_container_size()
     }
 
     /// Adds `count` plain slots backed by `source`.
@@ -425,23 +540,10 @@ impl MenuBuilder {
     /// Panics if the covered container slots overlap another section of this
     /// menu.
     pub fn section(&mut self, source: impl SectionSource, count: usize) -> Section {
-        let (container, range) = source.take(count);
-        self.claim(&container, range);
-        let start = self.slots.len();
-        for index in range {
-            self.slots
-                .push(Box::new(NormalSlot::new(container.clone(), index)));
-        }
-        self.register_container(container);
-        self.section_from(start)
+        self.section_with(source, count, SectionKind::Normal)
     }
 
-    /// Adds a section whose slots only accept items that pass `may_place`.
-    /// The closure is shared using an Arc across all slots in the section and
-    /// receives the container-local slot index.
-    ///
-    /// Items can always be taken back out; use
-    /// [`guarded_section`](Self::guarded_section) to also guard pickup.
+    /// Adds `count` slots backed by `source`, lowered through `kind`.
     ///
     /// # Example
     /// ```rust
@@ -452,94 +554,97 @@ impl MenuBuilder {
     /// let mut b = MenuBuilder::new(None, 0);
     ///
     /// let container = SimpleContainer::new(9).into_shared();
-    /// let fuel = b.restricted_section(container, 9, |_slot, stack| {
+    /// let fuel = b.section_with(container, 9, SectionKind::restricted(|_slot, stack| {
     ///     stack.is(&vanilla_items::COAL)
-    /// });
+    /// }));
     ///
-    /// b.build(BasicKind {});
+    /// b.build(BasicKind);
     /// ```
-    pub fn restricted_section(
+    ///
+    /// # Panics
+    /// Panics if the covered container slots overlap another section of this
+    /// menu.
+    pub fn section_with(
         &mut self,
         source: impl SectionSource,
         count: usize,
-        may_place: impl Fn(usize, &ItemStack) -> bool + Send + Sync + 'static,
+        kind: impl Into<SectionKind>,
     ) -> Section {
-        self.guarded_section_fns(source, count, Arc::new(may_place), None)
-    }
-
-    /// Like [`restricted_section`](Self::restricted_section), but also guards
-    /// taking items out: pickup is only allowed while `may_pickup` returns
-    /// true. Both closures are shared across all slots in the section.
-    pub fn guarded_section(
-        &mut self,
-        source: impl SectionSource,
-        count: usize,
-        may_place: impl Fn(usize, &ItemStack) -> bool + Send + Sync + 'static,
-        may_pickup: impl Fn(usize, &ContainerLockGuard, &Player, &ItemStack) -> bool
-        + Send
-        + Sync
-        + 'static,
-    ) -> Section {
-        self.guarded_section_fns(
-            source,
-            count,
-            Arc::new(may_place),
-            Some(Arc::new(may_pickup)),
-        )
-    }
-
-    /// Shared lowering of restricted, guarded and display sections.
-    fn guarded_section_fns(
-        &mut self,
-        source: impl SectionSource,
-        count: usize,
-        may_place: MayPlaceFn,
-        may_pickup: Option<MayPickupFn>,
-    ) -> Section {
+        let kind = kind.into();
         let (container, range) = source.take(count);
         self.claim(&container, range);
         let start = self.slots.len();
         for index in range {
-            self.slots.push(Box::new(RestrictedSlot::new(
-                container.clone(),
-                index,
-                may_place.clone(),
-                may_pickup.clone(),
-            )));
+            let slot = kind.make(&container, index);
+            self.push_section_slot(slot, &container, index);
         }
-        self.register_container(container);
         self.section_from(start)
     }
 
-    /// Adds a display section containing the specified items. No items can be placed or taken out of these slots,
-    /// making it ideal for click menus. Clicks on these slots are always rejected, and can then properly be handled
-    /// in the `MenuKind::on_slot_clicked`.
+    /// Adds a section covering every slot of `container`.
     ///
-    /// This is equivalent to a guarded section with both closures always returning false.
+    /// Like [`section`](Self::section) with the container's full size as the
+    /// count, so the section can never drift from the container when it is
+    /// resized.
     ///
-    /// # Example
-    /// ```rust
-    /// use steel_registry::vanilla_items;
-    /// use steel_registry::item_stack::ItemStack;
-    /// use steel_core::inventory::prelude::*;
-    /// use steel_core::inventory::menu::kinds::BasicKind;
+    /// # Panics
+    /// Panics if the covered container slots overlap another section of this
+    /// menu.
+    pub fn section_all(&mut self, container: impl Into<ContainerRef>) -> Section {
+        self.section_all_with(container, SectionKind::Normal)
+    }
+
+    /// Like [`section_all`](Self::section_all), but lowered through `kind`.
     ///
-    /// let container_id = 0;
+    /// # Panics
+    /// Panics if the covered container slots overlap another section of this
+    /// menu.
+    pub fn section_all_with(
+        &mut self,
+        container: impl Into<ContainerRef>,
+        kind: impl Into<SectionKind>,
+    ) -> Section {
+        let container = container.into();
+        let size = Self::container_size(&container);
+        self.section_with(container, size, kind)
+    }
+
+    /// Adds slots over explicit container indices, in the given order.
     ///
-    /// let mut b = MenuBuilder::new(None, container_id);
-    /// let items = vec![ItemStack::new(&vanilla_items::GRAY_STAINED_GLASS_PANE); 9];
-    /// let container = SimpleContainer::from_items(items).into_shared();
-    /// let display_section = b.display_section(container, 9);
+    /// The indices may be non-contiguous and in any order; each menu slot maps
+    /// to the next index of the iterator. Like [`section_with`](Self::section_with),
+    /// the covered indices are claimed against overlapping sections.
     ///
-    /// b.build(BasicKind {});
-    /// ```
-    pub fn display_section(&mut self, source: impl SectionSource, count: usize) -> Section {
-        self.guarded_section_fns(
-            source,
-            count,
-            Arc::new(|_, _| false),
-            Some(Arc::new(|_, _, _, _| false)),
-        )
+    /// # Panics
+    /// Panics if an index repeats or the covered container slots overlap
+    /// another section of this menu.
+    pub fn section_at(
+        &mut self,
+        container: impl Into<ContainerRef>,
+        indices: impl IntoIterator<Item = usize>,
+        kind: impl Into<SectionKind>,
+    ) -> Section {
+        let kind = kind.into();
+        let container = container.into();
+        let start = self.slots.len();
+        let mut run: Option<Range<usize>> = None;
+        for index in indices {
+            match &mut run {
+                Some(r) if index == r.end => r.end += 1,
+                _ => {
+                    if let Some(r) = run.take() {
+                        self.claim(&container, r);
+                    }
+                    run = Some((index..index + 1).into());
+                }
+            }
+            let slot = kind.make(&container, index);
+            self.push_section_slot(slot, &container, index);
+        }
+        if let Some(r) = run {
+            self.claim(&container, r);
+        }
+        self.section_from(start)
     }
 
     /// Adds the player's 36 inventory slots (main inventory then hotbar).
@@ -547,42 +652,67 @@ impl MenuBuilder {
         &mut self,
         inventory: &Shared<PlayerInventory>,
     ) -> PlayerInventorySections {
-        let start = self.slots.len();
-        add_standard_inventory_slots(&mut self.slots, inventory);
-        self.register_container(ContainerRef::from(inventory.clone()));
+        self.player_inventory_with(inventory, SectionKind::Normal)
+    }
 
-        let main = Section::new(self.instance, start..start + 27);
-        let hotbar = Section::new(self.instance, start + 27..self.slots.len());
+    /// Like [`player_inventory`](Self::player_inventory), but lowers the slots
+    /// through `kind`, e.g. [`SectionKind::Display`] for a read-only view of
+    /// another player's inventory.
+    ///
+    /// Player inventory sections never claim their container slots: menus like
+    /// invsee legitimately map the same inventory into two sections, and
+    /// quick-move skips aliased slots at runtime.
+    pub fn player_inventory_with(
+        &mut self,
+        inventory: &Shared<PlayerInventory>,
+        kind: impl Into<SectionKind>,
+    ) -> PlayerInventorySections {
+        let kind = kind.into();
+        let container = ContainerRef::from(inventory.clone());
+        let start = self.slots.len();
+        for index in PlayerInventory::MAIN.chain(PlayerInventory::HOTBAR) {
+            let slot = kind.make(&container, index);
+            self.push_section_slot(slot, &container, index);
+        }
+
+        let main = Section::new(self.instance, start..start + PlayerInventory::MAIN.len());
+        let hotbar = Section::new(
+            self.instance,
+            start + PlayerInventory::MAIN.len()..self.slots.len(),
+        );
         let all = Section::new(self.instance, start..self.slots.len());
         PlayerInventorySections { all, main, hotbar }
     }
 
-    /// Adds a single fake result slot driven by `handler`.
+    /// Adds a single fake result slot driven by `handler`, backed by the
+    /// handler's [`result_container`](ResultHandler::result_container).
     ///
     /// See [`crate::inventory::container::ResultContainer`] and [`crate::inventory::slots::ResultHandler`].
-    pub fn result_slot(
-        &mut self,
-        handler: impl ResultHandler + 'static,
-        container: impl Into<ContainerRef>,
-    ) -> Section {
-        let container = container.into();
+    ///
+    /// # Panics
+    /// Panics if the result container has no slot `0`, or that slot is already
+    /// covered by another section of this menu.
+    pub fn result_slot(&mut self, handler: impl ResultHandler + 'static) -> Section {
+        let slot = ResultSlot::new(handler);
+        let container = slot.result_container().clone();
+        self.claim(&container, (0..1).into());
         let start = self.slots.len();
-        self.slots
-            .push(Box::new(ResultSlot::new(handler, container.clone())));
-        self.register_container(container);
+        self.push_section_slot(Box::new(slot), &container, 0);
         self.section_from(start)
     }
 
-    /// Adds arbitrary concrete slots, boxing them into the menu's erased storage.
+    /// Adds raw slots without claiming their container coverage, so tests can
+    /// model aliased slots (two menu slots over one container index) the way
+    /// [`player_inventory_with`](Self::player_inventory_with) can produce them.
     ///
     /// All slots produced by the iterator have the same concrete type. Use
     /// [`custom_boxed_section`](Self::custom_boxed_section) for a heterogeneous
     /// or already-erased collection.
-    pub fn custom_section<S>(
-        &mut self,
-        slots: impl IntoIterator<Item = S>,
-        containers: impl IntoIterator<Item = impl Into<ContainerRef>>,
-    ) -> Section
+    ///
+    /// Production menus go through [`section_at`](Self::section_at) or a
+    /// [`SectionKind::custom`] factory instead, which keep overlap validation.
+    #[cfg(test)]
+    pub(crate) fn custom_section<S>(&mut self, slots: impl IntoIterator<Item = S>) -> Section
     where
         S: Slot + 'static,
     {
@@ -590,20 +720,18 @@ impl MenuBuilder {
             slots
                 .into_iter()
                 .map(|slot| Box::new(slot) as Box<dyn Slot>),
-            containers,
         )
     }
 
     /// Adds heterogeneous or already-erased slots.
-    pub fn custom_boxed_section(
+    #[cfg(test)]
+    pub(crate) fn custom_boxed_section(
         &mut self,
         slots: impl IntoIterator<Item = Box<dyn Slot>>,
-        containers: impl IntoIterator<Item = impl Into<ContainerRef>>,
     ) -> Section {
         let start = self.slots.len();
-        self.slots.extend(slots);
-        for container in containers {
-            self.register_container(container);
+        for slot in slots {
+            self.push_boxed_slot(slot);
         }
         self.section_from(start)
     }
@@ -621,7 +749,9 @@ impl MenuBuilder {
     /// Declares a shift-click route from each section of `from` into
     /// `targets`.
     ///
-    /// Both arguments accept anything [`IntoSections`]; a multi-section
+    /// Both arguments accept anything [`IntoSections`]: pass a single
+    /// [`Section`] directly and use an array/slice/Vec only when there is
+    /// genuinely more than one, so brackets signal arity. A multi-section
     /// `from` declares one route per source section.
     ///
     /// Most commonly:
@@ -629,7 +759,8 @@ impl MenuBuilder {
     /// `container` -> `player_inventory` is [`FillDirection::Backward`]
     ///
     /// # Panics
-    /// Panics if any section was created by a different [`MenuBuilder`].
+    /// Panics if a section belongs to another builder, a source overlaps an
+    /// existing route, or a target overlaps its source.
     pub fn route(
         &mut self,
         from: impl IntoSections,
@@ -680,6 +811,9 @@ impl MenuBuilder {
 
     /// Marks `sections` to be emptied back into the player or dropped on the floor on close.
     ///
+    /// Accepts anything [`IntoSections`]: pass a single [`Section`] directly
+    /// and use an array only for genuinely multiple sections.
+    ///
     /// # Panics
     /// Panics if any section was created by a different [`MenuBuilder`].
     ///
@@ -704,14 +838,21 @@ impl MenuBuilder {
     /// let items = vec![ItemStack::new(&vanilla_items::BARRIER); 9];
     /// let lower_container = SimpleContainer::from_items(items).into_shared();
     ///
-    /// let restricted_section = b.display_section(lower_container, 9);
+    /// let display = b.section_with(lower_container, 9, SectionKind::Display);
     ///
     /// let section = b.section(upper_container, 9);
-    /// b.drain([section]); // only 'section' gets drained when the menu is closed
-    /// b.build(BasicKind {});
+    /// b.drain(section); // only 'section' gets drained when the menu is closed
+    /// b.build(BasicKind);
     /// ```
     pub fn drain(&mut self, sections: impl IntoSections) -> &mut Self {
         let ranges: Vec<_> = sections.into_sections().map(|s| self.owned(s)).collect();
+        assert!(
+            ranges
+                .iter()
+                .flat_map(|range| *range)
+                .all(|slot| !self.slots[slot].is_fake()),
+            "drain sections cannot contain fake or result slots"
+        );
         self.drain_sections.extend(ranges);
         self
     }
@@ -720,7 +861,7 @@ impl MenuBuilder {
     ///
     /// Pending logical inventory updates are deferred while the
     /// menu is open and the slots are restored when it closes.
-    pub const fn overrides_player_slots(&mut self) -> &mut Self {
+    pub const fn override_player_slots(&mut self) -> &mut Self {
         self.overrides_player_slots = true;
         self
     }
@@ -729,7 +870,7 @@ impl MenuBuilder {
     ///
     /// # Panics
     /// Panics if the number of slots does not match the client layout declared
-    /// by the menu type.
+    /// by the menu type, or if a fake slot aliases another physical slot.
     #[must_use]
     pub fn build(self, kind: impl MenuKind + 'static) -> Menu {
         self.build_boxed(Box::new(kind))
@@ -742,7 +883,7 @@ impl MenuBuilder {
     ///
     /// # Panics
     /// Panics if the number of slots does not match the client layout declared
-    /// by the menu type.
+    /// by the menu type, or if a fake slot aliases another physical slot.
     #[must_use]
     pub fn build_boxed(self, kind: Box<dyn MenuKind>) -> Menu {
         if let Some(menu_type) = self.menu_type {
@@ -755,6 +896,7 @@ impl MenuBuilder {
                 self.slots.len(),
             );
         }
+        Self::assert_no_fake_slot_aliases(&self.slots);
 
         let mut behavior = MenuBehavior::new(
             self.instance,
@@ -774,24 +916,62 @@ impl MenuBuilder {
         Menu::from_parts(behavior, layout, kind, self.overrides_player_slots)
     }
 
+    /// Fake slots have special removal and persistence semantics, so no other
+    /// menu slot may expose their physical backing storage.
+    fn assert_no_fake_slot_aliases(slots: &[Box<dyn Slot>]) {
+        use rustc_hash::FxHashMap;
+
+        let mut physical_slots: FxHashMap<(ContainerId, usize), (usize, bool)> =
+            FxHashMap::default();
+        for (slot_index, slot) in slots.iter().enumerate() {
+            let Some(key) = slot.storage().physical_key() else {
+                continue;
+            };
+            let is_fake = slot.is_fake();
+            if let Some(&(other_index, other_is_fake)) = physical_slots.get(&key) {
+                assert!(
+                    !is_fake && !other_is_fake,
+                    "menu slots {other_index} and {slot_index} alias physical container slot \
+                     {key:?}, but fake slots require exclusive backing storage"
+                );
+            } else {
+                physical_slots.insert(key, (slot_index, is_fake));
+            }
+        }
+    }
+
     /// The identity of the menu being built.
     pub(crate) const fn instance(&self) -> MenuInstanceId {
         self.instance
     }
 
-    /// The number of slots added so far.
-    pub(crate) const fn slot_count(&self) -> usize {
+    /// The number of menu slots added so far.
+    #[must_use]
+    pub const fn slot_count(&self) -> usize {
         self.slots.len()
-    }
-
-    /// Appends a single concrete slot without creating a section.
-    pub(crate) fn push_slot(&mut self, slot: impl Slot + 'static) {
-        self.push_boxed_slot(Box::new(slot));
     }
 
     /// Appends a single already-erased slot without creating a section.
     pub(crate) fn push_boxed_slot(&mut self, slot: Box<dyn Slot>) {
+        for container in slot.storage().container_refs() {
+            self.register_container(container.clone());
+        }
         self.slots.push(slot);
+    }
+
+    /// Appends a slot whose physical backing must match its declarative source.
+    pub(crate) fn push_section_slot(
+        &mut self,
+        slot: Box<dyn Slot>,
+        source: &ContainerRef,
+        source_index: usize,
+    ) {
+        assert_eq!(
+            slot.storage().physical_key(),
+            Some((source.container_id(), source_index)),
+            "section slot backing must match its declared source container and index"
+        );
+        self.push_boxed_slot(slot);
     }
 
     /// Records that a section covers the container-local `range` of `container`.
@@ -849,24 +1029,79 @@ impl MenuBuilder {
 
 #[cfg(test)]
 mod tests {
-    use steel_registry::vanilla_menu_types;
+    use steel_registry::{test_support::init_test_registry, vanilla_items, vanilla_menu_types};
     use steel_utils::{Downcast as _, locks::IntoShared};
 
     use super::*;
     use crate::inventory::container::SimpleContainer;
     use crate::inventory::menu::kinds::BasicKind;
 
+    struct NoopResultHandler(ContainerRef);
+
+    impl ResultHandler for NoopResultHandler {
+        fn result_container(&self) -> ContainerRef {
+            self.0.clone()
+        }
+
+        fn dependencies(&self) -> Vec<ContainerRef> {
+            Vec::new()
+        }
+
+        fn update_result(&self, _guard: &mut ContainerLockGuard) {}
+
+        fn on_result_taken(
+            &self,
+            _guard: &mut ContainerLockGuard,
+            _player: &Player,
+        ) -> Option<ItemStack> {
+            None
+        }
+
+        fn is_result_valid(&self, _guard: &ContainerLockGuard, _player: &Player) -> bool {
+            true
+        }
+    }
+
+    struct DependencyResultHandler {
+        result: ContainerRef,
+        dependency: ContainerRef,
+    }
+
+    impl ResultHandler for DependencyResultHandler {
+        fn result_container(&self) -> ContainerRef {
+            self.result.clone()
+        }
+
+        fn dependencies(&self) -> Vec<ContainerRef> {
+            vec![self.dependency.clone()]
+        }
+
+        fn update_result(&self, _guard: &mut ContainerLockGuard) {}
+
+        fn on_result_taken(
+            &self,
+            _guard: &mut ContainerLockGuard,
+            _player: &Player,
+        ) -> Option<ItemStack> {
+            None
+        }
+
+        fn is_result_valid(&self, _guard: &ContainerLockGuard, _player: &Player) -> bool {
+            true
+        }
+    }
+
     #[test]
     #[should_panic(
         expected = "menu type minecraft:generic_9x6 expects 90 slots, but the builder has 0"
     )]
     fn build_rejects_a_slot_count_that_disagrees_with_the_menu_type() {
-        let _ = MenuBuilder::new(&vanilla_menu_types::GENERIC_9X6, 1).build(BasicKind {});
+        let _ = MenuBuilder::new(&vanilla_menu_types::GENERIC_9X6, 1).build(BasicKind);
     }
 
     #[test]
     fn builds_with_an_erased_menu_kind() {
-        let kind: Box<dyn MenuKind> = Box::new(BasicKind {});
+        let kind: Box<dyn MenuKind> = Box::new(BasicKind);
         let menu = MenuBuilder::new(None, 0).build_boxed(kind);
 
         assert!(menu.kind().downcast_ref::<BasicKind>().is_some());
@@ -882,6 +1117,72 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(
+        expected = "section takes container slots 0..1, but the container only has 0 slots"
+    )]
+    fn result_slot_rejects_a_container_without_slot_zero() {
+        let container = ContainerRef::from(SimpleContainer::new(0).into_shared());
+        let mut builder = MenuBuilder::new(None, 0);
+
+        let _ = builder.result_slot(NoopResultHandler(container));
+    }
+
+    #[test]
+    #[should_panic(expected = "two sections cover overlapping slots")]
+    fn result_slot_claims_slot_zero_against_normal_sections() {
+        let container = ContainerRef::from(SimpleContainer::new(1).into_shared());
+        let mut builder = MenuBuilder::new(None, 0);
+        let _ = builder.result_slot(NoopResultHandler(container.clone()));
+
+        let _ = builder.section_all(container);
+    }
+
+    #[test]
+    fn result_slot_registers_handler_dependencies() {
+        let result = ContainerRef::from(SimpleContainer::new(1).into_shared());
+        let dependency = ContainerRef::from(SimpleContainer::new(1).into_shared());
+        let dependency_id = dependency.container_id();
+        let mut builder = MenuBuilder::new(None, 0);
+        let _ = builder.result_slot(DependencyResultHandler { result, dependency });
+
+        let menu = builder.build(BasicKind);
+        let guard = menu.behavior().lock_all_containers();
+
+        assert!(guard.contains(dependency_id));
+    }
+
+    #[test]
+    #[should_panic(expected = "drain sections cannot contain fake or result slots")]
+    fn drain_rejects_a_result_slot() {
+        let result = ContainerRef::from(SimpleContainer::new(1).into_shared());
+        let mut builder = MenuBuilder::new(None, 0);
+        let section = builder.result_slot(NoopResultHandler(result));
+
+        builder.drain(section);
+    }
+
+    #[test]
+    #[should_panic(expected = "fake slots require exclusive backing storage")]
+    fn build_rejects_a_result_alias_through_player_inventory() {
+        let inventory = PlayerInventory::new().into_shared();
+        let mut builder = MenuBuilder::new(None, 0);
+        let _ = builder.result_slot(NoopResultHandler(ContainerRef::from(inventory.clone())));
+        let _ = builder.player_inventory_with(&inventory, SectionKind::Normal);
+
+        let _ = builder.build(BasicKind);
+    }
+
+    #[test]
+    fn build_allows_non_fake_player_inventory_aliases() {
+        let inventory = PlayerInventory::new().into_shared();
+        let mut builder = MenuBuilder::new(None, 0);
+        let _ = builder.player_inventory(&inventory);
+        let _ = builder.player_inventory_with(&inventory, SectionKind::Display);
+
+        let _ = builder.build(BasicKind);
+    }
+
+    #[test]
     #[should_panic(expected = "shift-click route source 0..27 overlaps an existing route source")]
     fn route_rejects_overlapping_source_sections() {
         let inventory = PlayerInventory::new().into_shared();
@@ -891,5 +1192,82 @@ mod tests {
 
         builder.route(player.all(), [target], FillDirection::Forward);
         builder.route(player.main(), [target], FillDirection::Forward);
+    }
+
+    #[test]
+    fn section_at_preserves_the_given_index_order() {
+        let container = ContainerRef::from(SimpleContainer::new(5).into_shared());
+        let mut b = MenuBuilder::new(None, 0);
+        let section = b.section_at(container, [4, 3, 0, 1], SectionKind::Normal);
+        let menu = b.build(BasicKind);
+
+        assert_eq!((section.start(), section.end()), (0, 4));
+        let container_slots: Vec<usize> = menu
+            .behavior()
+            .slots()
+            .iter()
+            .map(|slot| slot.get_container_slot())
+            .collect();
+        assert_eq!(container_slots, vec![4, 3, 0, 1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "two sections cover overlapping slots")]
+    fn section_at_rejects_indices_claimed_by_another_section() {
+        let container = SimpleContainer::new(4).into_shared();
+        let mut b = MenuBuilder::new(None, 0);
+        let _ = b.section(container.clone(), 2);
+        let _ = b.section_at(container, [1], SectionKind::Normal);
+    }
+
+    #[test]
+    #[should_panic(expected = "two sections cover overlapping slots")]
+    fn section_at_rejects_a_repeated_index() {
+        let container = ContainerRef::from(SimpleContainer::new(4).into_shared());
+        let mut b = MenuBuilder::new(None, 0);
+        let _ = b.section_at(container, [0, 2, 0], SectionKind::Normal);
+    }
+
+    #[test]
+    fn display_kind_rejects_placement() {
+        init_test_registry();
+        let container = ContainerRef::from(SimpleContainer::new(1).into_shared());
+        let mut b = MenuBuilder::new(None, 0);
+        let _ = b.section_at(container, [0], SectionKind::Display);
+        let menu = b.build(BasicKind);
+
+        let stack = ItemStack::new(&vanilla_items::STONE);
+        assert!(!menu.behavior().slots()[0].may_place(&stack));
+    }
+
+    #[test]
+    fn custom_kind_lowers_through_the_factory() {
+        let container = ContainerRef::from(SimpleContainer::new(3).into_shared());
+        let factory = SectionKind::custom(|container, index| {
+            Box::new(NormalSlot::new(container.clone(), index))
+        });
+        let mut b = MenuBuilder::new(None, 0);
+        let _ = b.section_at(container, [2, 0], factory);
+        let menu = b.build(BasicKind);
+
+        let container_slots: Vec<usize> = menu
+            .behavior()
+            .slots()
+            .iter()
+            .map(|slot| slot.get_container_slot())
+            .collect();
+        assert_eq!(container_slots, vec![2, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "section slot backing must match its declared source")]
+    fn custom_kind_rejects_a_mismatched_physical_backing() {
+        let source = ContainerRef::from(SimpleContainer::new(1).into_shared());
+        let other = ContainerRef::from(SimpleContainer::new(1).into_shared());
+        let kind =
+            SectionKind::custom(move |_container, _index| Box::new(NormalSlot::new(&other, 0)));
+        let mut builder = MenuBuilder::new(None, 0);
+
+        let _ = builder.section_with(source, 1, kind);
     }
 }

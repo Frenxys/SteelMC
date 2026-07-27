@@ -5,7 +5,7 @@ use crate::inventory::container::{CraftingContainer, ResultContainer};
 use crate::{
     inventory::{
         container::Container,
-        lock::{ContainerId, ContainerLockGuard},
+        lock::{ContainerId, ContainerLockGuard, ContainerRef},
         recipe_manager,
         slots::result_handler::ResultHandler,
     },
@@ -52,12 +52,6 @@ impl CraftingHandler {
         self.crafting_container.clone()
     }
 
-    /// A shared handle to the result container.
-    #[must_use]
-    pub(crate) fn result_container(&self) -> Shared<ResultContainer> {
-        self.result_container.clone()
-    }
-
     /// The `ContainerId` of the result container
     #[must_use]
     pub fn result_id(&self) -> ContainerId {
@@ -66,6 +60,14 @@ impl CraftingHandler {
 }
 
 impl ResultHandler for CraftingHandler {
+    fn result_container(&self) -> ContainerRef {
+        ContainerRef::from(self.result_container.clone())
+    }
+
+    fn dependencies(&self) -> Vec<ContainerRef> {
+        vec![ContainerRef::from(self.crafting_container.clone())]
+    }
+
     fn update_result(&self, guard: &mut ContainerLockGuard) {
         let crafting = guard
             .get_typed::<CraftingContainer>(self.crafting_id())

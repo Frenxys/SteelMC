@@ -69,6 +69,27 @@ where
     }
 }
 
+impl<T> From<&Shared<T>> for ContainerRef
+where
+    T: Container + 'static,
+{
+    fn from(container: &Shared<T>) -> Self {
+        container.clone().into()
+    }
+}
+
+impl From<&ContainerRef> for ContainerRef {
+    fn from(r: &ContainerRef) -> Self {
+        r.clone()
+    }
+}
+
+impl From<&SharedContainer> for ContainerRef {
+    fn from(container: &SharedContainer) -> Self {
+        container.clone().into()
+    }
+}
+
 impl From<SharedContainer> for ContainerRef {
     fn from(container: SharedContainer) -> Self {
         Self {

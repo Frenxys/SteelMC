@@ -279,10 +279,10 @@ mod tests {
         let inventory = Arc::clone(&player.inventory);
         let right_opener = Arc::clone(&right_entity);
         let left_opener = Arc::clone(&left_entity);
-        player.open_menu("Large Chest", move |container_id, _world| {
+        player.open_menu("Large Chest", move |context| {
             chest_with_openers(
                 inventory,
-                container_id,
+                context.container_id,
                 vec![
                     (right_container, CHEST_SLOTS),
                     (left_container, CHEST_SLOTS),

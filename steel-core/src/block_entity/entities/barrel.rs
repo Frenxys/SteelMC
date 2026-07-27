@@ -273,10 +273,10 @@ mod tests {
         assert!(world.add_player(Arc::clone(&player), ResetReason::InitialJoin));
         let inventory = Arc::clone(&player.inventory);
         let opener = Arc::clone(&block_entity);
-        player.open_menu("Barrel", move |container_id, _world| {
+        player.open_menu("Barrel", move |context| {
             chest_with_openers(
                 inventory,
-                container_id,
+                context.container_id,
                 vec![(container, BARREL_SLOTS)],
                 3,
                 vec![opener],

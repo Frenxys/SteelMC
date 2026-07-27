@@ -28,12 +28,12 @@ pub fn crafting(inventory: Shared<PlayerInventory>, container_id: u8, block_pos:
     let handler = CraftingHandler::new(crafting_container.clone(), result_container.clone(), 3);
 
     let mut builder = MenuBuilder::new(&vanilla_menu_types::CRAFTING, container_id);
-    let result = builder.result_slot(handler.clone(), result_container.clone());
-    let grid = builder.section(crafting_container, 9);
+    let result = builder.result_slot(handler.clone());
+    let grid = builder.section_all(crafting_container);
     let player = builder.player_inventory(&inventory);
 
-    builder.route(result, [player.all()], FillDirection::Backward);
-    builder.route(grid, [player.all()], FillDirection::Forward);
+    builder.route(result, player.all(), FillDirection::Backward);
+    builder.route(grid, player.all(), FillDirection::Forward);
     builder.route(
         player.main(),
         [grid, player.hotbar()],
@@ -44,7 +44,7 @@ pub fn crafting(inventory: Shared<PlayerInventory>, container_id: u8, block_pos:
         [grid, player.main()],
         FillDirection::Forward,
     );
-    builder.drain([grid]);
+    builder.drain(grid);
 
     builder.build(CraftingKind {
         result_container,

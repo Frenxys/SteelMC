@@ -8,7 +8,7 @@ use crate::block_entity::entities::{
 };
 use crate::block_entity::vanilla_fuel_values;
 use crate::inventory::prelude::*;
-use crate::inventory::slots::{FurnaceFuelSlot, FurnaceResultSlot, NormalSlot};
+use crate::inventory::slots::{FurnaceFuelSlot, FurnaceResultSlot};
 use crate::player::player_inventory::PlayerInventory;
 
 /// Builds the normal furnace menu over one furnace block-entity container.
@@ -21,20 +21,16 @@ pub fn furnace(
     // TODO: Add Vanilla recipe-book placement once Steel has shared recipe-book
     // state, packet handling, and server-side placement support.
     let mut builder = MenuBuilder::new(&vanilla_menu_types::FURNACE, container_id);
-    let input = builder.custom_section(
-        [NormalSlot::new(container.clone(), FURNACE_INPUT_SLOT)],
-        [container.clone()],
+    let input = builder.section_at(&container, [FURNACE_INPUT_SLOT], SectionKind::Normal);
+    let fuel = builder.section_at(
+        &container,
+        [FURNACE_FUEL_SLOT],
+        SectionKind::custom(|container, index| Box::new(FurnaceFuelSlot::new(container, index))),
     );
-    let fuel = builder.custom_section(
-        [FurnaceFuelSlot::new(container.clone(), FURNACE_FUEL_SLOT)],
-        [container.clone()],
-    );
-    let result = builder.custom_section(
-        [FurnaceResultSlot::new(
-            container.clone(),
-            FURNACE_RESULT_SLOT,
-        )],
-        [container.clone()],
+    let result = builder.section_at(
+        &container,
+        [FURNACE_RESULT_SLOT],
+        SectionKind::custom(|container, index| Box::new(FurnaceResultSlot::new(container, index))),
     );
     let player = builder.player_inventory(&inventory);
     let data = [

@@ -1,13 +1,13 @@
 use super::{
     Arc, CCommandSuggestions, CHUNK_SENDING_TPS, COMMAND_DATA_AUTOSAVE_INTERVAL,
     COMMAND_REQUESTS_PER_TICK, COMMAND_RESUMPTIONS_PER_TICK, CancellationToken, ChunkPos,
-    ChunkSender, CommandExecutionContext, CommandRequest, CommandResultCallback, CommandSender,
-    CommandSource, Duration, EncodedChunk, ExecutionCommandSource, ExecutionStop,
-    GameTickTaskGuard, Instant, JoinSet, NetworkConnection, PendingCommandExecutionQueue, Player,
-    SEND_PLAYER_INFO_INTERVAL, SLOW_CHUNK_TICK_THRESHOLD, Server, StringReader, SuggestionError,
-    Suggestions, TAB_LIST_UPDATE_INTERVAL, TabListTickStats, ThreadPool, World,
-    WorldGameTickTimings, command_suggestions_packet, configured_packet_workers, sleep,
-    spawn_blocking,
+    ChunkSender, CommandExecutionContext, CommandExecutionOwner, CommandRequest,
+    CommandResultCallback, CommandSender, CommandSource, Duration, EncodedChunk,
+    ExecutionCommandSource, ExecutionStop, GameTickTaskGuard, Instant, JoinSet, NetworkConnection,
+    PendingCommandExecutionQueue, Player, SEND_PLAYER_INFO_INTERVAL, SLOW_CHUNK_TICK_THRESHOLD,
+    Server, StringReader, SuggestionError, Suggestions, TAB_LIST_UPDATE_INTERVAL, TabListTickStats,
+    ThreadPool, World, WorldGameTickTimings, command_suggestions_packet, configured_packet_workers,
+    sleep, spawn_blocking,
 };
 
 impl Server {
@@ -124,7 +124,7 @@ impl Server {
                 (tick_manager.tick_count, runs_normally)
             };
 
-            Self::tick_pending_command_executions(&mut pending_command_executions);
+            self.tick_pending_command_executions(&mut pending_command_executions);
             self.tick_command_requests(&mut pending_command_executions);
             self.tick_worlds_game(tick_count, runs_normally).await;
             player_info_ticks += 1;
@@ -240,8 +240,11 @@ impl Server {
         *next_autosave = Instant::now() + COMMAND_DATA_AUTOSAVE_INTERVAL;
     }
 
-    fn tick_pending_command_executions(pending: &mut PendingCommandExecutionQueue<CommandSource>) {
-        let stats = pending.tick(COMMAND_RESUMPTIONS_PER_TICK);
+    fn tick_pending_command_executions(
+        &self,
+        pending: &mut PendingCommandExecutionQueue<CommandSource>,
+    ) {
+        let stats = pending.tick(COMMAND_RESUMPTIONS_PER_TICK, |owner| owner.is_current(self));
         if stats.polled == COMMAND_RESUMPTIONS_PER_TICK && stats.pending > 0 {
             tracing::debug!(
                 polled = stats.polled,
@@ -260,31 +263,32 @@ impl Server {
         for _ in 0..COMMAND_REQUESTS_PER_TICK {
             let Some(request) = self
                 .command_requests
-                .pop_front_runnable(|sender| !pending.blocks(sender.key()))
+                .pop_front_runnable(|owner| !pending.blocks(owner.key()))
             else {
                 break;
             };
             handled += 1;
 
             match request {
-                CommandRequest::Execute { sender, command } => {
-                    if sender
-                        .get_player()
-                        .is_some_and(|player| player.connection.closed())
-                    {
+                CommandRequest::Execute { owner, command } => {
+                    if !owner.is_current(self) {
                         continue;
                     }
-                    self.execute_command_request(pending, sender, &command);
+                    self.execute_command_request(pending, owner, &command);
                 }
                 CommandRequest::Suggestions {
-                    player,
+                    owner,
                     transaction_id,
                     input,
                 } => {
-                    if player.connection.closed() {
+                    if !owner.is_current(self) {
                         continue;
                     }
-                    self.send_command_suggestions(&player, transaction_id, &input);
+                    let Some(player) = owner.sender().get_player() else {
+                        tracing::error!("command suggestion request has a non-player owner");
+                        continue;
+                    };
+                    self.send_command_suggestions(player, transaction_id, &input);
                 }
             }
         }
@@ -297,11 +301,10 @@ impl Server {
     fn execute_command_request(
         self: &Arc<Self>,
         pending: &mut PendingCommandExecutionQueue<CommandSource>,
-        sender: CommandSender,
+        owner: CommandExecutionOwner,
         command: &str,
     ) {
-        let sender_key = sender.key();
-        let source = CommandSource::new(sender, Arc::clone(self));
+        let source = CommandSource::new(owner.sender().clone(), Arc::clone(self));
         let command = command.strip_prefix('/').unwrap_or(command);
         let chain = {
             let dispatcher = self.command_dispatcher.read();
@@ -318,8 +321,7 @@ impl Server {
 
         let mut execution = CommandExecutionContext::for_source(&source);
         execution.queue_initial_command(chain, source, CommandResultCallback::empty());
-        if execution.run() == ExecutionStop::Suspended
-            && !pending.push_suspended(sender_key, execution)
+        if execution.run() == ExecutionStop::Suspended && !pending.push_suspended(owner, execution)
         {
             tracing::error!("suspended command execution could not be retained");
         }

@@ -2,7 +2,7 @@ use crate::inventory::menu::MenuKind;
 
 /// A menu kind with all-default handling and no special behavior.
 #[derive(Debug)]
-pub struct BasicKind {}
+pub struct BasicKind;
 
 // SAFETY: This Steel-owned key uniquely identifies the concrete menu kind
 // within the process.

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, ptr, sync::Arc};
 
 use glam::DVec3;
 use steel_registry::{
@@ -21,7 +21,7 @@ use crate::{
         PermissionContext, PermissionExpr, PermissionKey, PermissionMetadataExpression,
         PermissionRuleExpression, PermissionSet, PermissionState,
     },
-    player::{KnownPlayer, Player},
+    player::{DomainResidenceToken, KnownPlayer, Player},
     scoreboard::Scoreboard,
     server::Server,
     world::World,
@@ -159,6 +159,11 @@ pub(crate) trait CommandArgumentSource: Send + Sync {
 pub(crate) trait ExecutionCommandSource:
     CommandArgumentSource + Sized + Send + Sync + 'static
 {
+    /// Returns whether delayed work may still execute for this exact source.
+    fn execution_is_current(&self) -> bool {
+        true
+    }
+
     fn with_callback(&self, callback: CommandResultCallback) -> Self;
 
     fn callback(&self) -> CommandResultCallback;
@@ -245,6 +250,8 @@ pub(crate) struct CommandSource {
     rotation: (f32, f32),
     anchor: EntityAnchor,
     authorization: CommandAuthorizationContext,
+    sender_residence: Option<DomainResidenceToken>,
+    effective_player_residence: Option<DomainResidenceToken>,
     callback: CommandResultCallback,
     silent: bool,
 }
@@ -270,6 +277,13 @@ impl CommandSource {
         let rotation = entity
             .as_ref()
             .map_or((0.0, 0.0), |entity| entity.rotation());
+        let sender_residence = sender
+            .get_player()
+            .map(|player| player.domain_residence_token());
+        let effective_player_residence = entity
+            .as_ref()
+            .and_then(|entity| entity.as_player())
+            .map(Player::domain_residence_token);
         let authorization = match &sender {
             CommandSender::Player(player) => CommandAuthorizationContext::for_player(
                 world.key.clone(),
@@ -290,6 +304,8 @@ impl CommandSource {
             rotation,
             anchor: EntityAnchor::default(),
             authorization,
+            sender_residence,
+            effective_player_residence,
             callback: CommandResultCallback::empty(),
             silent: false,
         }
@@ -345,8 +361,9 @@ impl CommandSource {
             self.server
                 .get_players()
                 .into_iter()
-                .find(|player| player.uuid() == entity_player.uuid())
+                .find(|player| ptr::eq(player.as_ref(), entity_player))
         });
+        source.effective_player_residence = entity.as_player().map(Player::domain_residence_token);
         source.entity = Some(entity);
         source
     }
@@ -486,6 +503,28 @@ impl CommandSource {
 }
 
 impl ExecutionCommandSource for CommandSource {
+    fn execution_is_current(&self) -> bool {
+        let sender_is_current = self.sender.get_player().is_none_or(|player| {
+            self.sender_residence.is_some_and(|residence| {
+                self.server.command_world_for_player(player).is_some()
+                    && player.is_domain_residence_current(residence)
+            })
+        });
+        if !sender_is_current {
+            return false;
+        }
+
+        self.entity
+            .as_ref()
+            .and_then(|entity| entity.as_player())
+            .is_none_or(|player| {
+                self.effective_player_residence.is_some_and(|residence| {
+                    self.server.command_world_for_player(player).is_some()
+                        && player.is_domain_residence_current(residence)
+                })
+            })
+    }
+
     fn with_callback(&self, callback: CommandResultCallback) -> Self {
         let mut source = self.clone();
         source.callback = callback;
@@ -654,7 +693,11 @@ impl CommandArgumentSource for CommandSource {
         self.server
             .get_players()
             .into_iter()
-            .filter(|player| player.get_world().domain() == domain)
+            .filter(|player| {
+                self.server
+                    .command_world_for_player(player)
+                    .is_some_and(|world| world.domain() == domain)
+            })
             .map(|player| player.gameprofile.name.clone())
             .collect()
     }
@@ -695,15 +738,17 @@ fn profile_argument_uuids(
     argument: &GameProfileArgument,
 ) -> BTreeSet<uuid::Uuid> {
     match argument {
-        GameProfileArgument::Selector(selector) => selector.find_players(source).map_or_else(
-            |_| BTreeSet::new(),
-            |players| {
-                players
-                    .into_iter()
-                    .map(|player| player.gameprofile.id)
-                    .collect()
-            },
-        ),
+        GameProfileArgument::Selector(selector) => {
+            selector.find_online_profile_players(source).map_or_else(
+                |_| BTreeSet::new(),
+                |players| {
+                    players
+                        .into_iter()
+                        .map(|player| player.gameprofile.id)
+                        .collect()
+                },
+            )
+        }
         GameProfileArgument::Direct(value) => {
             let known = source.server.known_players();
             let uuid = uuid::Uuid::parse_str(value)

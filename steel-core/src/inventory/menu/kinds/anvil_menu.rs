@@ -19,10 +19,12 @@ use steel_registry::{
 use steel_utils::{
     BlockPos, Identifier, java,
     locks::{IntoShared, Shared, SyncMutex},
+    text::DisplayResolutor,
 };
 use text_components::TextComponent;
 
 use crate::{
+    behavior::ITEM_BEHAVIORS,
     inventory::{
         container::{ResultContainer, SimpleContainer},
         prelude::*,
@@ -49,19 +51,16 @@ pub fn anvil(
 
     let mut builder = MenuBuilder::new(&vanilla_menu_types::ANVIL, container_id);
 
-    let input = builder.section(input_container.clone(), 2);
-    let result = builder.result_slot(
-        AnvilResultHandler::new(
-            input_container.clone(),
-            result_container.clone(),
-            repair_item_count.clone(),
-            level_cost.clone(),
-            only_renaming.clone(),
-            pos,
-            world.clone(),
-        ),
+    let input = builder.section_all(&input_container);
+    let result = builder.result_slot(AnvilResultHandler::new(
+        input_container.clone(),
         result_container.clone(),
-    );
+        repair_item_count.clone(),
+        level_cost.clone(),
+        only_renaming.clone(),
+        pos,
+        world.clone(),
+    ));
 
     let player = builder.player_inventory(&inventory);
 
@@ -69,14 +68,14 @@ pub fn anvil(
 
     builder.route_with_remainder_policy(
         result,
-        [player.all()],
+        player.all(),
         FillDirection::Backward,
         FakeResultRemainderPolicy::Discard,
     );
-    builder.route(input, [player.all()], FillDirection::Forward);
-    builder.route(player.hotbar(), [input], FillDirection::Forward);
-    builder.route(player.main(), [input], FillDirection::Forward);
-    builder.drain([input]);
+    builder.route(input, player.all(), FillDirection::Forward);
+    builder.route(player.hotbar(), input, FillDirection::Forward);
+    builder.route(player.main(), input, FillDirection::Forward);
+    builder.drain(input);
 
     builder.build(AnvilKind {
         input_container,
@@ -286,7 +285,7 @@ impl AnvilKind {
         // Renaming
         let item_name = self.item_name.lock();
         if let Some(name) = item_name.as_deref().filter(|name| !java::is_blank(name)) {
-            if name != first.hover_name().to_string() {
+            if name != ITEM_BEHAVIORS.hover_name(first).to_plain(&DisplayResolutor) {
                 rename_cost = 1;
                 additional_cost += rename_cost as u32;
                 result.set(CUSTOM_NAME, TextComponent::from(name.to_string()));
@@ -330,9 +329,7 @@ impl AnvilKind {
             if rename_cost != additional_cost as i32 || rename_cost == 0 {
                 final_repair_cost = Self::calculate_increased_repair_cost(final_repair_cost);
             }
-            if final_repair_cost > 0 {
-                result.set(REPAIR_COST, final_repair_cost);
-            }
+            result.set(REPAIR_COST, final_repair_cost);
             let enchantments: Vec<(Identifier, u32)> =
                 enchantments.iter().map(|(k, v)| (k.clone(), *v)).collect();
             result.set_enchantments(&enchantments, false);

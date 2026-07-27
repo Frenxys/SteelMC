@@ -1,15 +1,14 @@
+use crate::{
+    inventory::{
+        lock::{ContainerLockGuard, ContainerRef},
+        slots::{NormalSlot, Slot, SlotStorage},
+    },
+    player::Player,
+};
 use steel_registry::{
     enchantment_effect::EnchantmentEffectComponent, equipment::EquipmentSlot, item_stack::ItemStack,
 };
-use steel_utils::{DowncastType, DowncastTypeKey, locks::Shared};
-
-use crate::{
-    inventory::{
-        lock::{ContainerId, ContainerLockGuard, ContainerRef},
-        slots::{NormalSlot, Slot},
-    },
-    player::{Player, player_inventory::PlayerInventory},
-};
+use steel_utils::{DowncastType, DowncastTypeKey};
 
 /// A [`NormalSlot`] that only accepts items equippable in its equipment slot,
 /// caps at one item, and respects the prevent-armor-change enchantment effect.
@@ -25,7 +24,7 @@ unsafe impl DowncastType for ArmorSlot {
 
 impl ArmorSlot {
     /// Creates a new armor slot.
-    pub fn new(container: Shared<PlayerInventory>, index: usize, slot: EquipmentSlot) -> Self {
+    pub fn new(container: impl Into<ContainerRef>, index: usize, slot: EquipmentSlot) -> Self {
         Self {
             base: NormalSlot::new(container, index),
             slot,
@@ -46,6 +45,10 @@ impl ArmorSlot {
 }
 
 impl Slot for ArmorSlot {
+    fn storage(&self) -> &SlotStorage {
+        self.base.storage()
+    }
+
     fn get_item<'a>(&self, guard: &'a ContainerLockGuard) -> &'a ItemStack {
         self.base.get_item(guard)
     }
@@ -94,9 +97,5 @@ impl Slot for ArmorSlot {
 
     fn get_container_slot(&self) -> usize {
         self.base.get_container_slot()
-    }
-
-    fn container_key(&self) -> Option<(ContainerId, usize)> {
-        self.base.container_key()
     }
 }

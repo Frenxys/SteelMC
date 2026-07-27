@@ -2,8 +2,8 @@ use std::{f32::consts::TAU, mem, sync::Arc};
 
 use glam::DVec3;
 use steel_protocol::packets::game::{
-    CContainerClose, COpenScreen, CSetPlayerInventory, SContainerButtonClick, SContainerClick,
-    SContainerClose, SContainerSlotStateChanged, SRenameItem, SSetCarriedItem,
+    CContainerClose, COpenScreen, CSetPlayerInventory, ClickType, SContainerButtonClick,
+    SContainerClick, SContainerClose, SContainerSlotStateChanged, SRenameItem, SSetCarriedItem,
     SSetCreativeModeSlot,
 };
 use steel_registry::item_stack::ItemStack;
@@ -15,7 +15,7 @@ use steel_utils::{
 use text_components::TextComponent;
 
 use crate::{
-    entity::{Entity, RemovalReason, entities::ItemEntity},
+    entity::{Entity, LivingEntity as _, RemovalReason, entities::ItemEntity},
     inventory::{
         click::Click,
         container::{Container, CraftingContainer, clear_or_count_matching_stack},
@@ -28,12 +28,11 @@ use crate::{
     },
     map::CarriedMap,
     player::{Player, connection::NetworkConnection as _},
-    world::World,
 };
 
 use super::{
-    DeferredMenuAction, MenuItemDisposition, MenuRemovalStatus, OpenMenuDispatch,
-    OpenMenuUnavailable, PlayerInventory, PreparedMenu, TerminalMenuRemoval,
+    DeferredMenuAction, MenuItemDisposition, MenuOpenContext, MenuRemovalStatus, OpenMenuDispatch,
+    OpenMenuUnavailable, PendingMenuOpen, PlayerInventory, PreparedMenu, TerminalMenuRemoval,
 };
 
 impl Player {
@@ -120,6 +119,9 @@ impl Player {
                     }
                 }
                 DeferredMenuAction::Open(prepared) => {
+                    self.execute_menu_open(*prepared);
+                }
+                DeferredMenuAction::Install(prepared) => {
                     let PreparedMenu { title, menu } = *prepared;
                     self.open_prepared_menu(title, menu);
                 }
@@ -136,8 +138,8 @@ impl Player {
         terminal_removal
             .pending_menus
             .extend(actions.into_iter().filter_map(|action| match action {
-                DeferredMenuAction::Open(prepared) => Some(prepared.menu),
-                DeferredMenuAction::Close { .. } => None,
+                DeferredMenuAction::Install(prepared) => Some(prepared.menu),
+                DeferredMenuAction::Close { .. } | DeferredMenuAction::Open(_) => None,
             }));
     }
 
@@ -224,7 +226,7 @@ impl Player {
     /// This is the common implementation shared between inventory menu and
     /// external menus (crafting table, chest, etc.).
     fn process_container_click(&self, menu: &mut Menu, packet: SContainerClick) {
-        if self.game_mode() == GameType::Spectator {
+        if self.game_mode() == GameType::Spectator || self.get_health() <= 0.0 {
             menu.behavior_mut()
                 .send_all_data_to_remote(&self.connection);
             return;
@@ -242,11 +244,14 @@ impl Player {
         // (out-of-range slot, bad button, invalid drag encoding — including
         // the -1 "no slot" clicks Java accepts) is not applied, but the state
         // sync below still runs so the client's prediction gets corrected.
+        let slot_count = menu.behavior().slot_count();
+        let packet_slot_in_bounds = packet.slot_num < 0
+            || usize::try_from(packet.slot_num).is_ok_and(|slot| slot < slot_count);
         let click = Click::parse(
             packet.slot_num,
             packet.button_num,
             packet.click_type,
-            menu.behavior().slot_count(),
+            slot_count,
         );
         if click.is_none() {
             log::debug!(
@@ -256,6 +261,14 @@ impl Player {
                 packet.button_num,
                 packet.click_type
             );
+            let quick_craft_header = packet.button_num & 3;
+            let quick_craft_type = (packet.button_num >> 2) & 3;
+            if packet_slot_in_bounds
+                && packet.click_type == ClickType::QuickCraft
+                && (quick_craft_header == 3 || (quick_craft_header == 0 && quick_craft_type == 3))
+            {
+                menu.behavior_mut().reset_quick_craft();
+            }
         }
 
         let full_resync_needed = packet.state_id as u32 != menu.behavior().state_id();
@@ -437,61 +450,77 @@ impl Player {
     ///
     /// # Arguments
     /// * `title` - The display title shown in the open-screen packet.
-    /// * `create` - Factory invoked with the allocated container id and the
-    ///   player's world; returns the menu to open. The factory runs
-    ///   synchronously and must only construct the menu; it must not lock
-    ///   containers used by the current menu.
+    /// * `create` - Factory invoked with the allocated container id, player,
+    ///   and current world. If called by a menu hook, the factory runs after
+    ///   that hook releases its container locks.
     ///
     /// # Panics
-    /// Panics if the created menu has no menu type (i.e. the player's own
-    /// inventory menu, which must never be opened via `open_menu`).
+    /// Panics if the created menu uses a different container id than the one
+    /// allocated for it, or has no menu type (i.e. the player's own inventory
+    /// menu, which must never be opened via `open_menu`).
     pub fn open_menu(
         &self,
         title: impl Into<TextComponent>,
-        create: impl FnOnce(u8, &Arc<World>) -> Menu,
+        create: impl for<'a> FnOnce(MenuOpenContext<'a>) -> Menu + Send + 'static,
     ) {
         self.cancel_deferred_container_open();
         if !self.begin_menu_open_operation() {
             return;
         }
-        self.open_menu_inner(title, create);
+        self.open_menu_inner(PendingMenuOpen {
+            title: title.into(),
+            create: Box::new(create),
+        });
         self.finish_menu_open_operation();
     }
 
-    fn open_menu_inner(
-        &self,
-        title: impl Into<TextComponent>,
-        create: impl FnOnce(u8, &Arc<World>) -> Menu,
-    ) {
+    fn open_menu_inner(&self, pending: PendingMenuOpen) {
         self.do_close_container();
 
-        {
-            let open_menu = self.open_menu.lock();
-            if open_menu.terminal_removal.is_some() {
-                return;
-            }
-        }
-
-        let container_id = self.next_container_counter();
-        let menu = create(container_id, &self.get_world());
-        let title = title.into();
-
         let mut open_menu = self.open_menu.lock();
-        if let Some(terminal_removal) = open_menu.terminal_removal.as_mut() {
-            terminal_removal.pending_menus.push(menu);
+        if open_menu.terminal_removal.is_some() {
             return;
         }
         if let Some(dispatch) = open_menu.dispatch.as_mut() {
             dispatch
                 .actions
-                .push(DeferredMenuAction::Open(Box::new(PreparedMenu {
-                    title,
-                    menu,
-                })));
+                .push(DeferredMenuAction::Open(Box::new(pending)));
             return;
         }
         drop(open_menu);
 
+        self.execute_menu_open(pending);
+    }
+
+    fn execute_menu_open(&self, pending: PendingMenuOpen) {
+        {
+            let mut open_menu = self.open_menu.lock();
+            if open_menu.terminal_removal.is_some() {
+                return;
+            }
+            if let Some(dispatch) = open_menu.dispatch.as_mut() {
+                dispatch
+                    .actions
+                    .push(DeferredMenuAction::Open(Box::new(pending)));
+                return;
+            }
+        }
+
+        let PendingMenuOpen { title, create } = pending;
+        let container_id = self.next_container_counter();
+        let world = self.get_world();
+        let menu = create(MenuOpenContext {
+            container_id,
+            player: self,
+            world: &world,
+        });
+        assert_eq!(
+            menu.container_id(),
+            container_id,
+            "open_menu factory returned container id {}, but {} was allocated",
+            menu.container_id(),
+            container_id,
+        );
         self.open_prepared_menu(title, menu);
     }
 
@@ -517,7 +546,7 @@ impl Player {
             if let Some(dispatch) = open_menu.dispatch.as_mut() {
                 dispatch
                     .actions
-                    .push(DeferredMenuAction::Open(Box::new(PreparedMenu {
+                    .push(DeferredMenuAction::Install(Box::new(PreparedMenu {
                         title,
                         menu,
                     })));
@@ -1038,7 +1067,7 @@ impl Player {
     fn default_menu_item_disposition(&self) -> MenuItemDisposition {
         let removed_outside_world_change =
             self.is_removed() && self.removal_reason() != Some(RemovalReason::ChangedWorld);
-        if removed_outside_world_change || self.connection.closed() {
+        if removed_outside_world_change || self.connection.closed() || self.get_health() <= 0.0 {
             MenuItemDisposition::Drop
         } else {
             MenuItemDisposition::ReturnToInventory

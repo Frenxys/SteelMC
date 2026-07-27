@@ -22,6 +22,13 @@ pub enum EquipmentSwapResult {
     Fail,
 }
 
+const fn hand_to_equipment_slot(hand: InteractionHand) -> EquipmentSlot {
+    match hand {
+        InteractionHand::MainHand => EquipmentSlot::MainHand,
+        InteractionHand::OffHand => EquipmentSlot::OffHand,
+    }
+}
+
 const fn equipment_to_slot(slot: EquipmentSlot, selected: u8) -> usize {
     match slot {
         EquipmentSlot::MainHand => selected as usize,
@@ -118,11 +125,7 @@ impl PlayerInventory {
         hand: InteractionHand,
         f: impl FnOnce(&mut ItemStack) -> R,
     ) -> R {
-        let slot = match hand {
-            InteractionHand::MainHand => EquipmentSlot::MainHand,
-            InteractionHand::OffHand => EquipmentSlot::OffHand,
-        };
-        self.with_equipment_item_mut(slot, f)
+        self.with_equipment_item_mut(hand_to_equipment_slot(hand), f)
     }
 
     /// Damages the held item and converts it to `replacement_item` if it breaks.

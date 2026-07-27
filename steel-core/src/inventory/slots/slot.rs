@@ -1,20 +1,84 @@
 //! Slot abstraction for inventory access.
 
-use steel_registry::equipment::EquipmentSlot;
 use steel_registry::item_stack::ItemStack;
-use steel_utils::{ErasedType, locks::Shared};
+use steel_utils::ErasedType;
 
-use crate::inventory::lock::{ContainerId, ContainerLockGuard};
-use crate::inventory::slots::armor_slot::ArmorSlot;
-use crate::inventory::slots::normal_slot::NormalSlot;
+use crate::inventory::lock::{ContainerId, ContainerLockGuard, ContainerRef};
 use crate::player::Player;
-use crate::player::player_inventory::PlayerInventory;
+
+/// Physical storage and auxiliary container dependencies used by a [`Slot`].
+///
+/// Menu builders derive their complete lock set and physical-alias checks from
+/// this descriptor, so custom slots must include every container accessed by
+/// any slot callback.
+pub struct SlotStorage {
+    physical: Option<(ContainerRef, usize)>,
+    dependencies: Vec<ContainerRef>,
+}
+
+impl SlotStorage {
+    /// Describes a slot backed by one physical container position.
+    #[must_use]
+    pub fn physical(container: impl Into<ContainerRef>, index: usize) -> Self {
+        Self {
+            physical: Some((container.into(), index)),
+            dependencies: Vec::new(),
+        }
+    }
+
+    /// Describes a storage-less slot that only accesses auxiliary containers.
+    #[must_use]
+    pub fn virtual_slot(dependencies: impl IntoIterator<Item = impl Into<ContainerRef>>) -> Self {
+        Self {
+            physical: None,
+            dependencies: dependencies.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Adds auxiliary containers accessed by slot callbacks.
+    #[must_use]
+    pub fn with_dependencies(
+        mut self,
+        dependencies: impl IntoIterator<Item = impl Into<ContainerRef>>,
+    ) -> Self {
+        self.dependencies
+            .extend(dependencies.into_iter().map(Into::into));
+        self
+    }
+
+    /// Returns the slot's physical container and container-local index.
+    #[must_use]
+    pub fn physical_backing(&self) -> Option<(&ContainerRef, usize)> {
+        self.physical
+            .as_ref()
+            .map(|(container, index)| (container, *index))
+    }
+
+    /// Returns the stable identity of the physical backing position.
+    #[must_use]
+    pub fn physical_key(&self) -> Option<(ContainerId, usize)> {
+        self.physical_backing()
+            .map(|(container, index)| (container.container_id(), index))
+    }
+
+    pub(crate) fn container_refs(&self) -> impl Iterator<Item = &ContainerRef> {
+        self.physical
+            .iter()
+            .map(|(container, _)| container)
+            .chain(self.dependencies.iter())
+    }
+}
 
 /// A view into a single position in a container, accessed via a `ContainerLockGuard`.
 ///
 /// Concrete implementations must implement [`steel_utils::DowncastType`] with
-/// a unique, stable key so erased slot references can recover their type.
+/// a unique, stable key so erased slot references can recover their type, and
+/// retain one [`SlotStorage`] descriptor for their full container dependency
+/// set.
 pub trait Slot: ErasedType + Send + Sync {
+    /// Returns this slot's physical storage and auxiliary dependencies.
+    fn storage(&self) -> &SlotStorage;
+
     /// Returns a reference to the item in this slot.
     fn get_item<'a>(&self, guard: &'a ContainerLockGuard) -> &'a ItemStack;
 
@@ -168,51 +232,14 @@ pub trait Slot: ErasedType + Send + Sync {
     /// Returns the container slot index.
     fn get_container_slot(&self) -> usize;
 
-    /// Returns the physical container and slot backing this slot.
+    /// Returns true if normal menu persistence and transfer rules must not be
+    /// applied to this slot.
     ///
-    /// Every container-backed slot returns `Some`, including fake slots.
-    /// Slots without stable physical storage return `None`.
-    fn container_key(&self) -> Option<(ContainerId, usize)>;
-
-    /// Returns true if this is a fake slot that doesn't persist items.
+    /// A container-backed fake slot must be the menu's only view of its
+    /// physical [`SlotStorage::physical_key`].
     fn is_fake(&self) -> bool {
         false
     }
-}
-
-/// Adds hotbar slots (player inventory indices 0-8).
-pub fn add_hotbar_slots(slots: &mut Vec<Box<dyn Slot>>, inventory: &Shared<PlayerInventory>) {
-    for i in 0..9 {
-        slots.push(Box::new(NormalSlot::new(inventory.clone(), i)));
-    }
-}
-
-/// Adds main inventory slots (player inventory indices 9-35).
-pub fn add_inventory_slots(slots: &mut Vec<Box<dyn Slot>>, inventory: &Shared<PlayerInventory>) {
-    for i in 9..36 {
-        slots.push(Box::new(NormalSlot::new(inventory.clone(), i)));
-    }
-}
-
-/// Adds the main inventory (indices 9-35) followed by the hotbar (indices 0-8).
-pub fn add_standard_inventory_slots(
-    slots: &mut Vec<Box<dyn Slot>>,
-    inventory: &Shared<PlayerInventory>,
-) {
-    add_inventory_slots(slots, inventory);
-    add_hotbar_slots(slots, inventory);
-}
-
-/// The four armor slots in display order (head, chest, legs, feet).
-#[must_use]
-pub fn armor_slots(inventory: &Shared<PlayerInventory>) -> [ArmorSlot; 4] {
-    [
-        (39, EquipmentSlot::Head),
-        (38, EquipmentSlot::Chest),
-        (37, EquipmentSlot::Legs),
-        (36, EquipmentSlot::Feet),
-    ]
-    .map(|(index, slot)| ArmorSlot::new(inventory.clone(), index, slot))
 }
 
 #[cfg(test)]
@@ -227,6 +254,7 @@ mod tests {
     use steel_utils::{Downcast as _, DowncastType, DowncastTypeKey};
 
     use super::*;
+    use crate::inventory::slots::normal_slot::NormalSlot;
     use crate::inventory::{container::SimpleContainer, lock::ContainerRef};
 
     struct SafeInsertOverrideSlot {
@@ -241,6 +269,10 @@ mod tests {
     }
 
     impl Slot for SafeInsertOverrideSlot {
+        fn storage(&self) -> &SlotStorage {
+            self.base.storage()
+        }
+
         fn get_item<'a>(&self, guard: &'a ContainerLockGuard) -> &'a ItemStack {
             self.base.get_item(guard)
         }
@@ -273,10 +305,6 @@ mod tests {
 
         fn get_container_slot(&self) -> usize {
             self.base.get_container_slot()
-        }
-
-        fn container_key(&self) -> Option<(ContainerId, usize)> {
-            self.base.container_key()
         }
     }
 

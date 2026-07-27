@@ -103,7 +103,7 @@ impl Click {
             | Click::Clone { slot }
             | Click::Throw { slot, .. }
             | Click::PickupAll { slot, .. }
-            | Click::QuickCraft(QuickCraft::AddSlot { slot, .. }) => *slot < slot_count,
+            | Click::QuickCraft(QuickCraft::AddSlot { slot }) => *slot < slot_count,
             Click::Swap { slot, with } => {
                 *slot < slot_count
                     && match with {
@@ -112,7 +112,7 @@ impl Click {
                     }
             }
             Click::DropCarried { .. }
-            | Click::QuickCraft(QuickCraft::Start { .. } | QuickCraft::End { .. }) => true,
+            | Click::QuickCraft(QuickCraft::Start { .. } | QuickCraft::End) => true,
         }
     }
 }
@@ -170,14 +170,9 @@ pub enum QuickCraft {
     AddSlot {
         /// The slot under the cursor.
         slot: usize,
-        /// Which kind of drag is active.
-        kind: DragKind,
     },
     /// Finish the drag and distribute the carried items.
-    End {
-        /// Which kind of drag is ending.
-        kind: DragKind,
-    },
+    End,
 }
 
 /// The kind of drag being performed, named after the initiating button.
@@ -243,6 +238,10 @@ impl Click {
         click_type: ClickType,
         slot_count: usize,
     ) -> Option<Self> {
+        if slot_num >= 0 && usize::try_from(slot_num).ok()? >= slot_count {
+            return None;
+        }
+
         // In-range slot index, or None for -999/-1/garbage.
         let slot = || usize::try_from(slot_num).ok().filter(|&i| i < slot_count);
         let mouse_button = || match button {
@@ -263,7 +262,10 @@ impl Click {
                     })
                 }
             }
-            ClickType::QuickMove => Some(Self::QuickMove { slot: slot()? }),
+            ClickType::QuickMove => match button {
+                0 | 1 => Some(Self::QuickMove { slot: slot()? }),
+                _ => None,
+            },
             ClickType::Swap => {
                 let with = match button {
                     0..=8 => SwapTarget::Hotbar(button as u8),
@@ -293,21 +295,20 @@ impl Click {
                 },
             }),
             ClickType::QuickCraft => {
-                // Kind in bits 2-3, phase in bits 0-1 (Java's
-                // getQuickcraftType / getQuickcraftHeader).
-                let kind = match (button >> 2) & 3 {
-                    0 => DragKind::Left,
-                    1 => DragKind::Right,
-                    2 => DragKind::Clone,
-                    _ => return None,
-                };
+                // Phase is in bits 0-1 and kind in bits 2-3. Vanilla reads
+                // kind only for Start; AddSlot and End use the stored kind.
                 match button & 3 {
-                    0 => Some(Self::QuickCraft(QuickCraft::Start { kind })),
-                    1 => Some(Self::QuickCraft(QuickCraft::AddSlot {
-                        slot: slot()?,
-                        kind,
-                    })),
-                    2 => Some(Self::QuickCraft(QuickCraft::End { kind })),
+                    0 => {
+                        let kind = match (button >> 2) & 3 {
+                            0 => DragKind::Left,
+                            1 => DragKind::Right,
+                            2 => DragKind::Clone,
+                            _ => return None,
+                        };
+                        Some(Self::QuickCraft(QuickCraft::Start { kind }))
+                    }
+                    1 => Some(Self::QuickCraft(QuickCraft::AddSlot { slot: slot()? })),
+                    2 => Some(Self::QuickCraft(QuickCraft::End)),
                     _ => None,
                 }
             }
@@ -350,6 +351,11 @@ mod tests {
             Click::parse(45, 0, ClickType::QuickMove, SLOTS),
             Some(Click::QuickMove { slot: 45 })
         );
+        assert_eq!(
+            Click::parse(45, 1, ClickType::QuickMove, SLOTS),
+            Some(Click::QuickMove { slot: 45 })
+        );
+        assert_eq!(Click::parse(45, 2, ClickType::QuickMove, SLOTS), None);
     }
 
     #[test]
@@ -412,27 +418,35 @@ mod tests {
         );
         assert_eq!(
             Click::parse(10, (1 << 2) | 1, ClickType::QuickCraft, SLOTS),
-            Some(Click::QuickCraft(QuickCraft::AddSlot {
-                slot: 10,
-                kind: DragKind::Right
-            }))
+            Some(Click::QuickCraft(QuickCraft::AddSlot { slot: 10 }))
         );
         assert_eq!(
             Click::parse(-999, (2 << 2) | 2, ClickType::QuickCraft, SLOTS),
-            Some(Click::QuickCraft(QuickCraft::End {
-                kind: DragKind::Clone
-            }))
+            Some(Click::QuickCraft(QuickCraft::End))
         );
-        // Kind 3 and phase 3 are invalid; AddSlot needs an in-range slot.
+        // Kind is validated only for Start. AddSlot and End ignore those bits.
         assert_eq!(
             Click::parse(-999, 3 << 2, ClickType::QuickCraft, SLOTS),
             None
         );
+        assert_eq!(
+            Click::parse(10, (3 << 2) | 1, ClickType::QuickCraft, SLOTS),
+            Some(Click::QuickCraft(QuickCraft::AddSlot { slot: 10 }))
+        );
+        assert_eq!(
+            Click::parse(-999, (3 << 2) | 2, ClickType::QuickCraft, SLOTS),
+            Some(Click::QuickCraft(QuickCraft::End))
+        );
+
+        // Phase 3 is invalid. Every nonnegative packet slot must be in range,
+        // including the otherwise slotless Start and End phases.
         assert_eq!(Click::parse(-999, 3, ClickType::QuickCraft, SLOTS), None);
         assert_eq!(
             Click::parse(100, (1 << 2) | 1, ClickType::QuickCraft, SLOTS),
             None
         );
+        assert_eq!(Click::parse(100, 0, ClickType::QuickCraft, SLOTS), None);
+        assert_eq!(Click::parse(100, 2, ClickType::QuickCraft, SLOTS), None);
     }
 
     #[test]
@@ -444,13 +458,7 @@ mod tests {
             }
             .is_valid_for(SLOTS)
         );
-        assert!(
-            !Click::QuickCraft(QuickCraft::AddSlot {
-                slot: SLOTS,
-                kind: DragKind::Left,
-            })
-            .is_valid_for(SLOTS)
-        );
+        assert!(!Click::QuickCraft(QuickCraft::AddSlot { slot: SLOTS }).is_valid_for(SLOTS));
         assert!(
             !Click::Swap {
                 slot: 0,

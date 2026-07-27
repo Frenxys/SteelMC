@@ -66,8 +66,9 @@ impl BlockBehavior for FurnaceBlock {
             return InteractionResult::Success;
         };
         let title = furnace.display_name();
-        player.open_menu(title, move |container_id, _world| {
-            furnace_menu(player.inventory.clone(), container_id, container)
+        let inventory = player.inventory.clone();
+        player.open_menu(title, move |context| {
+            furnace_menu(inventory, context.container_id, container)
         });
 
         // TODO: Award INTERACT_WITH_FURNACE once Steel has statistics.

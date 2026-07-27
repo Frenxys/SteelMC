@@ -37,7 +37,7 @@ use crate::{
     enchantment_effect::EnchantmentEffectComponent,
     equipment::EquipmentSlot,
     item_stack_template::ItemStackTemplate,
-    items::ItemRef,
+    items::{Item, ItemRef},
     vanilla_items,
 };
 
@@ -1165,10 +1165,14 @@ impl ItemStack {
         (!java::is_blank(title)).then(|| Cow::Owned(TextComponent::plain(title.to_owned())))
     }
 
-    /// Vanilla `ItemStack.getHoverName`: the custom name if set, otherwise the
-    /// item's default name.
+    /// Returns the custom name if set, otherwise the effective `ITEM_NAME`
+    /// component.
+    ///
+    /// This does not apply item-class name overrides such as potion contents;
+    /// callers with access to item behaviors should use their behavior-aware
+    /// hover-name API.
     #[must_use]
-    pub fn hover_name(&self) -> Cow<'_, TextComponent> {
+    pub fn custom_or_component_name(&self) -> Cow<'_, TextComponent> {
         self.custom_name()
             .or_else(|| self.get(ITEM_NAME).map(Cow::Borrowed))
             .unwrap_or(Cow::Borrowed(&EMPTY_NAME))
@@ -1190,6 +1194,24 @@ fn validate_contained_item_sizes<'a>(
         }
     }
     Ok(())
+}
+
+impl From<&ItemStack> for ItemStack {
+    fn from(stack: &Self) -> Self {
+        stack.to_owned()
+    }
+}
+
+impl From<ItemRef> for ItemStack {
+    fn from(item: ItemRef) -> Self {
+        Self::new(item)
+    }
+}
+
+impl From<&'static std::sync::LazyLock<Item>> for ItemStack {
+    fn from(item: &'static std::sync::LazyLock<Item>) -> Self {
+        Self::new(item)
+    }
 }
 
 impl std::fmt::Display for ItemStack {
@@ -1454,7 +1476,7 @@ mod name_tests {
         let expected = TextComponent::plain("Raw title");
 
         assert_eq!(book.custom_name().as_deref(), Some(&expected));
-        assert_eq!(book.hover_name().as_ref(), &expected);
+        assert_eq!(book.custom_or_component_name().as_ref(), &expected);
     }
 
     #[test]
@@ -1465,7 +1487,7 @@ mod name_tests {
         book.set(CUSTOM_NAME, explicit.clone());
 
         assert_eq!(book.custom_name().as_deref(), Some(&explicit));
-        assert_eq!(book.hover_name().as_ref(), &explicit);
+        assert_eq!(book.custom_or_component_name().as_ref(), &explicit);
     }
 
     #[test]
@@ -1477,7 +1499,7 @@ mod name_tests {
         else {
             panic!("written book should have a default item name");
         };
-        assert_eq!(blank.hover_name().as_ref(), default_name);
+        assert_eq!(blank.custom_or_component_name().as_ref(), default_name);
 
         let next_line = written_book("\u{0085}", None);
         assert_eq!(

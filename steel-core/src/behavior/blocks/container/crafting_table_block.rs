@@ -47,9 +47,10 @@ impl BlockBehavior for CraftingTableBlock {
         _hit_result: &BlockHitResult,
         _inv: &mut InventoryAccess,
     ) -> InteractionResult {
+        let inventory = player.inventory.clone();
         player.open_menu(
             TextComponent::translated(translations::CONTAINER_CRAFTING.msg()),
-            move |id, _world| crafting(player.inventory.clone(), id, pos),
+            move |context| crafting(inventory, context.container_id, pos),
         );
         // TODO: Award stat INTERACT_WITH_CRAFTING_TABLE
         InteractionResult::Success

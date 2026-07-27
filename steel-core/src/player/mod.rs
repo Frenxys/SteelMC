@@ -251,10 +251,8 @@ pub struct Player {
     /// snapshots this before encoding and compares after to detect stale batches.
     pub chunk_send_epoch: SyncMutex<u32>,
 
-    /// Persisted `RootVehicle` payload awaiting live entity restoration.
-    pending_root_vehicle: SyncMutex<Option<PendingRootVehicleRestore>>,
-    /// Persisted ender pearl payloads awaiting live entity restoration.
-    pending_ender_pearls: SyncMutex<Vec<PersistentEnderPearl>>,
+    /// Domain-residence identity and persisted entities awaiting restoration.
+    residence: SyncMutex<PlayerResidenceState>,
     /// In-flight ender pearls thrown by this player, kept weakly so they persist
     /// with the player and re-spawn on login (vanilla `ServerPlayer.enderPearls`).
     ender_pearls: SyncMutex<Vec<Weak<dyn Entity>>>,
@@ -269,6 +267,36 @@ unsafe impl DowncastType for Player {
 struct PendingRootVehicleRestore {
     world: Identifier,
     root_vehicle: PersistentRootVehicle,
+}
+
+/// Runtime identity for one continuous stay in a Steel domain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DomainResidenceToken(u64);
+
+struct PlayerResidenceState {
+    token: DomainResidenceToken,
+    pending_root_vehicle: Option<PendingRootVehicleRestore>,
+    pending_ender_pearls: Vec<PersistentEnderPearl>,
+}
+
+impl PlayerResidenceState {
+    const fn new() -> Self {
+        Self {
+            token: DomainResidenceToken(1),
+            pending_root_vehicle: None,
+            pending_ender_pearls: Vec::new(),
+        }
+    }
+
+    fn advance(&mut self) -> DomainResidenceToken {
+        let Some(next_token) = self.token.0.checked_add(1) else {
+            panic!("domain residence token space exhausted");
+        };
+        self.token = DomainResidenceToken(next_token);
+        self.pending_root_vehicle = None;
+        self.pending_ender_pearls.clear();
+        self.token
+    }
 }
 
 impl Player {
@@ -420,8 +448,7 @@ impl Player {
             seen_credits: SyncMutex::new(false),
             won_game: SyncMutex::new(false),
             chunk_send_epoch: SyncMutex::new(0),
-            pending_root_vehicle: SyncMutex::new(None),
-            pending_ender_pearls: SyncMutex::new(Vec::new()),
+            residence: SyncMutex::new(PlayerResidenceState::new()),
             ender_pearls: SyncMutex::new(Vec::new()),
         }
     }
@@ -815,25 +842,52 @@ impl Player {
             .expect("player must not outlive server")
     }
 
-    pub(crate) fn set_pending_root_vehicle(
+    /// Returns the identity of the player's current continuous domain stay.
+    pub(crate) fn domain_residence_token(&self) -> DomainResidenceToken {
+        self.residence.lock().token
+    }
+
+    /// Starts a new continuous domain stay and invalidates old restore work.
+    pub(crate) fn advance_domain_residence(&self) -> DomainResidenceToken {
+        self.residence.lock().advance()
+    }
+
+    /// Returns whether delayed work still belongs to the current domain stay.
+    pub(crate) fn is_domain_residence_current(&self, token: DomainResidenceToken) -> bool {
+        self.residence.lock().token == token
+    }
+
+    /// Installs both persisted restore payloads for a token-owned domain stay.
+    pub(crate) fn install_pending_domain_restores(
         &self,
+        token: DomainResidenceToken,
         world: &World,
-        root_vehicle: PersistentRootVehicle,
-    ) {
-        *self.pending_root_vehicle.lock() = Some(PendingRootVehicleRestore {
-            world: world.key.clone(),
-            root_vehicle,
-        });
+        root_vehicle: Option<PersistentRootVehicle>,
+        ender_pearls: Vec<PersistentEnderPearl>,
+    ) -> bool {
+        let mut residence = self.residence.lock();
+        if residence.token != token {
+            return false;
+        }
+
+        residence.pending_root_vehicle =
+            root_vehicle.map(|root_vehicle| PendingRootVehicleRestore {
+                world: world.key.clone(),
+                root_vehicle,
+            });
+        residence.pending_ender_pearls = ender_pearls;
+        true
     }
 
     pub(crate) fn clear_pending_root_vehicle(&self) {
-        *self.pending_root_vehicle.lock() = None;
+        self.residence.lock().pending_root_vehicle = None;
     }
 
     pub(crate) fn pending_root_vehicle_for_current_world(&self) -> Option<PersistentRootVehicle> {
         let world_key = self.get_world().key.clone();
-        self.pending_root_vehicle
+        self.residence
             .lock()
+            .pending_root_vehicle
             .as_ref()
             .filter(|pending| pending.world == world_key)
             .map(|pending| pending.root_vehicle.clone())
@@ -841,39 +895,75 @@ impl Player {
 
     pub(crate) fn take_matching_pending_root_vehicle(
         &self,
+        token: DomainResidenceToken,
         world: &World,
         attach: [u8; 16],
         root_uuid: [u8; 16],
     ) -> Option<PersistentRootVehicle> {
-        let mut pending = self.pending_root_vehicle.lock();
-        let matches = pending.as_ref().is_some_and(|pending| {
-            pending.world == world.key
-                && pending.root_vehicle.attach == attach
-                && pending.root_vehicle.entity.uuid == root_uuid
-        });
+        let mut residence = self.residence.lock();
+        if residence.token != token {
+            return None;
+        }
+        let matches = residence
+            .pending_root_vehicle
+            .as_ref()
+            .is_some_and(|pending| {
+                pending.world == world.key
+                    && pending.root_vehicle.attach == attach
+                    && pending.root_vehicle.entity.uuid == root_uuid
+            });
         if matches {
-            pending.take().map(|pending| pending.root_vehicle)
+            residence
+                .pending_root_vehicle
+                .take()
+                .map(|pending| pending.root_vehicle)
         } else {
             None
         }
     }
 
-    pub(crate) fn set_pending_ender_pearls(&self, pearls: Vec<PersistentEnderPearl>) {
-        *self.pending_ender_pearls.lock() = pearls;
-    }
-
     pub(crate) fn pending_ender_pearls(&self) -> Vec<PersistentEnderPearl> {
-        self.pending_ender_pearls.lock().clone()
-    }
-
-    pub(crate) fn clear_pending_ender_pearls(&self) {
-        self.pending_ender_pearls.lock().clear();
+        self.residence.lock().pending_ender_pearls.clone()
     }
 
     pub(crate) fn remove_pending_ender_pearl(&self, uuid: Uuid) {
-        self.pending_ender_pearls
+        self.residence
             .lock()
+            .pending_ender_pearls
             .retain(|pearl| Uuid::from_bytes(pearl.entity.uuid) != uuid);
+    }
+
+    pub(crate) fn discard_pending_ender_pearl(
+        &self,
+        token: DomainResidenceToken,
+        uuid: Uuid,
+    ) -> bool {
+        let mut residence = self.residence.lock();
+        if residence.token != token {
+            return false;
+        }
+        let old_len = residence.pending_ender_pearls.len();
+        residence
+            .pending_ender_pearls
+            .retain(|pearl| Uuid::from_bytes(pearl.entity.uuid) != uuid);
+        residence.pending_ender_pearls.len() != old_len
+    }
+
+    pub(crate) fn take_matching_pending_ender_pearl(
+        &self,
+        token: DomainResidenceToken,
+        world: &World,
+        uuid: Uuid,
+    ) -> Option<PersistentEnderPearl> {
+        let mut residence = self.residence.lock();
+        if residence.token != token {
+            return None;
+        }
+        let world_key = world.key.to_string();
+        let index = residence.pending_ender_pearls.iter().position(|pearl| {
+            pearl.world == world_key && Uuid::from_bytes(pearl.entity.uuid) == uuid
+        })?;
+        Some(residence.pending_ender_pearls.remove(index))
     }
 
     /// Registers a thrown ender pearl so it persists with this player and

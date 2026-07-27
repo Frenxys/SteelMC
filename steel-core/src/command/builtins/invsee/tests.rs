@@ -20,10 +20,11 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
+    entity::PendingWorldChangeToken,
     inventory::{
         container::{Container as _, SimpleContainer},
         menu::kinds::BasicKind,
-        prelude::{Click, DragKind, MenuBuilder, MouseButton, QuickCraft},
+        prelude::{Click, DragKind, MenuBuilder, MouseButton, QuickCraft, SectionKind},
     },
     permission::{PermissionEntry, PermissionMetadataSet, PermissionSet},
     player::{PlayerConnection, player_inventory::PlayerInventory},
@@ -170,6 +171,19 @@ fn set_permissions(player: &Player, effective: PermissionSet) {
     );
 }
 
+fn begin_domain_switch(player: &Player) -> PendingWorldChangeToken {
+    let Some(token) = player.begin_pending_world_change() else {
+        panic!("test player should accept a pending world change");
+    };
+    assert!(player.begin_domain_switch(token));
+    token
+}
+
+fn finish_domain_switch(player: &Player, token: PendingWorldChangeToken) {
+    assert!(player.finish_domain_switch(token));
+    assert!(player.finish_pending_world_change(token));
+}
+
 #[test]
 fn base_and_modify_permissions_grant_the_expected_access() {
     let Ok((access, modify)) = invsee_permissions() else {
@@ -196,9 +210,9 @@ fn invsee_rejects_players_in_different_domains() {
     let target = test_player(25, "Target", 25);
     assert!(ensure_same_domain(&source, &target).is_ok());
 
-    assert!(target.begin_domain_switch());
+    let switch_token = begin_domain_switch(&target);
     assert!(ensure_same_domain(&source, &target).is_err());
-    target.finish_domain_switch();
+    finish_domain_switch(&target, switch_token);
     assert!(ensure_same_domain(&source, &target).is_ok());
 
     target.set_world(fresh_test_world_in_domain("other", "invsee_target"));
@@ -215,10 +229,7 @@ fn readonly_target_slots_reject_pickup_and_creative_clone() {
         .inventory
         .lock()
         .set_item(0, ItemStack::with_count(&vanilla_items::STONE, 5));
-    let Ok((access, _)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target, false, access);
+    let mut menu = invsee(1, &source, &target, false);
 
     menu.clicked(
         Click::Pickup {
@@ -239,15 +250,26 @@ fn readonly_target_slots_reject_pickup_and_creative_clone() {
 }
 
 #[test]
-fn modify_view_can_fully_edit_target_armor_slots() {
+fn modify_view_edits_armor_slots_within_equipment_rules() {
     let source = test_player(8, "Viewer", 8);
     let target = test_player(9, "Target", 9);
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target, true, modify);
-    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::STONE);
+    let mut menu = invsee(1, &source, &target, true);
 
+    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::STONE);
+    menu.clicked(
+        Click::Pickup {
+            slot: TARGET_ARMOR_START,
+            button: MouseButton::Left,
+        },
+        &source,
+    );
+    assert!(
+        target.inventory.lock().get_item(39).is_empty(),
+        "a non-equippable item must not enter the head slot"
+    );
+    assert!(menu.behavior().carried().is(&vanilla_items::STONE));
+
+    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::IRON_HELMET);
     menu.clicked(
         Click::Pickup {
             slot: TARGET_ARMOR_START,
@@ -261,7 +283,7 @@ fn modify_view_can_fully_edit_target_armor_slots() {
             .inventory
             .lock()
             .get_item(39)
-            .is(&vanilla_items::STONE)
+            .is(&vanilla_items::IRON_HELMET)
     );
     assert!(menu.behavior().carried().is_empty());
 }
@@ -274,11 +296,8 @@ fn modify_view_synchronizes_target_armor_without_inventory_locks() {
         .inventories
         .lock()
         .extend([source.inventory.clone(), target.player.inventory.clone()]);
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target.player, true, modify);
-    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::STONE);
+    let mut menu = invsee(1, &source, &target.player, true);
+    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::IRON_HELMET);
 
     menu.clicked(
         Click::Pickup {
@@ -294,12 +313,12 @@ fn modify_view_synchronizes_target_armor_without_inventory_locks() {
             .inventory
             .lock()
             .get_item(39)
-            .is(&vanilla_items::STONE)
+            .is(&vanilla_items::IRON_HELMET)
     );
     target.player.tick();
     assert_eq!(
         player_inventory_updates(&target.packets),
-        vec![(39, ItemStack::new(&vanilla_items::STONE))]
+        vec![(39, ItemStack::new(&vanilla_items::IRON_HELMET))]
     );
     assert!(
         target
@@ -316,11 +335,8 @@ fn self_invsee_synchronizes_own_armor_slot() {
         .inventories
         .lock()
         .push(recording.player.inventory.clone());
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &recording.player, &recording.player, true, modify);
-    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::STONE);
+    let mut menu = invsee(1, &recording.player, &recording.player, true);
+    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::IRON_HELMET);
 
     menu.clicked(
         Click::Pickup {
@@ -333,7 +349,7 @@ fn self_invsee_synchronizes_own_armor_slot() {
     recording.player.tick();
     assert_eq!(
         player_inventory_updates(&recording.packets),
-        vec![(39, ItemStack::new(&vanilla_items::STONE))]
+        vec![(39, ItemStack::new(&vanilla_items::IRON_HELMET))]
     );
     assert!(
         recording
@@ -351,10 +367,7 @@ fn modify_view_synchronizes_empty_offhand_after_removal() {
         .inventory
         .lock()
         .set_item(40, ItemStack::new(&vanilla_items::SHIELD));
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target.player, true, modify);
+    let mut menu = invsee(1, &source, &target.player, true);
 
     menu.clicked(
         Click::Pickup {
@@ -376,10 +389,7 @@ fn modify_view_synchronizes_empty_offhand_after_removal() {
 fn modify_view_synchronizes_target_hotbar_slot() {
     let source = test_player(20, "Viewer", 20);
     let target = recording_player(21, "Target", 21);
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target.player, true, modify);
+    let mut menu = invsee(1, &source, &target.player, true);
     *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::STONE);
 
     menu.clicked(
@@ -401,12 +411,9 @@ fn modify_view_synchronizes_target_hotbar_slot() {
 fn modify_view_coalesces_to_latest_target_inventory_value() {
     let source = test_player(15, "Viewer", 15);
     let target = recording_player(16, "Target", 16);
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target.player, true, modify);
+    let mut menu = invsee(1, &source, &target.player, true);
 
-    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::STONE);
+    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::IRON_HELMET);
     menu.clicked(
         Click::Pickup {
             slot: TARGET_ARMOR_START,
@@ -414,7 +421,7 @@ fn modify_view_coalesces_to_latest_target_inventory_value() {
         },
         &source,
     );
-    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::DIAMOND);
+    *menu.behavior_mut().carried_mut() = ItemStack::new(&vanilla_items::DIAMOND_HELMET);
     menu.clicked(
         Click::Pickup {
             slot: TARGET_ARMOR_START,
@@ -427,7 +434,7 @@ fn modify_view_coalesces_to_latest_target_inventory_value() {
 
     assert_eq!(
         player_inventory_updates(&target.packets),
-        vec![(39, ItemStack::new(&vanilla_items::DIAMOND))]
+        vec![(39, ItemStack::new(&vanilla_items::DIAMOND_HELMET))]
     );
 }
 
@@ -435,10 +442,7 @@ fn modify_view_coalesces_to_latest_target_inventory_value() {
 fn modify_view_drag_queues_each_changed_target_slot() {
     let source = test_player(17, "Viewer", 17);
     let target = recording_player(18, "Target", 18);
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target.player, true, modify);
+    let mut menu = invsee(1, &source, &target.player, true);
     *menu.behavior_mut().carried_mut() = ItemStack::with_count(&vanilla_items::STONE, 2);
 
     for action in [
@@ -446,16 +450,12 @@ fn modify_view_drag_queues_each_changed_target_slot() {
             kind: DragKind::Left,
         },
         QuickCraft::AddSlot {
-            slot: TARGET_ARMOR_START,
-            kind: DragKind::Left,
+            slot: TARGET_HOTBAR_START,
         },
         QuickCraft::AddSlot {
-            slot: TARGET_ARMOR_START + 1,
-            kind: DragKind::Left,
+            slot: TARGET_HOTBAR_START + 1,
         },
-        QuickCraft::End {
-            kind: DragKind::Left,
-        },
+        QuickCraft::End,
     ] {
         menu.clicked(Click::QuickCraft(action), &source);
     }
@@ -464,8 +464,8 @@ fn modify_view_drag_queues_each_changed_target_slot() {
     assert_eq!(
         player_inventory_updates(&target.packets),
         vec![
-            (38, ItemStack::new(&vanilla_items::STONE)),
-            (39, ItemStack::new(&vanilla_items::STONE)),
+            (0, ItemStack::new(&vanilla_items::STONE)),
+            (1, ItemStack::new(&vanilla_items::STONE)),
         ]
     );
 }
@@ -489,14 +489,12 @@ fn overriding_menu_defers_main_inventory_sync_until_close() {
         .set_item(39, ItemStack::new(&vanilla_items::DIAMOND_HELMET));
 
     let fake_slots = SimpleContainer::new(72).into_shared();
-    recording
-        .player
-        .open_menu("Overlay", move |container_id, _world| {
-            let mut builder = MenuBuilder::new(&vanilla_menu_types::GENERIC_9X4, container_id);
-            builder.display_section(fake_slots, 72);
-            builder.overrides_player_slots();
-            builder.build(BasicKind {})
-        });
+    recording.player.open_menu("Overlay", move |context| {
+        let mut builder = MenuBuilder::new(&vanilla_menu_types::GENERIC_9X4, context.container_id);
+        builder.section_with(fake_slots, 72, SectionKind::Display);
+        builder.override_player_slots();
+        builder.build(BasicKind {})
+    });
     recording.packets.lock().clear();
     recording.player.request_inventory_resync([0, 39]);
 
@@ -531,14 +529,13 @@ fn replacing_overriding_menu_keeps_main_inventory_sync_deferred() {
 
     for title in ["First overlay", "Second overlay"] {
         let fake_slots = SimpleContainer::new(72).into_shared();
-        recording
-            .player
-            .open_menu(title, move |container_id, _world| {
-                let mut builder = MenuBuilder::new(&vanilla_menu_types::GENERIC_9X4, container_id);
-                builder.display_section(fake_slots, 72);
-                builder.overrides_player_slots();
-                builder.build(BasicKind {})
-            });
+        recording.player.open_menu(title, move |context| {
+            let mut builder =
+                MenuBuilder::new(&vanilla_menu_types::GENERIC_9X4, context.container_id);
+            builder.section_with(fake_slots, 72, SectionKind::Display);
+            builder.override_player_slots();
+            builder.build(BasicKind {})
+        });
         recording.player.request_inventory_resync([0]);
     }
     recording.packets.lock().clear();
@@ -565,14 +562,12 @@ fn normal_menu_does_not_defer_main_inventory_sync() {
 
     let menu_slots = SimpleContainer::new(9).into_shared();
     let inventory = recording.player.inventory.clone();
-    recording
-        .player
-        .open_menu("Normal", move |container_id, _world| {
-            let mut builder = MenuBuilder::new(&vanilla_menu_types::GENERIC_9X1, container_id);
-            builder.display_section(menu_slots, 9);
-            builder.player_inventory(&inventory);
-            builder.build(BasicKind {})
-        });
+    recording.player.open_menu("Normal", move |context| {
+        let mut builder = MenuBuilder::new(&vanilla_menu_types::GENERIC_9X1, context.container_id);
+        builder.section_with(menu_slots, 9, SectionKind::Display);
+        builder.player_inventory(&inventory);
+        builder.build(BasicKind {})
+    });
     recording.packets.lock().clear();
     recording.player.request_inventory_resync([0]);
 
@@ -592,10 +587,7 @@ fn modify_view_moves_inventory_items_in_both_directions() {
         .inventory
         .lock()
         .set_item(0, ItemStack::with_count(&vanilla_items::STONE, 5));
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target, true, modify);
+    let mut menu = invsee(1, &source, &target, true);
 
     menu.clicked(
         Click::QuickMove {
@@ -625,15 +617,14 @@ fn modify_view_extracts_but_cannot_insert_crafting_items() {
         .crafting_container()
         .lock()
         .set_item(0, ItemStack::new(&vanilla_items::OAK_LOG));
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &source, &target, true, modify);
+    let mut menu = invsee(1, &source, &target, true);
     menu.on_open(&source);
 
     {
-        let result = handler.result_container();
-        let result = result.lock();
+        let guard = menu.behavior().lock_all_containers();
+        let result = guard
+            .get(handler.result_id())
+            .expect("result container is registered with the menu");
         assert!(result.get_item(0).is(&vanilla_items::OAK_PLANKS));
         assert_eq!(result.get_item(0).count(), 4);
     }
@@ -646,7 +637,13 @@ fn modify_view_extracts_but_cannot_insert_crafting_items() {
         &source,
     );
     assert!(handler.crafting_container().lock().get_item(0).is_empty());
-    assert!(handler.result_container().lock().get_item(0).is_empty());
+    {
+        let guard = menu.behavior().lock_all_containers();
+        let result = guard
+            .get(handler.result_id())
+            .expect("result container is registered with the menu");
+        assert!(result.get_item(0).is_empty());
+    }
     assert!(menu.behavior().carried().is(&vanilla_items::OAK_LOG));
 
     menu.clicked(
@@ -667,10 +664,7 @@ fn self_invsee_quick_move_does_not_rearrange_the_aliased_inventory() {
         .inventory
         .lock()
         .set_item(0, ItemStack::with_count(&vanilla_items::STONE, 5));
-    let Ok((_, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
-    let mut menu = invsee(1, &player, &player, true, modify);
+    let mut menu = invsee(1, &player, &player, true);
 
     menu.clicked(
         Click::QuickMove {
@@ -694,31 +688,28 @@ fn self_invsee_quick_move_does_not_rearrange_the_aliased_inventory() {
 }
 
 #[test]
-fn open_menu_revalidates_permissions_and_target_lifecycle() {
+fn open_menu_keeps_captured_access_and_tracks_target_lifecycle() {
     let source = test_player(6, "Viewer", 6);
     let target = test_player(7, "Target", 7);
-    let Ok((access, modify)) = invsee_permissions() else {
-        panic!("built-in invsee permissions should parse");
-    };
 
     set_permissions(
         &source,
         PermissionSet::from_entries([PermissionEntry::allow(permission_key(MODIFY_PERMISSION))]),
     );
-    let modify_menu = invsee(1, &source, &target, true, modify);
+    let modify_menu = invsee(1, &source, &target, true);
     assert!(modify_menu.still_valid(&source));
 
-    set_permissions(
-        &source,
-        PermissionSet::from_entries([PermissionEntry::allow(permission_key(INVSEE_PERMISSION))]),
+    set_permissions(&source, PermissionSet::new());
+    assert!(
+        modify_menu.still_valid(&source),
+        "an opened menu keeps the access and modify mode authorized by its command"
     );
-    assert!(!modify_menu.still_valid(&source));
 
-    let readonly_menu = invsee(2, &source, &target, false, access);
+    let readonly_menu = invsee(2, &source, &target, false);
     assert!(readonly_menu.still_valid(&source));
-    assert!(source.begin_domain_switch());
+    let source_switch_token = begin_domain_switch(&source);
     assert!(!readonly_menu.still_valid(&source));
-    source.finish_domain_switch();
+    finish_domain_switch(&source, source_switch_token);
     assert!(readonly_menu.still_valid(&source));
 
     source.set_world(fresh_test_world_in_domain("other", "invsee_viewer"));
@@ -726,9 +717,9 @@ fn open_menu_revalidates_permissions_and_target_lifecycle() {
     source.set_world(Arc::clone(test_world()));
     assert!(readonly_menu.still_valid(&source));
 
-    assert!(target.begin_domain_switch());
+    let target_switch_token = begin_domain_switch(&target);
     assert!(!readonly_menu.still_valid(&source));
-    target.finish_domain_switch();
+    finish_domain_switch(&target, target_switch_token);
     assert!(readonly_menu.still_valid(&source));
 
     target.set_world(fresh_test_world_in_domain("other", "invsee_domain"));

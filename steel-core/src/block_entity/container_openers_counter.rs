@@ -332,10 +332,10 @@ mod tests {
         assert!(world.add_player(Arc::clone(&player), ResetReason::InitialJoin));
         let inventory = Arc::clone(&player.inventory);
         let opener: SharedBlockEntity = owner.clone();
-        player.open_menu("Recording opener", move |menu_id, _world| {
+        player.open_menu("Recording opener", move |context| {
             chest_with_openers(
                 inventory,
-                menu_id,
+                context.container_id,
                 vec![(container_ref, 9)],
                 1,
                 vec![opener],

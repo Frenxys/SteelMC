@@ -1,4 +1,4 @@
-use std::array;
+use std::{array, ops::Range};
 
 use simdnbt::owned::{NbtList, NbtTag};
 use steel_registry::item_stack::ItemStack;
@@ -44,6 +44,12 @@ impl PlayerInventory {
     pub const SELECTION_SIZE: usize = 9;
     /// Slot index for offhand.
     pub const SLOT_OFFHAND: usize = 40;
+    /// Hotbar container indices.
+    pub const HOTBAR: Range<usize> = 0..9;
+    /// Main storage container indices (everything except hotbar, armor, offhand).
+    pub const MAIN: Range<usize> = 9..36;
+    /// Armor container indices in display order (head, chest, legs, feet).
+    pub const ARMOR_TOP_DOWN: [usize; 4] = [39, 38, 37, 36];
 
     /// Creates a new player inventory with empty slots.
     #[must_use]

@@ -7,7 +7,7 @@ use crate::block_entity::entities::FurnaceContainer;
 use crate::block_entity::vanilla_fuel_values;
 use crate::entity::Entity as _;
 use crate::inventory::lock::{ContainerId, ContainerLockGuard, ContainerRef};
-use crate::inventory::slots::{NormalSlot, Slot};
+use crate::inventory::slots::{NormalSlot, Slot, SlotStorage};
 use crate::player::Player;
 
 /// Furnace fuel slot, including Vanilla's empty-bucket stack limit.
@@ -31,6 +31,10 @@ impl FurnaceFuelSlot {
 }
 
 impl Slot for FurnaceFuelSlot {
+    fn storage(&self) -> &SlotStorage {
+        self.base.storage()
+    }
+
     fn get_item<'a>(&self, guard: &'a ContainerLockGuard) -> &'a ItemStack {
         self.base.get_item(guard)
     }
@@ -66,10 +70,6 @@ impl Slot for FurnaceFuelSlot {
     fn get_container_slot(&self) -> usize {
         self.base.get_container_slot()
     }
-
-    fn container_key(&self) -> Option<(ContainerId, usize)> {
-        self.base.container_key()
-    }
 }
 
 /// Furnace output slot that pays accumulated recipe experience when taken.
@@ -96,6 +96,10 @@ impl FurnaceResultSlot {
 }
 
 impl Slot for FurnaceResultSlot {
+    fn storage(&self) -> &SlotStorage {
+        self.base.storage()
+    }
+
     fn get_item<'a>(&self, guard: &'a ContainerLockGuard) -> &'a ItemStack {
         self.base.get_item(guard)
     }
@@ -122,10 +126,6 @@ impl Slot for FurnaceResultSlot {
 
     fn get_container_slot(&self) -> usize {
         self.base.get_container_slot()
-    }
-
-    fn container_key(&self) -> Option<(ContainerId, usize)> {
-        self.base.container_key()
     }
 
     fn on_take(

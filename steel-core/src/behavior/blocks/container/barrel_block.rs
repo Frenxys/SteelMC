@@ -56,10 +56,10 @@ impl BarrelBlock {
         };
         let title = barrel.display_name();
         let inventory = player.inventory.clone();
-        player.open_menu(title, move |id, _world| {
+        player.open_menu(title, move |context| {
             chest_with_openers(
                 inventory,
-                id,
+                context.container_id,
                 vec![(container_ref, 27)],
                 3,
                 vec![block_entity],

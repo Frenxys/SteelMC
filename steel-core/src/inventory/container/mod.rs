@@ -11,7 +11,6 @@ pub use crafting::CraftingContainer;
 pub use result::ResultContainer;
 pub use simple::SimpleContainer;
 
-use std::ptr;
 use std::{mem, sync::Arc};
 
 use steel_registry::item_stack::ItemStack;
@@ -275,7 +274,22 @@ pub trait Container: ErasedType + Send + Sync {
     where
         Self: Sized,
     {
-        with_indices(self, indices) // FIXME: gotta look at this
+        let items = self.items_mut();
+        let size = items.len();
+        for (position, index) in indices.iter().copied().enumerate() {
+            assert!(
+                index < size,
+                "with_indices: index {index} out of bounds (container size {size})",
+            );
+            assert!(
+                !indices[..position].contains(&index),
+                "with_indices: duplicate index {index}",
+            );
+        }
+        let Ok(items) = items.get_disjoint_mut(indices) else {
+            unreachable!("with_indices validated distinct in-bounds indices");
+        };
+        items
     }
 
     /// Tries to add an item to the container.
@@ -386,42 +400,6 @@ fn matching_item_count(
     }
 }
 
-/// Returns mutable references to `N` disjoint slots in a container.
-///
-/// # Panics
-///
-/// Panics if any index is out of bounds or if any two indices are equal.
-fn with_indices<const N: usize>(
-    container: &mut (impl Container + ?Sized),
-    indices: [usize; N],
-) -> [&mut ItemStack; N] {
-    let size = container.get_container_size();
-    for i in 0..N {
-        assert!(
-            indices[i] < size,
-            "with_indices: index {} out of bounds (container size {})",
-            indices[i],
-            size,
-        );
-        for j in (i + 1)..N {
-            assert!(
-                indices[i] != indices[j],
-                "with_indices: duplicate index {}",
-                indices[i],
-            );
-        }
-    }
-
-    let mut ptrs = [ptr::null_mut::<ItemStack>(); N];
-    for i in 0..N {
-        ptrs[i] = ptr::from_mut(container.get_item_mut(indices[i]));
-    }
-    // SAFETY: All indices are verified unique and in-bounds above. Each call to
-    // `get_item_mut` returns a pointer to a distinct slot, so the resulting
-    // mutable references do not alias.
-    ptrs.map(|ptr| unsafe { &mut *ptr })
-}
-
 /// Calculates the redstone comparator signal strength (0-15) from a container.
 ///
 /// Based on Java's `AbstractContainerMenu.getRedstoneSignalFromContainer`.
@@ -471,6 +449,8 @@ pub fn calculate_redstone_signal_from_containers(containers: &[&dyn Container]) 
 
 #[cfg(test)]
 mod tests {
+    use std::array;
+
     use steel_registry::{test_support::init_test_registry, vanilla_items};
 
     use super::*;
@@ -509,10 +489,36 @@ mod tests {
         fn set_changed(&mut self) {}
     }
 
+    struct RedirectingContainer {
+        items: [ItemStack; 2],
+    }
+
+    // SAFETY: This key uniquely identifies `RedirectingContainer` within the unit-test process.
+    unsafe impl DowncastType for RedirectingContainer {
+        const TYPE_KEY: DowncastTypeKey =
+            DowncastTypeKey::new("steel:test/inventory/redirecting_container");
+    }
+
+    impl Container for RedirectingContainer {
+        fn items(&self) -> &[ItemStack] {
+            &self.items
+        }
+
+        fn items_mut(&mut self) -> &mut [ItemStack] {
+            &mut self.items
+        }
+
+        fn get_item_mut(&mut self, _slot: usize) -> &mut ItemStack {
+            &mut self.items[0]
+        }
+
+        fn set_changed(&mut self) {}
+    }
+
     #[test]
     fn test_with_indices_disjoint() {
         let mut container = TestContainer::new(4);
-        let [a, b] = with_indices(&mut container, [1, 3]);
+        let [a, b] = container.with_indices([1, 3]);
         a.count = 10;
         b.count = 20;
         assert_eq!(container.items[1].count, 10);
@@ -525,7 +531,7 @@ mod tests {
     #[test]
     fn test_with_indices_single() {
         let mut container = TestContainer::new(4);
-        let [a] = with_indices(&mut container, [2]);
+        let [a] = container.with_indices([2]);
         a.count = 42;
         assert_eq!(container.items[2].count, 42);
     }
@@ -533,7 +539,21 @@ mod tests {
     #[test]
     fn test_with_indices_empty() {
         let mut container = TestContainer::new(4);
-        let [] = with_indices(&mut container, []);
+        let [] = container.with_indices([]);
+    }
+
+    #[test]
+    fn with_indices_uses_physical_item_storage() {
+        let mut container = RedirectingContainer {
+            items: array::from_fn(|_| ItemStack::empty()),
+        };
+
+        let [first, second] = container.with_indices([0, 1]);
+        first.count = 1;
+        second.count = 2;
+
+        assert_eq!(container.items[0].count, 1);
+        assert_eq!(container.items[1].count, 2);
     }
 
     #[test]
@@ -622,14 +642,14 @@ mod tests {
     #[should_panic(expected = "duplicate index")]
     fn test_with_indices_duplicate_panics() {
         let mut container = TestContainer::new(4);
-        let _ = with_indices(&mut container, [1, 1]);
+        let _ = container.with_indices([1, 1]);
     }
 
     #[test]
     #[should_panic(expected = "out of bounds")]
     fn test_with_indices_out_of_bounds_panics() {
         let mut container = TestContainer::new(4);
-        let _ = with_indices(&mut container, [5]);
+        let _ = container.with_indices([5]);
     }
 
     /// Verify the compiler prevents holding a `get_item_mut` reference while
@@ -637,7 +657,7 @@ mod tests {
     /// see the expected borrow-checker error:
     ///
     /// ```compile_fail
-    /// use steel_core::inventory::container::{Container, with_indices};
+    /// use steel_core::inventory::container::Container;
     /// use steel_utils::{DowncastType, DowncastTypeKey};
     /// # struct C { items: Vec<steel_registry::item_stack::ItemStack> }
     /// # // SAFETY: This doctest owns both the key and concrete type.
@@ -653,7 +673,7 @@ mod tests {
     /// # }
     /// fn fails(c: &mut C) {
     ///     let held = c.get_item_mut(0);
-    ///     let [a] = with_indices(c, [1]); // ERROR: c already borrowed
+    ///     let [a] = c.with_indices([1]); // ERROR: c already borrowed
     ///     held.count = 1;
     /// }
     /// ```

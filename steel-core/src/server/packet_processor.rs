@@ -117,7 +117,9 @@ impl PacketProcessor {
             };
             if pending.player.connection.closed()
                 || server.cancel_token.is_cancelled()
-                || pending.player.is_domain_switching()
+                || !pending
+                    .player
+                    .domain_switch_allows_packet(pending.packet.is_domain_handshake_packet())
             {
                 continue;
             }

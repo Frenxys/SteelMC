@@ -40,10 +40,12 @@ impl MenuLayout {
         };
         for range in &self.drain_sections {
             for slot_index in *range {
-                let item = mem::take(behavior.slots()[slot_index].get_item_mut(&mut guard));
+                let slot = &behavior.slots()[slot_index];
+                let item = mem::take(slot.get_item_mut(&mut guard));
                 if item.is_empty() {
                     continue;
                 }
+                slot.set_changed(&mut guard);
                 if return_to_inventory {
                     player.add_item_or_drop_with_guard(&mut guard, item);
                 } else {

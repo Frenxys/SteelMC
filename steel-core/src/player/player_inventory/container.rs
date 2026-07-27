@@ -24,6 +24,16 @@ const fn slot_to_equipment(slot: usize) -> Option<EquipmentSlot> {
     }
 }
 
+/// The equipment slot for an armor/offhand container index.
+///
+/// # Panics
+/// Panics if `index` is not an equipment index. Menu sections restrict
+/// themselves to [`PlayerInventory::ARMOR_TOP_DOWN`] and
+/// [`PlayerInventory::SLOT_OFFHAND`], so this is unreachable from them.
+pub(crate) const fn armor_equipment(index: usize) -> EquipmentSlot {
+    slot_to_equipment(index).expect("armor sections only cover armor indices")
+}
+
 impl PlayerInventory {
     /// Applies vanilla `ItemUtils.createFilledResult` to a held item.
     ///
