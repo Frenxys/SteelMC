@@ -23,6 +23,14 @@ pub trait LevelReader {
     /// Gets the block state at a position.
     fn get_block_state(&self, pos: BlockPos) -> BlockStateId;
 
+    /// Returns the exact state when its collision shape may be non-empty.
+    ///
+    /// Readers with behavior-authoritative spatial metadata may return `None`
+    /// without materializing an exact state. The default remains conservative.
+    fn get_collision_candidate_state(&self, pos: BlockPos) -> Option<BlockStateId> {
+        Some(self.get_block_state(pos))
+    }
+
     /// Gets the block entity at a position when this level surface supports it
     #[expect(
         unused_variables,

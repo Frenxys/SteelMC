@@ -55,12 +55,14 @@ impl<T: Entity> EntityEventSource for T {
 /// impl Entity for MyEntity {
 ///     fn base(&self) -> &EntityBase { &self.base }
 ///     fn entity_type(&self) -> EntityTypeRef { vanilla_entities::MY_ENTITY }
-///     fn bounding_box(&self) -> WorldAabb { /* ... */ }
 ///     // All other common methods use defaults from EntityBase!
 /// }
 /// ```
 pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
     /// Returns a reference to the entity's shared vanilla base fields.
+    ///
+    /// Implementations must return their embedded base without side effects;
+    /// manager broad-phase queries may call this accessor under internal locks.
     fn base(&self) -> &EntityBase;
 
     /// Gets the entity type containing tracking range, dimensions, etc.
@@ -244,7 +246,11 @@ pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
         Some(nbt)
     }
 
-    /// Gets the entity's current position.
+    /// Gets the entity's current base position.
+    ///
+    /// This is not an entity extension point. Position changes must use the
+    /// `EntityBase` movement APIs so the spatial snapshot and manager indexes
+    /// remain coherent.
     fn position(&self) -> DVec3 {
         self.base().position()
     }
@@ -279,6 +285,10 @@ pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
     }
 
     /// Gets the entity's bounding box for collision queries.
+    ///
+    /// Mirrors Vanilla's final `Entity.getBoundingBox`. Specialized boxes must
+    /// be published through [`EntityBase::set_bounding_box`] instead of
+    /// overriding this method.
     fn bounding_box(&self) -> WorldAabb {
         self.base().bounding_box()
     }
@@ -1243,11 +1253,6 @@ pub trait Entity: EntityEventSource + ErasedType + Send + Sync + 'static {
 
     /// Called on the returned entity after a teleport completes successfully.
     fn on_teleported(&self) {}
-
-    /// Sets the level callback for lifecycle events (movement, removal).
-    fn set_level_callback(&self, callback: Arc<dyn EntityLevelCallback>) {
-        self.base().set_level_callback(callback);
-    }
 
     /// Called by leashables while this entity is their live leash holder.
     fn notify_leash_holder(&self, _leashable: &dyn Entity) {}

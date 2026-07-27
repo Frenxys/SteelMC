@@ -5,26 +5,33 @@ use std::{
 
 use glam::DVec3;
 use simdnbt::{ToNbtTag as _, borrow::read_compound, owned::NbtCompound};
-use steel_registry::blocks::properties::{AttachFace, BlockStateProperties, DoubleBlockHalf};
+use steel_registry::blocks::properties::{
+    AttachFace, BlockStateProperties, DoubleBlockHalf, PistonType,
+};
 use steel_registry::{
     data_components::vanilla_components::CUSTOM_NAME, test_support::init_test_registry,
     vanilla_blocks, vanilla_damage_types, vanilla_entities, vanilla_game_rules::MOB_GRIEFING,
     vanilla_items,
 };
-use steel_utils::types::UpdateFlags;
+use steel_utils::types::{GameType, UpdateFlags};
 use steel_utils::{BlockPos, ChunkPos, Direction, Downcast as _};
 use text_components::TextComponent;
+use uuid::Uuid;
 
 use super::*;
 use crate::behavior::init_behaviors;
-use crate::block_entity::init_block_entities;
+use crate::block_entity::{
+    SharedBlockEntity, entities::PistonMovingBlockEntity, init_block_entities,
+};
 use crate::entity::EntityFluidContact;
 use crate::entity::entities::{
     ChestMinecartEntity, ItemFrameEntity, LeashFenceKnotEntity, PigEntity,
 };
-use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
+use crate::player::ResetReason;
+use crate::test_support::{TestPlayerBuilder, fresh_test_world, insert_ready_full_chunk};
 use crate::world::{
-    DefaultExplosionDamageCalculator, ExplosionInteraction, ExplosionOptions, ExplosionOutcome,
+    ClipBlockShape, ClipFluid, DefaultExplosionDamageCalculator, ExplosionInteraction,
+    ExplosionOptions, ExplosionOutcome,
 };
 
 #[test]
@@ -95,6 +102,56 @@ fn default_damage_source_preserves_direct_source_position() {
     assert_eq!(source.damage_type.key, vanilla_damage_types::EXPLOSION.key);
 }
 
+fn assert_pinned_exposure_matches_live(world: &World, center: DVec3, entity: &dyn Entity) -> f32 {
+    let exposure = EntityExplosionExposure::capture(entity);
+    let Ok(region) = exposure.read_region(center) else {
+        panic!("small exposure read region should be representable");
+    };
+    let pinned = world
+        .with_gameplay_block_state_read_batch(region, |reader| exposure.calculate(reader, center));
+    let Ok(pinned) = pinned else {
+        panic!("static exposure should complete through the pinned reader");
+    };
+    let live = exposure.calculate(world, center);
+
+    assert_eq!(pinned.to_bits(), live.to_bits());
+    assert_eq!(
+        seen_percent(world, center, entity).to_bits(),
+        live.to_bits()
+    );
+    pinned
+}
+
+#[test]
+fn pinned_exposure_matches_live_for_clear_and_obstructed_paths() {
+    init_test_registry();
+    init_behaviors();
+    let world = fresh_test_world("pinned_explosion_exposure");
+    insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+    let center = DVec3::new(0.5, 64.125, 0.5);
+    let entity = ItemEntity::new(
+        &vanilla_entities::ITEM,
+        18,
+        DVec3::new(2.5, 64.0, 0.5),
+        Arc::downgrade(&world),
+    );
+
+    assert_eq!(
+        assert_pinned_exposure_matches_live(&world, center, &entity).to_bits(),
+        1.0_f32.to_bits()
+    );
+
+    assert!(world.set_block(
+        BlockPos::new(1, 64, 0),
+        vanilla_blocks::STONE.default_state(),
+        UpdateFlags::UPDATE_ALL,
+    ));
+    assert_eq!(
+        assert_pinned_exposure_matches_live(&world, center, &entity).to_bits(),
+        0.0_f32.to_bits()
+    );
+}
+
 #[test]
 fn exposure_clipping_uses_the_entity_collision_context() {
     init_test_registry();
@@ -115,10 +172,87 @@ fn exposure_clipping_uses_the_entity_collision_context() {
     );
     let center = DVec3::new(0.5, 64.125, 0.5);
 
-    assert_eq!(seen_percent(center, &entity).to_bits(), 1.0_f32.to_bits());
+    assert_eq!(
+        assert_pinned_exposure_matches_live(&world, center, &entity).to_bits(),
+        1.0_f32.to_bits()
+    );
 
     entity.set_fall_distance(3.0);
-    assert_eq!(seen_percent(center, &entity).to_bits(), 0.0_f32.to_bits());
+    assert_eq!(
+        assert_pinned_exposure_matches_live(&world, center, &entity).to_bits(),
+        0.0_f32.to_bits()
+    );
+}
+
+#[test]
+fn moving_piston_exposure_retries_with_live_block_entities() {
+    init_test_registry();
+    init_behaviors();
+    init_block_entities();
+    let world = fresh_test_world("moving_piston_explosion_exposure");
+    insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+    let piston_pos = BlockPos::new(1, 64, 0);
+    let moving_state = vanilla_blocks::MOVING_PISTON
+        .default_state()
+        .set_value(&BlockStateProperties::FACING, Direction::East)
+        .set_value(&BlockStateProperties::PISTON_TYPE, PistonType::Normal);
+    let moved_state = vanilla_blocks::PISTON
+        .default_state()
+        .set_value(&BlockStateProperties::FACING, Direction::East)
+        .set_value(&BlockStateProperties::EXTENDED, true);
+    assert!(world.set_block(piston_pos, moving_state, UpdateFlags::UPDATE_NONE));
+    let block_entity: SharedBlockEntity = Arc::new(PistonMovingBlockEntity::new_moving(
+        Arc::downgrade(&world),
+        piston_pos,
+        moving_state,
+        moved_state,
+        Direction::East,
+        false,
+        true,
+    ));
+    assert!(world.set_block_entity(block_entity));
+    let center = DVec3::new(0.5, 64.125, 0.5);
+    let entity = ItemEntity::new(
+        &vanilla_entities::ITEM,
+        20,
+        DVec3::new(2.5, 64.0, 0.5),
+        Arc::downgrade(&world),
+    );
+    let exposure = EntityExplosionExposure::capture(&entity);
+    let Ok(region) = exposure.read_region(center) else {
+        panic!("small exposure read region should be representable");
+    };
+
+    let pinned = world
+        .with_gameplay_block_state_read_batch(region, |reader| exposure.calculate(reader, center));
+    assert_eq!(pinned, Err(GameplayBlockReadWindowError::RetryLive));
+
+    let live = exposure.calculate(world.as_ref(), center);
+    for from in exposure.sample_positions() {
+        let full_miss = world
+            .clip_with_reader_and_collision_context(
+                world.as_ref(),
+                from,
+                center,
+                ClipBlockShape::Collider,
+                ClipFluid::None,
+                exposure.collision_context,
+            )
+            .is_miss();
+        assert_eq!(
+            World::is_block_collision_path_clear_with_reader(
+                world.as_ref(),
+                from,
+                center,
+                exposure.collision_context,
+            ),
+            full_miss,
+        );
+    }
+    assert_eq!(
+        seen_percent(&world, center, &entity).to_bits(),
+        live.to_bits()
+    );
 }
 
 #[test]
@@ -490,6 +624,7 @@ fn trigger_block_positions(world: &Arc<World>, positions: &mut [BlockPos]) {
         None,
         None,
         None,
+        None,
         DVec3::ZERO,
         1.0,
         false,
@@ -515,6 +650,7 @@ fn resistant_center_block_stops_explosion_rays() {
         None,
         None,
         None,
+        None,
         DVec3::new(0.5, 64.5, 0.5),
         4.0,
         false,
@@ -524,6 +660,150 @@ fn resistant_center_block_stops_explosion_rays() {
     let affected = explosion.calculate_exploded_positions(|| 0.5);
 
     assert!(affected.is_empty());
+}
+
+#[test]
+fn explosion_rays_use_vanilla_world_bounds_in_both_lanes() {
+    init_test_registry();
+    let world = fresh_test_world("explosion_world_bounds");
+    let bounds = ExplosionWorldBounds::from_world(&world);
+    let min_y = world.get_min_y();
+    let max_y = world.get_max_y();
+    let cases = [
+        (BlockPos::new(-30_000_000, min_y, -30_000_000), true),
+        (BlockPos::new(29_999_999, max_y, 29_999_999), true),
+        (BlockPos::new(-30_000_001, min_y, 0), false),
+        (BlockPos::new(30_000_000, min_y, 0), false),
+        (BlockPos::new(0, min_y, -30_000_001), false),
+        (BlockPos::new(0, min_y, 30_000_000), false),
+        (BlockPos::new(0, min_y - 1, 0), false),
+        (BlockPos::new(0, max_y + 1, 0), false),
+    ];
+
+    for (pos, expected) in cases {
+        assert_eq!(world.is_in_world_bounds(pos), expected, "live pos={pos:?}");
+        assert_eq!(bounds.contains(pos), expected, "immutable pos={pos:?}");
+    }
+}
+
+#[test]
+fn immutable_block_rays_match_sequential_order_and_repeat() {
+    init_test_registry();
+    init_behaviors();
+    let world = fresh_test_world("immutable_explosion_rays");
+    insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+    let center = DVec3::new(8.5, 64.5, 8.5);
+    assert!(world.set_block(
+        BlockPos::from(center),
+        vanilla_blocks::STONE.default_state(),
+        UpdateFlags::UPDATE_ALL,
+    ));
+    let immutable_calculator = DefaultExplosionDamageCalculator;
+    let immutable = ServerExplosion::new(
+        &world,
+        None,
+        None,
+        None,
+        Some(&immutable_calculator),
+        center,
+        4.0,
+        false,
+        BlockInteraction::Destroy,
+    );
+    let sequential = ServerExplosion::new(
+        &world,
+        None,
+        None,
+        None,
+        None,
+        center,
+        4.0,
+        false,
+        BlockInteraction::Destroy,
+    );
+    let calculate = |explosion: &ServerExplosion<'_>| {
+        let mut index = 0_u32;
+        explosion.calculate_exploded_positions(|| {
+            let value = ((index * 37 + 11) % 101) as f32 / 100.0;
+            index += 1;
+            value
+        })
+    };
+
+    let sequential_positions = calculate(&sequential);
+    let first_immutable_positions = calculate(&immutable);
+    let second_immutable_positions = calculate(&immutable);
+
+    assert_eq!(first_immutable_positions, sequential_positions);
+    assert_eq!(second_immutable_positions, first_immutable_positions);
+
+    let mut ray_index = 0_u32;
+    let rays = immutable.draw_immutable_rays(|| {
+        let value = ((ray_index * 37 + 11) % 101) as f32 / 100.0;
+        ray_index += 1;
+        value
+    });
+    assert_eq!(ray_index as usize, RAY_COUNT);
+    let context = ExplosionRayContext {
+        center,
+        bounds: ExplosionWorldBounds::from_world(&world),
+    };
+    let reader = LiveExplosionBlockReader { world: &world };
+    let pure_sequential =
+        calculate_immutable_rays_sequential(&rays, context, &reader, &immutable_calculator);
+    for worker_threads in [1, 4, 8, 12, 16] {
+        let worker_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_threads)
+            .build()
+            .expect("explosion test pool should start");
+        let target_shards = worker_threads * 2;
+        let pure_parallel = worker_pool.install(|| {
+            calculate_immutable_rays_sharded(
+                &rays,
+                context,
+                &reader,
+                &immutable_calculator,
+                target_shards,
+            )
+        });
+        let repeated_parallel = worker_pool.install(|| {
+            calculate_immutable_rays_sharded(
+                &rays,
+                context,
+                &reader,
+                &immutable_calculator,
+                target_shards,
+            )
+        });
+
+        assert_eq!(pure_parallel, pure_sequential);
+        assert_eq!(repeated_parallel, pure_parallel);
+    }
+}
+
+#[test]
+fn explosion_entity_query_excludes_spectators() {
+    init_test_registry();
+    init_behaviors();
+    let world = fresh_test_world("explosion_excludes_spectators");
+    let player =
+        TestPlayerBuilder::new(Arc::clone(&world), Uuid::from_u128(1), "Spectator", 27).build();
+    player.restore_game_modes(GameType::Spectator, None);
+    player
+        .abilities
+        .lock()
+        .update_for_game_mode(GameType::Spectator);
+    let position = player.position();
+    insert_ready_full_chunk(&world, ChunkPos::from_block_pos(BlockPos::from(position)));
+    assert!(world.add_player(Arc::clone(&player), ResetReason::InitialJoin));
+
+    world.explode(ExplosionOptions::new(
+        position - DVec3::X,
+        2.0,
+        ExplosionInteraction::None,
+    ));
+
+    assert_eq!(player.velocity(), DVec3::ZERO);
 }
 
 #[test]
@@ -540,6 +820,7 @@ fn destructive_explosion_removes_blocks_and_spawns_their_loot() {
     ));
     let mut explosion = ServerExplosion::new(
         &world,
+        None,
         None,
         None,
         None,
@@ -588,6 +869,7 @@ fn explosion_loot_preserves_live_block_entity_components() {
     block_entity.load_additional(&borrowed);
     let mut explosion = ServerExplosion::new(
         &world,
+        None,
         None,
         None,
         None,

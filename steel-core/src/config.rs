@@ -88,6 +88,8 @@ pub struct RuntimeConfig {
     pub chunk_generation_threads: Option<usize>,
     /// Optional worker count for the Rayon chunk encoding pool.
     pub chunk_encoding_threads: Option<usize>,
+    /// Optional worker count for synchronous intra-tick gameplay computation.
+    pub gameplay_compute_threads: Option<usize>,
 }
 
 impl RuntimeConfig {

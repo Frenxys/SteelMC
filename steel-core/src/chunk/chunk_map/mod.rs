@@ -81,12 +81,19 @@ pub struct ChunkSaveOutcome {
     pub failures: usize,
 }
 
+mod gameplay_read_window;
 mod generation_readiness;
 mod light_update_state;
 mod light_updates;
 mod persistence;
 mod player_tracking;
 mod scheduled_ticks;
+
+pub(crate) use gameplay_read_window::{
+    FullChunkReadWindow, PinnedBlockEntitySnapshot, PinnedSectionReadWindow,
+    try_with_full_chunk_read_window,
+};
+pub use gameplay_read_window::{GameplayBlockReadRegion, GameplayBlockReadWindowError};
 
 #[cfg(test)]
 use light_update_state::PendingLightUpdates;

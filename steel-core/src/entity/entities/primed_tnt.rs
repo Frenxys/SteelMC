@@ -24,8 +24,8 @@ use crate::entity::{
 };
 use crate::physics::MoverType;
 use crate::world::{
-    DefaultExplosionDamageCalculator, Explosion, ExplosionDamageCalculator, ExplosionInteraction,
-    ExplosionOptions, World,
+    DefaultExplosionDamageCalculator, Explosion, ExplosionBlockReader, ExplosionDamageCalculator,
+    ExplosionInteraction, ExplosionOptions, ImmutableExplosionBlockCalculator, World,
 };
 
 const DEFAULT_FUSE_TIME: i32 = 80;
@@ -83,7 +83,49 @@ impl ExplosionDamageCalculator for UsedPortalDamageCalculator {
     }
 }
 
+impl ImmutableExplosionBlockCalculator for UsedPortalDamageCalculator {
+    fn explosion_resistance(
+        &self,
+        reader: &dyn ExplosionBlockReader,
+        pos: BlockPos,
+        state: BlockStateId,
+        fluid: FluidState,
+    ) -> Option<f32> {
+        if state.get_block() == &vanilla_blocks::NETHER_PORTAL {
+            return None;
+        }
+        <DefaultExplosionDamageCalculator as ImmutableExplosionBlockCalculator>::explosion_resistance(
+            &DefaultExplosionDamageCalculator,
+            reader,
+            pos,
+            state,
+            fluid,
+        )
+    }
+
+    fn should_explode(
+        &self,
+        reader: &dyn ExplosionBlockReader,
+        pos: BlockPos,
+        state: BlockStateId,
+        power: f32,
+    ) -> bool {
+        if state.get_block() == &vanilla_blocks::NETHER_PORTAL {
+            return false;
+        }
+        <DefaultExplosionDamageCalculator as ImmutableExplosionBlockCalculator>::should_explode(
+            &DefaultExplosionDamageCalculator,
+            reader,
+            pos,
+            state,
+            power,
+        )
+    }
+}
+
 static USED_PORTAL_DAMAGE_CALCULATOR: UsedPortalDamageCalculator = UsedPortalDamageCalculator;
+static DEFAULT_TNT_BLOCK_CALCULATOR: DefaultExplosionDamageCalculator =
+    DefaultExplosionDamageCalculator;
 
 /// Vanilla primed TNT entity.
 #[entity_behavior(class = "PrimedTnt")]
@@ -197,6 +239,11 @@ impl PrimedTntEntity {
         };
         let mut options = ExplosionOptions::new(center, explosion_power, ExplosionInteraction::Tnt);
         options.source = Some(self);
+        options.immutable_block_calculator = Some(if used_portal {
+            &USED_PORTAL_DAMAGE_CALCULATOR
+        } else {
+            &DEFAULT_TNT_BLOCK_CALCULATOR
+        });
         if used_portal {
             options.damage_calculator = Some(&USED_PORTAL_DAMAGE_CALCULATOR);
         }

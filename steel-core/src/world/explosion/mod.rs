@@ -20,6 +20,7 @@ use steel_utils::{BlockPos, BlockStateId};
 use crate::behavior::FLUID_BEHAVIORS;
 use crate::entity::Entity;
 use crate::entity::damage::DamageSource;
+use crate::world::GameplayBlockStateReadBatch;
 use crate::world::World;
 
 use server::ServerExplosion;
@@ -99,15 +100,7 @@ pub trait ExplosionDamageCalculator: Send + Sync {
         state: BlockStateId,
         fluid: FluidState,
     ) -> Option<f32> {
-        if state.is_air() && fluid.is_empty() {
-            return None;
-        }
-
-        let block_resistance = state.get_block().config.explosion_resistance;
-        let fluid_resistance = FLUID_BEHAVIORS
-            .get_behavior(fluid.fluid_id)
-            .explosion_resistance();
-        Some(block_resistance.max(fluid_resistance))
+        default_block_explosion_resistance(state, fluid)
     }
 
     /// Returns whether the current ray may affect this block position.
@@ -148,6 +141,68 @@ pub trait ExplosionDamageCalculator: Send + Sync {
         let impact = (1.0 - distance) * f64::from(exposure);
         (((impact * impact + impact) / 2.0) * 7.0 * f64::from(double_radius) + 1.0) as f32
     }
+}
+
+/// State-only view available to explicitly immutable explosion block calculators.
+///
+/// Keeping this surface narrow prevents worker tasks from reaching mutable world,
+/// entity, block-entity, or general [`crate::world::LevelReader`] behavior.
+pub(crate) trait ExplosionBlockReader: Sync {
+    fn block_state(&self, pos: BlockPos) -> BlockStateId;
+}
+
+impl ExplosionBlockReader for GameplayBlockStateReadBatch<'_, '_> {
+    #[inline]
+    fn block_state(&self, pos: BlockPos) -> BlockStateId {
+        self.get_block_state(pos)
+    }
+}
+
+/// Opt-in capability for calculators whose block-ray decisions are pure.
+///
+/// This trait is crate-private so public custom calculators continue through the
+/// sequential compatibility lane unless Steel can prove their implementation is
+/// immutable. Implementations may only inspect block states through
+/// [`ExplosionBlockReader`].
+pub(crate) trait ImmutableExplosionBlockCalculator: Send + Sync {
+    /// Extra block radius that this calculator may inspect around each ray cell.
+    fn block_read_halo(&self) -> u32 {
+        0
+    }
+
+    fn explosion_resistance(
+        &self,
+        _reader: &dyn ExplosionBlockReader,
+        _pos: BlockPos,
+        state: BlockStateId,
+        fluid: FluidState,
+    ) -> Option<f32> {
+        default_block_explosion_resistance(state, fluid)
+    }
+
+    fn should_explode(
+        &self,
+        _reader: &dyn ExplosionBlockReader,
+        _pos: BlockPos,
+        _state: BlockStateId,
+        _power: f32,
+    ) -> bool {
+        true
+    }
+}
+
+impl ImmutableExplosionBlockCalculator for DefaultExplosionDamageCalculator {}
+
+fn default_block_explosion_resistance(state: BlockStateId, fluid: FluidState) -> Option<f32> {
+    if state.is_air() && fluid.is_empty() {
+        return None;
+    }
+
+    let block_resistance = state.get_block().config.explosion_resistance;
+    let fluid_resistance = FLUID_BEHAVIORS
+        .get_behavior(fluid.fluid_id)
+        .explosion_resistance();
+    Some(block_resistance.max(fluid_resistance))
 }
 
 /// Vanilla's source-less default explosion calculator.
@@ -287,6 +342,8 @@ pub struct ExplosionOptions<'a> {
     pub damage_source: Option<DamageSource>,
     /// Optional non-default damage calculator.
     pub damage_calculator: Option<&'a dyn ExplosionDamageCalculator>,
+    /// Proven-immutable block-ray calculator for Steel-owned explosion sources.
+    pub(crate) immutable_block_calculator: Option<&'a dyn ImmutableExplosionBlockCalculator>,
     /// Exact explosion center.
     pub center: DVec3,
     /// Explosion radius.
@@ -313,6 +370,7 @@ impl ExplosionOptions<'_> {
             source: None,
             damage_source: None,
             damage_calculator: None,
+            immutable_block_calculator: None,
             center,
             radius,
             fire: false,
@@ -343,6 +401,7 @@ impl World {
             options.source,
             options.damage_source,
             options.damage_calculator,
+            options.immutable_block_calculator,
             options.center,
             options.radius,
             options.fire,

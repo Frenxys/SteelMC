@@ -75,7 +75,7 @@ fn saveable_entities_include_manager_owned_live_unloading_and_pending_entities()
             .add_live_entity(pending.clone(), EntityOwnership::ManagerOwned)
             .is_ok()
     );
-    let removed = manager.remove_live_entity(pending.id(), RemovalReason::UnloadedToChunk);
+    let removed = manager.remove_live_entity(pending.as_ref(), RemovalReason::UnloadedToChunk);
     assert!(removed.is_some());
 
     let pending_saveable = manager.get_saveable_entities_for_chunk(chunk);
@@ -103,12 +103,12 @@ fn save_pending_acknowledgement_clears_only_persisted_entities() {
     );
     assert!(
         manager
-            .remove_live_entity(saved.id(), RemovalReason::UnloadedToChunk)
+            .remove_live_entity(saved.as_ref(), RemovalReason::UnloadedToChunk)
             .is_some()
     );
     assert!(
         manager
-            .remove_live_entity(later.id(), RemovalReason::UnloadedToChunk)
+            .remove_live_entity(later.as_ref(), RemovalReason::UnloadedToChunk)
             .is_some()
     );
     assert_eq!(manager.get_saveable_entities_for_chunk(chunk).len(), 2);
@@ -135,12 +135,12 @@ fn add_live_entity_rejects_duplicate_uuid_in_save_pending_entities() {
     let pending = ManagerTestEntity::shared(1, uuid, DVec3::new(1.0, 64.0, 1.0));
     assert!(
         manager
-            .add_live_entity(pending, EntityOwnership::ManagerOwned)
+            .add_live_entity(Arc::clone(&pending), EntityOwnership::ManagerOwned)
             .is_ok()
     );
     assert!(
         manager
-            .remove_live_entity(1, RemovalReason::UnloadedToChunk)
+            .remove_live_entity(pending.as_ref(), RemovalReason::UnloadedToChunk)
             .is_some()
     );
 
@@ -165,12 +165,12 @@ fn add_live_entity_panics_on_duplicate_id_in_save_pending_entities() {
     let pending = entity(1, 46, DVec3::new(1.0, 64.0, 1.0));
     assert!(
         manager
-            .add_live_entity(pending, EntityOwnership::ManagerOwned)
+            .add_live_entity(Arc::clone(&pending), EntityOwnership::ManagerOwned)
             .is_ok()
     );
     assert!(
         manager
-            .remove_live_entity(1, RemovalReason::UnloadedToChunk)
+            .remove_live_entity(pending.as_ref(), RemovalReason::UnloadedToChunk)
             .is_some()
     );
 

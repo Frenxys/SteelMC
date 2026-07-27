@@ -9,7 +9,7 @@ use steel_registry::blocks::BlockRef;
 use steel_registry::blocks::block_state_ext::BlockStateExt;
 use steel_registry::blocks::properties::{BlockStateProperties, Direction};
 use steel_registry::blocks::shapes::{
-    BooleanOp, ShapeChannel, SupportType, VoxelShape, is_block_local_face_sturdy,
+    BooleanOp, OffsetVoxelShape, ShapeChannel, SupportType, VoxelShape, is_block_local_face_sturdy,
     is_shape_full_block, join_unoptimized_boxes,
 };
 use steel_registry::entity_type::EntityTypeRef;
@@ -57,7 +57,7 @@ mod context;
 pub use context::{
     BlockCollisionBoxes, BlockCollisionContext, BlockEntityCreation, BlockLootContext,
     EntityFallDamage, EntityFallOnContext, EntityFallOnFacts, EntityLandingContext, PickupResult,
-    RailBehavior,
+    RailBehavior, ResolvedBlockCollisionShape,
 };
 
 mod waterlogging;
@@ -74,6 +74,15 @@ mod collision;
 pub(crate) use collision::push_entities_up;
 #[cfg(test)]
 use collision::world_aabb_bounds;
+
+/// Declares where a block behavior obtains its collision geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollisionShapeSource {
+    /// Collision geometry must be resolved through the installed behavior.
+    Behavior,
+    /// Collision geometry is exactly the registry shape plus its standard positional offset.
+    RegistryStatic,
+}
 
 /// Trait defining the behavior of a block.
 ///
@@ -680,6 +689,14 @@ pub trait BlockBehavior: Send + Sync {
         self.default_get_collision_shape(state, world, pos, context)
     }
 
+    /// Declares whether collider-only callers may use the extracted registry shape directly.
+    ///
+    /// The default remains behavior-authoritative because custom and plugin behaviors may depend
+    /// on the world, position, collision context, or live block entities.
+    fn collision_shape_source(&self, _state: BlockStateId) -> CollisionShapeSource {
+        CollisionShapeSource::Behavior
+    }
+
     /// Returns a block-local translation for this block state's collision shape.
     ///
     /// Vanilla baseline for `BlockState.getOffset(BlockPos)` where
@@ -706,6 +723,22 @@ pub trait BlockBehavior: Send + Sync {
         DVec3::ZERO
     }
 
+    /// Resolves this block state's collision shape while retaining borrowed static geometry.
+    ///
+    /// Blocks that assemble collision boxes from live data should override this method and return
+    /// [`ResolvedBlockCollisionShape::Owned`].
+    fn get_resolved_collision_shape(
+        &self,
+        state: BlockStateId,
+        world: &dyn LevelReader,
+        pos: BlockPos,
+        context: BlockCollisionContext,
+    ) -> ResolvedBlockCollisionShape {
+        let shape = self.get_collision_shape(state, world, pos, context);
+        let offset = self.get_collision_shape_offset(state, world, pos, context);
+        ResolvedBlockCollisionShape::borrowed(OffsetVoxelShape::new(shape, offset))
+    }
+
     /// Resolves this block state's collision shape to owned block-local boxes.
     ///
     /// Vanilla dynamic-shape blocks may override this directly. Static blocks
@@ -717,16 +750,8 @@ pub trait BlockBehavior: Send + Sync {
         pos: BlockPos,
         context: BlockCollisionContext,
     ) -> BlockCollisionBoxes {
-        let shape = self.get_collision_shape(state, world, pos, context);
-        if shape.is_empty() {
-            return BlockCollisionBoxes::new();
-        }
-
-        let offset = self.get_collision_shape_offset(state, world, pos, context);
-        shape
-            .into_iter()
-            .map(|aabb| aabb.translate(offset))
-            .collect()
+        self.get_resolved_collision_shape(state, world, pos, context)
+            .into_boxes()
     }
 
     /// Resolves vanilla `BlockState.getBlockSupportShape` to owned block-local boxes.

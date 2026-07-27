@@ -328,7 +328,7 @@ impl ChunkAccess {
                     .update(local_x, y, local_z, state, |lx, scan_y, lz| {
                         let scan_section_index = ((scan_y - min_y) / 16) as usize;
                         let scan_local_y = ((scan_y - min_y) % 16) as usize;
-                        sections.sections[scan_section_index].read().states.get(
+                        sections.sections[scan_section_index].read().states().get(
                             lx,
                             scan_local_y,
                             lz,
@@ -362,7 +362,7 @@ impl ChunkAccess {
                     let scan_local_y = ((scan_y - min_y) % 16) as usize;
                     sections.sections[scan_section_index]
                         .read()
-                        .states
+                        .states()
                         .get(lx, scan_local_y, lz)
                 };
                 let mut heightmaps = chunk.heightmaps.write();

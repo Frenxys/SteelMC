@@ -1,3 +1,7 @@
+use std::slice;
+
+use steel_registry::blocks::shapes::OffsetVoxelShape;
+
 use super::{
     Arc, Axis, BlockLocalAabb, BlockPos, BlockStateId, DVec3, DamageSource, Entity, EntityTypeRef,
     ItemStack, SharedBlockEntity, SmallVec, SoundEventRef, VoxelShape, World, vanilla_entities,
@@ -55,6 +59,120 @@ pub trait RailBehavior: Send + Sync {
 /// blocks such as moving pistons can instead return boxes computed from live
 /// world data without forcing runtime shapes into the static registry.
 pub type BlockCollisionBoxes = SmallVec<[BlockLocalAabb; 4]>;
+
+/// A collision shape resolved for a live block query without forcing static geometry to be
+/// copied into an owned collection.
+///
+/// Vanilla's cached voxel shapes are immutable, so most blocks can retain their borrowed shape
+/// storage plus a block-position offset. Blocks whose geometry is assembled from live data, such
+/// as moving pistons, use the owned variant.
+#[derive(Debug)]
+pub enum ResolvedBlockCollisionShape {
+    /// Immutable voxel boxes plus the live block-position offset.
+    Borrowed(OffsetVoxelShape),
+    /// Boxes assembled from live runtime data.
+    Owned(BlockCollisionBoxes),
+}
+
+impl ResolvedBlockCollisionShape {
+    /// Creates a resolved shape that retains immutable voxel storage.
+    #[must_use]
+    pub const fn borrowed(shape: OffsetVoxelShape) -> Self {
+        Self::Borrowed(shape)
+    }
+
+    /// Creates a resolved shape from runtime-owned boxes.
+    #[must_use]
+    pub const fn owned(boxes: BlockCollisionBoxes) -> Self {
+        Self::Owned(boxes)
+    }
+
+    /// Returns whether the resolved shape contains no boxes.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Borrowed(shape) => shape.is_empty(),
+            Self::Owned(boxes) => boxes.iter().all(BlockLocalAabb::is_empty),
+        }
+    }
+
+    /// Returns whether any box extends outside its block-local unit cube.
+    #[must_use]
+    pub fn has_large_collision_shape(&self) -> bool {
+        self.iter().any(|aabb| {
+            aabb.min_x() < 0.0
+                || aabb.min_y() < 0.0
+                || aabb.min_z() < 0.0
+                || aabb.max_x() > 1.0
+                || aabb.max_y() > 1.0
+                || aabb.max_z() > 1.0
+        })
+    }
+
+    /// Iterates resolved block-local boxes without allocating.
+    #[must_use]
+    pub fn iter(&self) -> ResolvedBlockCollisionShapeIter<'_> {
+        match self {
+            Self::Borrowed(shape) => ResolvedBlockCollisionShapeIter {
+                boxes: shape.shape().boxes().iter(),
+                offset: shape.offset(),
+            },
+            Self::Owned(boxes) => ResolvedBlockCollisionShapeIter {
+                boxes: boxes.iter(),
+                offset: DVec3::ZERO,
+            },
+        }
+    }
+
+    /// Materializes the resolved shape for APIs that require owned boxes.
+    #[must_use]
+    pub fn into_boxes(self) -> BlockCollisionBoxes {
+        match self {
+            Self::Borrowed(shape) => shape.iter().filter(|aabb| !aabb.is_empty()).collect(),
+            Self::Owned(mut boxes) => {
+                boxes.retain(|aabb| !aabb.is_empty());
+                boxes
+            }
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a ResolvedBlockCollisionShape {
+    type Item = BlockLocalAabb;
+    type IntoIter = ResolvedBlockCollisionShapeIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Allocation-free iterator over a resolved block collision shape.
+pub struct ResolvedBlockCollisionShapeIter<'a> {
+    boxes: slice::Iter<'a, BlockLocalAabb>,
+    offset: DVec3,
+}
+
+impl Iterator for ResolvedBlockCollisionShapeIter<'_> {
+    type Item = BlockLocalAabb;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let aabb = *self.boxes.next()?;
+            if aabb.is_empty() {
+                continue;
+            }
+            return if self.offset == DVec3::ZERO {
+                Some(aabb)
+            } else {
+                Some(aabb.translate(self.offset))
+            };
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, self.boxes.size_hint().1)
+    }
+}
 
 /// Live parameters used to resolve a block's loot.
 ///

@@ -15,9 +15,10 @@ fn committed_move_updates_chunk_index_for_loaded_destination() {
 
     let new_position = DVec3::new(17.0, 64.0, 1.0);
     assert!(manager.validate_move(entity.id(), new_position).is_ok());
-    entity.base().set_position_local(new_position);
-    let update = match manager.commit_move(entity.id(), new_position) {
-        Ok(update) => update,
+    let change = entity.base().position_change_for_test(new_position);
+    let update = match manager.commit_move(entity.id(), &change) {
+        Ok(Some(update)) => update,
+        Ok(None) => panic!("current move attempt should not be superseded"),
         Err(error) => panic!("move into unloaded chunk should commit: {error}"),
     };
 
@@ -30,6 +31,104 @@ fn committed_move_updates_chunk_index_for_loaded_destination() {
     let new_chunk_entities = manager.live_entities_in_chunk(ChunkPos::new(1, 0));
     assert_eq!(new_chunk_entities.len(), 1);
     assert!(Arc::ptr_eq(&entity, &new_chunk_entities[0]));
+}
+
+#[test]
+fn committed_move_within_one_spatial_cell_updates_exact_query_bounds() {
+    let manager = WorldEntityManager::new();
+    load_chunk(&manager, ChunkPos::new(0, 0));
+    let entity = entity(1, 1, DVec3::new(0.5, 64.0, 0.5));
+    assert!(
+        manager
+            .add_live_entity(Arc::clone(&entity), EntityOwnership::ManagerOwned)
+            .is_ok()
+    );
+
+    let old_query = WorldAabb::new(0.25, 63.5, 0.25, 0.75, 65.0, 0.75);
+    let new_query = WorldAabb::new(1.25, 63.5, 0.25, 1.75, 65.0, 0.75);
+    assert_eq!(manager.get_entities_in_aabb(&old_query).len(), 1);
+    assert!(manager.get_entities_in_aabb(&new_query).is_empty());
+
+    let new_position = DVec3::new(1.5, 64.0, 0.5);
+    let change = entity.base().position_change_for_test(new_position);
+    assert!(matches!(
+        manager.commit_move(entity.id(), &change),
+        Ok(Some(_))
+    ));
+
+    assert!(manager.get_entities_in_aabb(&old_query).is_empty());
+    assert_eq!(manager.get_entities_in_aabb(&new_query).len(), 1);
+}
+
+#[test]
+fn stale_managed_move_attempt_retries_after_another_writer_commits() {
+    let manager = Arc::new(WorldEntityManager::new());
+    load_chunk(&manager, ChunkPos::new(0, 0));
+    load_chunk(&manager, ChunkPos::new(1, 0));
+    let entity = entity(1, 1, DVec3::new(1.0, 64.0, 1.0));
+    let result = manager.add_live_entity_with_callback(
+        Arc::clone(&entity),
+        EntityOwnership::ManagerOwned,
+        manager_spatial_callback(&manager, &entity),
+    );
+    assert!(result.is_ok(), "entity should bind atomically: {result:?}");
+
+    let first_position = DVec3::new(2.0, 64.0, 1.0);
+    let second_position = DVec3::new(17.0, 64.0, 1.0);
+    let first_change = entity.base().position_change_for_test(first_position);
+    let stale_change = entity.base().position_change_for_test(second_position);
+
+    assert!(matches!(
+        manager.commit_move(entity.id(), &first_change),
+        Ok(Some(_))
+    ));
+    assert!(matches!(
+        manager.commit_move(entity.id(), &stale_change),
+        Ok(None)
+    ));
+    assert_eq!(entity.position(), first_position);
+    assert!(
+        manager
+            .live_entities_in_chunk(ChunkPos::new(1, 0))
+            .is_empty()
+    );
+
+    assert!(entity.try_set_position(second_position).is_ok());
+    assert_eq!(entity.position(), second_position);
+    assert_eq!(manager.live_entities_in_chunk(ChunkPos::new(1, 0)).len(), 1);
+}
+
+#[test]
+fn stale_managed_bounding_box_attempt_retries_after_another_writer_commits() {
+    let manager = Arc::new(WorldEntityManager::new());
+    load_chunk(&manager, ChunkPos::new(0, 0));
+    let entity = entity(1, 1, DVec3::new(1.0, 64.0, 1.0));
+    let result = manager.add_live_entity_with_callback(
+        Arc::clone(&entity),
+        EntityOwnership::ManagerOwned,
+        manager_spatial_callback(&manager, &entity),
+    );
+    assert!(result.is_ok(), "entity should bind atomically: {result:?}");
+
+    let first_box = WorldAabb::new(4.0, 63.0, 0.0, 5.0, 65.0, 2.0);
+    let second_box = WorldAabb::new(7.0, 63.0, 0.0, 8.0, 65.0, 2.0);
+    let first_change = entity.base().bounding_box_change_for_test(first_box);
+    let stale_change = entity.base().bounding_box_change_for_test(second_box);
+
+    assert!(matches!(
+        manager.commit_spatial_change(entity.id(), &first_change),
+        EntitySpatialCommitResult::Committed(_)
+    ));
+    assert_eq!(
+        manager.commit_spatial_change(entity.id(), &stale_change),
+        EntitySpatialCommitResult::Retry
+    );
+    assert_eq!(entity.bounding_box(), first_box);
+    assert!(manager.get_entities_in_aabb(&second_box).is_empty());
+
+    entity.base().set_bounding_box(second_box);
+    assert_eq!(entity.bounding_box(), second_box);
+    assert_eq!(manager.get_entities_in_aabb(&second_box).len(), 1);
 }
 
 #[test]
@@ -79,10 +178,10 @@ fn commit_move_rejects_destination_unloaded_after_validation() {
     let unload = manager.begin_chunk_unload(ChunkPos::new(1, 0));
     assert!(unload.retained.is_empty());
     assert!(unload.tracking_stopped.is_empty());
-    entity.base().set_position_local(new_position);
+    let change = entity.base().position_change_for_test(new_position);
 
     assert!(matches!(
-        manager.commit_move(entity.id(), new_position),
+        manager.commit_move(entity.id(), &change),
         Err(EntityMoveError::UnloadedDestination {
             entity_id: 1,
             chunk,
@@ -144,7 +243,7 @@ fn live_or_unloading_membership_excludes_removed_live_entities() {
 
     assert!(
         manager
-            .remove_live_entity(entity.id(), RemovalReason::ChangedWorld)
+            .remove_live_entity(entity.as_ref(), RemovalReason::ChangedWorld)
             .is_some()
     );
     assert!(!manager.contains_live_or_unloading_entity(&entity));
@@ -333,9 +432,10 @@ fn attached_passenger_can_move_while_its_own_chunk_is_hidden() {
 
     let new_position = DVec3::new(18.0, 64.0, 1.0);
     assert!(manager.validate_move(passenger.id(), new_position).is_ok());
-    passenger.base().set_position_local(new_position);
-    let update = match manager.commit_move(passenger.id(), new_position) {
-        Ok(update) => update,
+    let change = passenger.base().position_change_for_test(new_position);
+    let update = match manager.commit_move(passenger.id(), &change) {
+        Ok(Some(update)) => update,
+        Ok(None) => panic!("current passenger move should not be superseded"),
         Err(error) => panic!("attached passenger move should commit: {error}"),
     };
     assert_eq!(update.new_chunk, passenger_chunk);
@@ -373,9 +473,10 @@ fn passenger_move_from_hidden_to_loaded_chunk_becomes_accessible() {
 
     let new_position = DVec3::new(2.0, 64.0, 1.0);
     assert!(manager.validate_move(passenger.id(), new_position).is_ok());
-    passenger.base().set_position_local(new_position);
-    let update = match manager.commit_move(passenger.id(), new_position) {
-        Ok(update) => update,
+    let change = passenger.base().position_change_for_test(new_position);
+    let update = match manager.commit_move(passenger.id(), &change) {
+        Ok(Some(update)) => update,
+        Ok(None) => panic!("current passenger move should not be superseded"),
         Err(error) => panic!("attached passenger move should commit: {error}"),
     };
 
@@ -415,9 +516,10 @@ fn passenger_move_from_loaded_to_hidden_chunk_becomes_inaccessible() {
 
     let new_position = DVec3::new(17.0, 64.0, 1.0);
     assert!(manager.validate_move(passenger.id(), new_position).is_ok());
-    passenger.base().set_position_local(new_position);
-    let update = match manager.commit_move(passenger.id(), new_position) {
-        Ok(update) => update,
+    let change = passenger.base().position_change_for_test(new_position);
+    let update = match manager.commit_move(passenger.id(), &change) {
+        Ok(Some(update)) => update,
+        Ok(None) => panic!("current passenger move should not be superseded"),
         Err(error) => panic!("attached passenger move should commit: {error}"),
     };
 

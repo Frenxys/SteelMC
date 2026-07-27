@@ -50,6 +50,8 @@ packet_workers = 0
 chunk_generation = 0
 # Worker threads for the Rayon chunk encoding pool.
 chunk_encoding = 0
+# Worker threads for synchronous intra-tick gameplay computation.
+gameplay_compute = 0
 
 # Compression settings
 [server.compression]

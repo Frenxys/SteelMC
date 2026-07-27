@@ -1117,40 +1117,49 @@ impl ItemStack {
 
     #[must_use]
     pub fn components_equal(&self, other: &Self) -> bool {
-        let mut all_keys = rustc_hash::FxHashSet::default();
-
-        for key in self.prototype().keys() {
-            if !self.patch.is_removed(key) {
-                all_keys.insert(key);
-            }
+        if std::ptr::eq(self.prototype(), other.prototype()) && self.patch == other.patch {
+            return true;
         }
+
+        self.effective_component_count() == other.effective_component_count()
+            && self.effective_components_are_in(other)
+    }
+
+    fn effective_component_count(&self) -> usize {
+        let prototype = self.prototype();
+        let mut count = prototype.len();
+
         for (key, entry) in self.patch.iter() {
-            if matches!(entry, ComponentPatchEntry::Set(_)) {
-                all_keys.insert(key);
+            match entry {
+                ComponentPatchEntry::Set(_) if prototype.get_raw(key).is_none() => count += 1,
+                ComponentPatchEntry::Removed if prototype.get_raw(key).is_some() => count -= 1,
+                ComponentPatchEntry::Set(_) | ComponentPatchEntry::Removed => {}
             }
         }
-        for key in other.prototype().keys() {
-            if !other.patch.is_removed(key) {
-                all_keys.insert(key);
-            }
-        }
-        for (key, entry) in other.patch.iter() {
-            if matches!(entry, ComponentPatchEntry::Set(_)) {
-                all_keys.insert(key);
-            }
-        }
-        for key in all_keys {
-            let val_a = self.get_effective_value_raw(key);
-            let val_b = other.get_effective_value_raw(key);
 
-            match (val_a, val_b) {
-                (Some(a), Some(b)) => {
-                    if a != b {
-                        return false;
-                    }
-                }
-                (None, None) => {}
-                _ => return false,
+        count
+    }
+
+    fn effective_components_are_in(&self, other: &Self) -> bool {
+        let prototype = self.prototype();
+
+        for (key, prototype_value) in prototype.iter() {
+            let value = match self.patch.get_entry(key) {
+                Some(ComponentPatchEntry::Set(value)) => value,
+                Some(ComponentPatchEntry::Removed) => continue,
+                None => prototype_value,
+            };
+            if other.get_effective_value_raw(key) != Some(value) {
+                return false;
+            }
+        }
+
+        for (key, entry) in self.patch.iter() {
+            if prototype.get_raw(key).is_none()
+                && let ComponentPatchEntry::Set(value) = entry
+                && other.get_effective_value_raw(key) != Some(value)
+            {
+                return false;
             }
         }
 
@@ -1563,6 +1572,120 @@ mod durability_tests {
             requirements.matches_item_context(&vanilla_items::SPECTRAL_ARROW),
             Some(false)
         );
+    }
+}
+
+#[cfg(test)]
+mod component_equality_tests {
+    use std::sync::OnceLock;
+
+    use steel_utils::Identifier;
+
+    use super::ItemStack;
+    use crate::data_components::vanilla_components::{CUSTOM_DATA, DAMAGE, MAX_STACK_SIZE};
+    use crate::data_components::{CustomData, DataComponentMap, DataComponentPatch};
+    use crate::items::{Item, ItemRef};
+
+    fn test_item(name: &'static str, components: DataComponentMap) -> ItemRef {
+        Box::leak(Box::new(Item {
+            key: Identifier::new_static("steel", name),
+            components,
+            craft_remainder: None,
+            id: OnceLock::new(),
+        }))
+    }
+
+    fn components_with_max_stack_size(max_stack_size: i32) -> DataComponentMap {
+        let mut components = DataComponentMap::new();
+        components.set(MAX_STACK_SIZE, Some(max_stack_size));
+        components
+    }
+
+    #[test]
+    fn base_components_compare_by_effective_value() {
+        let left = ItemStack::new(test_item(
+            "component_equality_base_left",
+            components_with_max_stack_size(64),
+        ));
+        let equal = ItemStack::new(test_item(
+            "component_equality_base_equal",
+            components_with_max_stack_size(64),
+        ));
+        let different = ItemStack::new(test_item(
+            "component_equality_base_different",
+            components_with_max_stack_size(16),
+        ));
+
+        assert!(left.components_equal(&equal));
+        assert!(!left.components_equal(&different));
+    }
+
+    #[test]
+    fn patch_overrides_compare_by_effective_value() {
+        let item = test_item(
+            "component_equality_override",
+            components_with_max_stack_size(64),
+        );
+        let mut left = ItemStack::new(item);
+        let mut right = ItemStack::new(item);
+
+        left.set(MAX_STACK_SIZE, 16);
+        right.set(MAX_STACK_SIZE, 16);
+        assert!(left.components_equal(&right));
+
+        right.set(MAX_STACK_SIZE, 32);
+        assert!(!left.components_equal(&right));
+    }
+
+    #[test]
+    fn component_removals_compare_by_effective_presence() {
+        let item = test_item(
+            "component_equality_removal",
+            components_with_max_stack_size(64),
+        );
+        let mut left = ItemStack::new(item);
+        let mut right = ItemStack::new(item);
+
+        left.remove(MAX_STACK_SIZE);
+        right.remove(MAX_STACK_SIZE);
+        assert!(left.components_equal(&right));
+
+        right.clear(MAX_STACK_SIZE);
+        assert!(!left.components_equal(&right));
+    }
+
+    #[test]
+    fn distinct_base_and_patch_representations_can_be_effectively_equal() {
+        let base_value = ItemStack::new(test_item(
+            "component_equality_value_in_base",
+            components_with_max_stack_size(64),
+        ));
+        let mut patch = DataComponentPatch::new();
+        patch.set(MAX_STACK_SIZE, 64);
+        let patched_value = ItemStack::with_count_and_patch(
+            test_item("component_equality_value_in_patch", DataComponentMap::new()),
+            1,
+            patch,
+        );
+
+        assert!(base_value.components_patch().is_empty());
+        assert_eq!(patched_value.components_patch().len(), 1);
+        assert!(base_value.components_equal(&patched_value));
+    }
+
+    #[test]
+    fn effective_component_count_tracks_overrides_removals_and_additions() {
+        let mut components = components_with_max_stack_size(64);
+        components.set(DAMAGE, Some(5));
+        let mut stack = ItemStack::new(test_item("component_equality_count", components));
+
+        assert_eq!(stack.effective_component_count(), 2);
+        stack.set(MAX_STACK_SIZE, 16);
+        assert_eq!(stack.effective_component_count(), 2);
+        stack.remove(DAMAGE);
+        assert_eq!(stack.effective_component_count(), 1);
+        stack.set(CUSTOM_DATA, CustomData::default());
+        assert_eq!(stack.effective_component_count(), 2);
     }
 }
 

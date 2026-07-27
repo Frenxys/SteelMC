@@ -27,7 +27,10 @@ use crate::{
     chunk::chunk_map::{ChunkMapGameTickTimings, ChunkSaveOutcome},
     map::MapDataStore,
     random_sequences::RandomSequences,
-    server::jobs::{ServerJob, ServerJobQueue},
+    server::{
+        gameplay_compute::GameplayComputePool,
+        jobs::{ServerJob, ServerJobQueue},
+    },
     world::weather::Weather,
 };
 use steel_utils::saved_data::{SavedDataManager, names as saved_data_names};
@@ -91,17 +94,16 @@ use tokio::{runtime::Runtime, time::Instant};
 use crate::{
     ChunkMap,
     behavior::{
-        BLOCK_BEHAVIORS, BlockCollisionBoxes, BlockCollisionContext, BlockLootContext,
-        FLUID_BEHAVIORS,
+        BLOCK_BEHAVIORS, BlockCollisionContext, BlockLootContext, FLUID_BEHAVIORS,
+        ResolvedBlockCollisionShape,
     },
     block_entity::{BlockEntity, SharedBlockEntity, entities::EndGatewayBlockEntity},
     chunk::{heightmap::HeightmapType, player_chunk_view::PlayerChunkView},
     chunk_saver::{ChunkStorage, RamOnlyStorage, RegionManager},
     entity::{
-        AddEntityError, Entity, EntityChangeSenders, EntityChunkCallback, EntityLifecycleChanges,
+        AddEntityError, Entity, EntityChangeSenders, EntityChunkCallback, EntityManagerEffect,
         EntityMovementSyncPacket, EntityOwnership, EntityTracker, EntityVisibility,
-        InactiveEntityCallback, MobEffectSyncPacket, RemovalReason, SharedEntity,
-        WorldEntityManager,
+        MobEffectSyncPacket, RemovalReason, SharedEntity, WorldEntityManager,
         entities::{ExperienceOrbEntity, ItemEntity},
         entity_loot_ref,
     },
@@ -124,6 +126,7 @@ mod events;
 mod explosion;
 /// Vanilla game-event contexts, listeners, and dispatch storage.
 pub mod game_event;
+mod gameplay_block_reader;
 mod level_effects;
 mod level_reader;
 mod player_index;
@@ -155,6 +158,10 @@ use entity_management::nearest_player_distance_in_range;
 pub use explosion::{
     BlockInteraction, DefaultExplosionDamageCalculator, EntityBasedExplosionDamageCalculator,
     Explosion, ExplosionDamageCalculator, ExplosionInteraction, ExplosionOptions, ExplosionOutcome,
+};
+pub(crate) use explosion::{ExplosionBlockReader, ImmutableExplosionBlockCalculator};
+pub use gameplay_block_reader::{
+    GameplayBlockReadRegion, GameplayBlockReadWindowError, GameplayBlockStateReadBatch,
 };
 pub use level_reader::{LevelAccessor, LevelReader, ScheduledTickAccess};
 pub use player_index::{PlayerAreaMap, PlayerMap};
@@ -243,6 +250,8 @@ pub struct WorldConfig {
 pub struct World {
     /// The chunk map of the world.
     pub chunk_map: Arc<ChunkMap>,
+    /// Server-shared worker pool for synchronous intra-tick gameplay computation.
+    gameplay_compute_pool: Arc<GameplayComputePool>,
     /// All players in the world with dual indexing by UUID and entity ID.
     pub players: PlayerMap,
     /// Spatial index for player proximity queries.
@@ -342,6 +351,7 @@ impl World {
     /// * `dimension_type` - Vanilla dimension type (overworld, nether, end)
     /// * `seed` - The world seed
     /// * `config` - World configuration including storage options
+    /// * `gameplay_compute_pool` - Server-shared synchronous gameplay compute pool
     pub async fn new_with_config(
         chunk_runtime: Arc<Runtime>,
         key: Identifier,
@@ -349,6 +359,7 @@ impl World {
         seed: i64,
         config: WorldConfig,
         generation_pool: Arc<rayon::ThreadPool>,
+        gameplay_compute_pool: Arc<GameplayComputePool>,
     ) -> io::Result<Arc<Self>> {
         let chunk_encoding_pool = Arc::clone(&generation_pool);
         Self::new_with_config_and_encoding_pool(
@@ -359,10 +370,15 @@ impl World {
             config,
             generation_pool,
             chunk_encoding_pool,
+            gameplay_compute_pool,
         )
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "keeps the distinct world identity, configuration, and server-owned worker pools explicit"
+    )]
     pub(crate) async fn new_with_config_and_encoding_pool(
         chunk_runtime: Arc<Runtime>,
         key: Identifier,
@@ -371,6 +387,7 @@ impl World {
         config: WorldConfig,
         generation_pool: Arc<rayon::ThreadPool>,
         chunk_encoding_pool: Arc<rayon::ThreadPool>,
+        gameplay_compute_pool: Arc<GameplayComputePool>,
     ) -> io::Result<Arc<Self>> {
         let view_distance = config.view_distance;
         let simulation_distance = config.simulation_distance;
@@ -439,6 +456,7 @@ impl World {
 
             Self {
                 chunk_map,
+                gameplay_compute_pool,
                 players: PlayerMap::new(),
                 player_area_map: PlayerAreaMap::new(),
                 key,
@@ -479,6 +497,17 @@ impl World {
                 pending_world_changes: SyncMutex::new(Vec::new()),
             }
         }))
+    }
+
+    pub(crate) fn install_gameplay_compute<R: Send>(
+        &self,
+        operation: impl FnOnce() -> R + Send,
+    ) -> R {
+        self.gameplay_compute_pool.install(operation)
+    }
+
+    pub(crate) fn gameplay_compute_threads(&self) -> usize {
+        self.gameplay_compute_pool.worker_threads()
     }
 
     /// Binds this world to the named-sequence map owned by its domain.

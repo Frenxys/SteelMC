@@ -7,6 +7,7 @@ mod fire_freeze;
 mod movement;
 mod persistence;
 mod relationships;
+mod spatial;
 
 pub use fire_freeze::EntityFireFreezeState;
 pub use movement::{
@@ -16,10 +17,12 @@ pub use movement::{
 pub use persistence::{EntityBaseLoad, EntityBaseSaveData};
 pub use relationships::PendingWorldChangeToken;
 use relationships::{EntityLifecycleState, EntityRelationshipState};
+pub use spatial::EntitySpatialUpdate;
+use spatial::{EntitySpatialSnapshot, EntitySpatialState};
 
 use std::{
     collections::VecDeque,
-    mem,
+    mem, ptr,
     sync::{Arc, Weak},
 };
 
@@ -236,6 +239,162 @@ pub struct EntityBaseState {
     hurt_marked: bool,
 }
 
+struct EntityLevelCallbackState {
+    generation: u64,
+    callback: Arc<dyn EntityLevelCallback>,
+}
+
+impl EntityLevelCallbackState {
+    fn new() -> Self {
+        Self {
+            generation: 0,
+            callback: Arc::new(NullEntityCallback),
+        }
+    }
+
+    fn replace(&mut self, callback: Arc<dyn EntityLevelCallback>) -> Arc<dyn EntityLevelCallback> {
+        assert!(
+            self.generation != u64::MAX,
+            "entity level callback generation exhausted"
+        );
+        self.generation += 1;
+        mem::replace(&mut self.callback, callback)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EntitySpatialMutation {
+    Move(DVec3),
+    BoundingBox(WorldAabb),
+    PoseAndDimensions(EntityPose, EntityDimensions),
+    PlayerRespawn(EntityDimensions),
+}
+
+impl EntitySpatialMutation {
+    fn apply(self, state: &mut EntityBaseState) {
+        match self {
+            Self::Move(position) => {
+                let old_position = state.position;
+                state.position = position;
+                state.bounding_box = EntityBaseState::make_bounding_box(position, state.dimensions);
+                if BlockPos::containing(old_position.x, old_position.y, old_position.z)
+                    != BlockPos::containing(position.x, position.y, position.z)
+                {
+                    state.in_block_state = None;
+                }
+            }
+            Self::BoundingBox(bounding_box) => state.bounding_box = bounding_box,
+            Self::PoseAndDimensions(pose, dimensions) => {
+                state.pose = pose;
+                state.dimensions = dimensions;
+                state.bounding_box = EntityBaseState::make_bounding_box(state.position, dimensions);
+            }
+            Self::PlayerRespawn(dimensions) => {
+                let position = state.position;
+                state.old_position = position;
+                state.last_known_position = None;
+                state.last_known_speed = DVec3::ZERO;
+                state.velocity = DVec3::ZERO;
+                state.old_rotation = state.rotation;
+                state.pose = EntityPose::Standing;
+                state.dimensions = dimensions;
+                state.bounding_box = EntityBaseState::make_bounding_box(position, dimensions);
+                state.movement_flags = EntityMovementFlags::new();
+                state.ground_contact = EntityGroundContact::airborne();
+                state.movement_progress = EntityMovementProgress::new();
+                state.fire_freeze = EntityFireFreezeState::new();
+                state.in_block_state = None;
+                state.fluid_contact = EntityFluidContact::default();
+                state.was_eye_in_water = false;
+                state.piston_movement = EntityPistonMovement::new();
+                state.fall_distance = 0.0;
+                state.stuck_speed_multiplier = DVec3::ZERO;
+                state.no_physics = false;
+                state.needs_velocity_sync = false;
+                state.hurt_marked = false;
+            }
+        }
+    }
+}
+
+/// A compare-and-commit entity spatial mutation offered to the active level callback.
+///
+/// The callback runs without entity locks. Managed callbacks validate world
+/// ownership first, then call [`Self::commit`] while holding the manager lock so
+/// base publication and manager indexes become one transaction.
+pub struct EntitySpatialChange<'a> {
+    base: &'a EntityBase,
+    callback_generation: u64,
+    expected: EntitySpatialUpdate,
+    mutation: EntitySpatialMutation,
+}
+
+impl EntitySpatialChange<'_> {
+    /// Returns the spatial state against which this change was prepared.
+    #[must_use]
+    pub const fn expected(&self) -> EntitySpatialUpdate {
+        self.expected
+    }
+
+    /// Returns the requested position change, if this is an ordinary move.
+    #[must_use]
+    pub const fn position_change(&self) -> Option<(DVec3, DVec3)> {
+        match self.mutation {
+            EntitySpatialMutation::Move(position) => Some((self.expected.position(), position)),
+            EntitySpatialMutation::BoundingBox(_)
+            | EntitySpatialMutation::PoseAndDimensions(_, _)
+            | EntitySpatialMutation::PlayerRespawn(_) => None,
+        }
+    }
+
+    /// Returns the requested direct bounding-box change, if present.
+    #[must_use]
+    pub const fn bounding_box_change(&self) -> Option<(WorldAabb, WorldAabb)> {
+        match self.mutation {
+            EntitySpatialMutation::BoundingBox(bounding_box) => {
+                Some((self.expected.bounding_box(), bounding_box))
+            }
+            EntitySpatialMutation::Move(_)
+            | EntitySpatialMutation::PoseAndDimensions(_, _)
+            | EntitySpatialMutation::PlayerRespawn(_) => None,
+        }
+    }
+
+    pub(crate) fn originates_from(&self, base: &EntityBase) -> bool {
+        ptr::eq(self.base, base)
+    }
+
+    pub(crate) fn callback_is_current(&self) -> bool {
+        self.base.level_callback.lock().generation == self.callback_generation
+    }
+
+    /// Applies this change if neither its callback nor spatial base changed.
+    #[must_use]
+    pub fn commit(&self) -> EntitySpatialCommitResult {
+        self.base.try_commit_spatial_change(self)
+    }
+}
+
+/// Result of trying to commit an [`EntitySpatialChange`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EntitySpatialCommitResult {
+    /// The base mutation was published coherently.
+    Committed(EntitySpatialUpdate),
+    /// The callback or spatial base changed and the caller must prepare again.
+    Retry,
+}
+
+impl EntitySpatialCommitResult {
+    /// Returns the committed update, or `None` when the change must be retried.
+    #[must_use]
+    pub const fn update(self) -> Option<EntitySpatialUpdate> {
+        match self {
+            Self::Committed(update) => Some(update),
+            Self::Retry => None,
+        }
+    }
+}
+
 impl EntityBaseState {
     /// Creates base state for a freshly spawned entity.
     #[must_use]
@@ -396,6 +555,8 @@ pub struct EntityBase {
     world: SyncMutex<Weak<World>>,
     /// Current vanilla movement state.
     state: SyncMutex<EntityBaseState>,
+    /// Coherent lock-free position and bounding-box view for spatial queries.
+    spatial: EntitySpatialSnapshot,
     /// Shared vanilla save data outside the movement snapshot.
     save_data: SyncMutex<EntityBaseSaveData>,
     /// Per-tick movement segments used by vanilla block-contact effects.
@@ -406,8 +567,11 @@ pub struct EntityBase {
     relationships: SyncMutex<EntityRelationshipState>,
     /// Active vanilla portal timing state.
     portal_process: SyncMutex<Option<PortalProcessor>>,
-    /// Callback for entity lifecycle events.
-    level_callback: SyncMutex<Arc<dyn EntityLevelCallback>>,
+    /// Callback selection and spatial publication handoff state.
+    ///
+    /// Callbacks run after this lock is released. Their spatial revisions let
+    /// world indexes discard delayed deliveries without blocking writers.
+    level_callback: SyncMutex<EntityLevelCallbackState>,
 }
 
 impl EntityBase {
@@ -456,17 +620,20 @@ impl EntityBase {
         state: EntityBaseState,
         world: Weak<World>,
     ) -> Self {
+        let spatial =
+            EntitySpatialSnapshot::new(EntitySpatialState::new(state.position, state.bounding_box));
         Self {
             id,
             uuid,
             world: SyncMutex::new(world),
             state: SyncMutex::new(state),
+            spatial,
             save_data: SyncMutex::new(EntityBaseSaveData::new()),
             movement_trace: SyncMutex::new(EntityMovementTrace::default()),
             lifecycle: SyncMutex::new(EntityLifecycleState::new()),
             relationships: SyncMutex::new(EntityRelationshipState::default()),
             portal_process: SyncMutex::new(None),
-            level_callback: SyncMutex::new(Arc::new(NullEntityCallback)),
+            level_callback: SyncMutex::new(EntityLevelCallbackState::new()),
         }
     }
 
@@ -503,7 +670,7 @@ impl EntityBase {
     /// Gets the entity's current position.
     #[inline]
     pub fn position(&self) -> DVec3 {
-        self.state.lock().position
+        self.spatial.position()
     }
 
     /// Gets the entity position used by vanilla movement traces.
@@ -527,7 +694,65 @@ impl EntityBase {
     /// Gets the entity's current bounding box.
     #[inline]
     pub fn bounding_box(&self) -> WorldAabb {
-        self.state.lock().bounding_box
+        self.spatial.bounding_box()
+    }
+
+    #[inline]
+    pub(crate) fn spatial_update(&self) -> EntitySpatialUpdate {
+        self.spatial.load()
+    }
+
+    #[inline]
+    fn publish_spatial_state(&self, state: &EntityBaseState) -> EntitySpatialUpdate {
+        self.spatial
+            .publish(EntitySpatialState::new(state.position, state.bounding_box))
+    }
+
+    fn prepare_spatial_change(
+        &self,
+        mutation: EntitySpatialMutation,
+    ) -> (Arc<dyn EntityLevelCallback>, EntitySpatialChange<'_>) {
+        let callback_state = self.level_callback.lock();
+        let change = EntitySpatialChange {
+            base: self,
+            callback_generation: callback_state.generation,
+            expected: self.spatial_update(),
+            mutation,
+        };
+        (Arc::clone(&callback_state.callback), change)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn position_change_for_test(&self, position: DVec3) -> EntitySpatialChange<'_> {
+        self.prepare_spatial_change(EntitySpatialMutation::Move(position))
+            .1
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bounding_box_change_for_test(
+        &self,
+        bounding_box: WorldAabb,
+    ) -> EntitySpatialChange<'_> {
+        self.prepare_spatial_change(EntitySpatialMutation::BoundingBox(bounding_box))
+            .1
+    }
+
+    fn try_commit_spatial_change(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> EntitySpatialCommitResult {
+        let callback_state = self.level_callback.lock();
+        if callback_state.generation != change.callback_generation {
+            return EntitySpatialCommitResult::Retry;
+        }
+
+        let mut state = self.state.lock();
+        if self.spatial_update().revision() != change.expected.revision() {
+            return EntitySpatialCommitResult::Retry;
+        }
+
+        change.mutation.apply(&mut state);
+        EntitySpatialCommitResult::Committed(self.publish_spatial_state(&state))
     }
 
     /// Returns the vanilla movement physics snapshot from the current base state.
@@ -887,30 +1112,15 @@ impl EntityBase {
 
     /// Resets state that vanilla gets from constructing a fresh player entity for death respawn.
     pub fn reset_for_player_respawn(&self, dimensions: EntityDimensions) {
-        {
-            let mut state = self.state.lock();
-            let position = state.position;
-            state.old_position = position;
-            state.last_known_position = None;
-            state.last_known_speed = DVec3::ZERO;
-            state.velocity = DVec3::ZERO;
-            state.old_rotation = state.rotation;
-            state.pose = EntityPose::Standing;
-            state.dimensions = dimensions;
-            state.bounding_box = EntityBaseState::make_bounding_box(position, dimensions);
-            state.movement_flags = EntityMovementFlags::new();
-            state.ground_contact = EntityGroundContact::airborne();
-            state.movement_progress = EntityMovementProgress::new();
-            state.fire_freeze = EntityFireFreezeState::new();
-            state.in_block_state = None;
-            state.fluid_contact = EntityFluidContact::default();
-            state.was_eye_in_water = false;
-            state.piston_movement = EntityPistonMovement::new();
-            state.fall_distance = 0.0;
-            state.stuck_speed_multiplier = DVec3::ZERO;
-            state.no_physics = false;
-            state.needs_velocity_sync = false;
-            state.hurt_marked = false;
+        loop {
+            let (callback, change) =
+                self.prepare_spatial_change(EntitySpatialMutation::PlayerRespawn(dimensions));
+            if matches!(
+                callback.commit_spatial_change(&change),
+                EntitySpatialCommitResult::Committed(_)
+            ) {
+                break;
+            }
         }
 
         self.movement_trace.lock().reset();
@@ -984,14 +1194,21 @@ impl EntityBase {
             } else {
                 lifecycle.removal_reason = Some(reason);
                 lifecycle.pending_world_change = None;
-                Some(self.level_callback.lock().clone())
+                let callback_state = self.level_callback.lock();
+                Some((
+                    callback_state.generation,
+                    Arc::clone(&callback_state.callback),
+                ))
             }
         };
 
-        if let Some(callback) = callback {
+        if let Some((callback_generation, callback)) = callback {
             self.detach_from_relationships(reason);
             callback.on_remove(reason);
-            *self.level_callback.lock() = Arc::new(NullEntityCallback);
+            let mut callback_state = self.level_callback.lock();
+            if callback_state.generation == callback_generation {
+                callback_state.replace(Arc::new(NullEntityCallback));
+            }
         }
     }
 
@@ -1073,52 +1290,40 @@ impl EntityBase {
         was_removed
     }
 
-    /// Sets the level callback for lifecycle events.
-    pub fn set_level_callback(&self, callback: Arc<dyn EntityLevelCallback>) {
-        *self.level_callback.lock() = callback;
+    pub(super) fn replace_level_callback(
+        &self,
+        callback: Arc<dyn EntityLevelCallback>,
+    ) -> Arc<dyn EntityLevelCallback> {
+        self.level_callback.lock().replace(callback)
     }
 
     /// Sets the entity's position through the active level callback.
     #[must_use = "movement commits can fail when world entity state rejects the update"]
     pub fn try_set_position(&self, pos: DVec3) -> Result<(), EntityMoveError> {
         require_finite_position(pos, "position");
-        let old_pos = self.state.lock().position;
-        let callback = self.level_callback.lock().clone();
-        callback.validate_move(old_pos, pos)?;
-        self.set_position_local_unchecked(pos);
-        if let Err(error) = callback.on_move_committed(old_pos, pos) {
-            self.set_position_local_unchecked(old_pos);
-            return Err(error);
+        loop {
+            let (callback, change) = self.prepare_spatial_change(EntitySpatialMutation::Move(pos));
+            match callback.commit_move(&change)? {
+                EntitySpatialCommitResult::Committed(_) => return Ok(()),
+                EntitySpatialCommitResult::Retry => {}
+            }
         }
-        Ok(())
     }
 
     /// Sets position without consulting world lifecycle callbacks.
     ///
     /// Use this for construction, loading, proto-staged entities, and tests.
     pub(crate) fn set_position_local(&self, pos: DVec3) {
-        let callback = self.level_callback.lock().clone();
+        require_finite_position(pos, "position");
+        let callback_state = self.level_callback.lock();
         assert!(
-            callback.allows_local_position_update(),
+            callback_state.callback.allows_local_position_update(),
             "entity {} local position update bypassed world entity manager",
             self.id
         );
-        self.set_position_local_unchecked(pos);
-    }
-
-    fn set_position_local_unchecked(&self, pos: DVec3) {
-        require_finite_position(pos, "position");
-        {
-            let mut state = self.state.lock();
-            let old = state.position;
-            state.position = pos;
-            state.bounding_box = EntityBaseState::make_bounding_box(pos, state.dimensions);
-            if BlockPos::containing(old.x, old.y, old.z)
-                != BlockPos::containing(pos.x, pos.y, pos.z)
-            {
-                state.in_block_state = None;
-            }
-        }
+        let mut state = self.state.lock();
+        EntitySpatialMutation::Move(pos).apply(&mut state);
+        self.publish_spatial_state(&state);
     }
 
     /// Sets the vanilla movement-trace old position to the current position.
@@ -1187,15 +1392,30 @@ impl EntityBase {
     /// Use this for vanilla entities whose box is not simply dimensions centered
     /// on the entity position.
     pub fn set_bounding_box(&self, bounding_box: WorldAabb) {
-        self.state.lock().bounding_box = bounding_box;
+        loop {
+            let (callback, change) =
+                self.prepare_spatial_change(EntitySpatialMutation::BoundingBox(bounding_box));
+            if matches!(
+                callback.commit_spatial_change(&change),
+                EntitySpatialCommitResult::Committed(_)
+            ) {
+                return;
+            }
+        }
     }
 
     /// Sets pose and dimensions, then rebuilds the default position-centered box.
     pub fn set_pose_and_dimensions(&self, pose: EntityPose, dimensions: EntityDimensions) {
-        let mut state = self.state.lock();
-        state.pose = pose;
-        state.dimensions = dimensions;
-        state.bounding_box = EntityBaseState::make_bounding_box(state.position, dimensions);
+        loop {
+            let (callback, change) = self
+                .prepare_spatial_change(EntitySpatialMutation::PoseAndDimensions(pose, dimensions));
+            if matches!(
+                callback.commit_spatial_change(&change),
+                EntitySpatialCommitResult::Committed(_)
+            ) {
+                return;
+            }
+        }
     }
 
     /// Sets the entity's velocity in blocks per tick.

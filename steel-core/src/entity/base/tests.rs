@@ -2,13 +2,19 @@ use super::{
     DEFAULT_MAX_AIR_SUPPLY, DEFAULT_TICKS_REQUIRED_TO_FREEZE, EntityBase, EntityBaseState,
     EntityFireFreezeState, EntityFluidContact, EntityMoveError, EntityMovement,
     EntityMovementEmission, EntityMovementFlags, EntityMovementProgress, EntityPhysicsStateInput,
-    EntityPistonMovement, EntityVerticalMovementStateUpdate, MAX_ENTITY_TAGS,
+    EntityPistonMovement, EntitySpatialChange, EntitySpatialCommitResult,
+    EntityVerticalMovementStateUpdate, MAX_ENTITY_TAGS,
 };
-use std::sync::{Arc, Weak};
+use std::sync::{
+    Arc, Barrier, Weak,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
 
 use glam::DVec3;
 use steel_registry::{
-    entity_type::EntityDimensions, entity_type::EntityTypeRef, test_support::init_test_registry,
+    entity_data::EntityPose, entity_type::EntityDimensions, entity_type::EntityTypeRef,
+    test_support::init_test_registry,
 };
 use steel_registry::{vanilla_damage_types, vanilla_entities};
 use steel_utils::locks::SyncMutex;
@@ -114,12 +120,15 @@ struct CountingCallback {
 }
 
 impl EntityLevelCallback for CountingCallback {
-    fn validate_move(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
-        Ok(())
+    fn commit_move(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
+        Ok(change.commit())
     }
 
-    fn on_move_committed(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
-        Ok(())
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        change.commit()
     }
 
     fn on_remove(&self, reason: RemovalReason) {
@@ -130,12 +139,52 @@ impl EntityLevelCallback for CountingCallback {
 struct CommitRejectingCallback;
 
 impl EntityLevelCallback for CommitRejectingCallback {
-    fn validate_move(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
-        Ok(())
+    fn commit_move(
+        &self,
+        _change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
+        Err(EntityMoveError::NotLive { entity_id: 1 })
     }
 
-    fn on_move_committed(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
-        Err(EntityMoveError::NotLive { entity_id: 1 })
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        change.commit()
+    }
+
+    fn on_remove(&self, _reason: RemovalReason) {}
+}
+
+#[derive(Default)]
+struct BoundingBoxCallback {
+    base: SyncMutex<Weak<EntityBase>>,
+    changes: SyncMutex<Vec<(WorldAabb, WorldAabb)>>,
+}
+
+impl EntityLevelCallback for BoundingBoxCallback {
+    fn commit_move(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
+        Ok(change.commit())
+    }
+
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        let Some(base) = self.base.lock().upgrade() else {
+            panic!("bounding-box callback should retain its base during the test");
+        };
+        assert!(
+            base.state.try_lock().is_some(),
+            "bounding-box callback ran while the base state lock was held"
+        );
+        assert!(
+            base.level_callback.try_lock().is_some(),
+            "spatial callback ran while the callback coordinator was locked"
+        );
+        let old_box = change.expected().bounding_box();
+        let result = change.commit();
+        if let EntitySpatialCommitResult::Committed(update) = result {
+            self.changes.lock().push((old_box, update.bounding_box()));
+        }
+        result
     }
 
     fn on_remove(&self, _reason: RemovalReason) {}
@@ -273,7 +322,7 @@ fn lifecycle_state_tracks_removal() {
         Weak::<World>::new(),
     );
     let callback = Arc::new(CountingCallback::default());
-    base.set_level_callback(callback.clone());
+    base.replace_level_callback(callback.clone());
 
     assert!(!base.is_removed());
     let Some(pending_token) = base.begin_pending_world_change() else {
@@ -323,13 +372,12 @@ fn lifecycle_state_tracks_pending_world_change_tokens() {
 
 #[test]
 fn try_set_position_rolls_back_when_commit_fails() {
-    let base = EntityBase::new(
-        1,
-        DVec3::new(1.0, 2.0, 3.0),
-        EntityDimensions::new(0.25, 0.25, 0.125),
-        Weak::<World>::new(),
-    );
-    base.set_level_callback(Arc::new(CommitRejectingCallback));
+    let dimensions = EntityDimensions::new(0.25, 0.25, 0.125);
+    let original_position = DVec3::new(1.0, 2.0, 3.0);
+    let base = EntityBase::new(1, original_position, dimensions, Weak::<World>::new());
+    let original_bounding_box = WorldAabb::new(-2.0, 1.0, -1.0, 3.0, 6.0, 4.0);
+    base.set_bounding_box(original_bounding_box);
+    base.replace_level_callback(Arc::new(CommitRejectingCallback));
 
     let result = base.try_set_position(DVec3::new(4.0, 5.0, 6.0));
 
@@ -337,7 +385,262 @@ fn try_set_position_rolls_back_when_commit_fails() {
         result,
         Err(EntityMoveError::NotLive { entity_id: 1 })
     ));
-    assert_vec3_close(base.position(), DVec3::new(1.0, 2.0, 3.0));
+    assert_vec3_close(base.position(), original_position);
+    assert_eq!(base.bounding_box(), original_bounding_box);
+}
+
+#[test]
+fn spatial_snapshot_tracks_base_spatial_mutation_paths() {
+    let dimensions = EntityDimensions::new(0.25, 0.5, 0.25);
+    let initial_position = DVec3::new(1.0, 2.0, 3.0);
+    let initial_box = WorldAabb::new(0.1, 0.2, 0.3, 1.1, 1.2, 1.3);
+    let base = EntityBase::new_with_state(
+        1,
+        EntityBaseState::new_with_bounding_box(initial_position, dimensions, initial_box),
+        Weak::<World>::new(),
+    );
+
+    assert_vec3_close(base.position(), initial_position);
+    assert_eq!(base.bounding_box(), initial_box);
+
+    let moved_position = DVec3::new(4.0, 5.0, 6.0);
+    base.set_position_local(moved_position);
+    assert_vec3_close(base.position(), moved_position);
+    assert_eq!(
+        base.bounding_box(),
+        EntityBaseState::make_bounding_box(moved_position, dimensions)
+    );
+
+    let moved_custom_box = WorldAabb::new(3.0, 4.0, 5.0, 5.0, 7.0, 8.0);
+    base.set_bounding_box(moved_custom_box);
+    assert_eq!(base.bounding_box(), moved_custom_box);
+
+    let posed_dimensions = EntityDimensions::new(0.8, 1.2, 0.9);
+    base.set_pose_and_dimensions(EntityPose::Sneaking, posed_dimensions);
+    assert_eq!(
+        base.bounding_box(),
+        EntityBaseState::make_bounding_box(moved_position, posed_dimensions)
+    );
+
+    let respawn_dimensions = EntityDimensions::new(0.6, 1.8, 1.62);
+    base.reset_for_player_respawn(respawn_dimensions);
+    assert_vec3_close(base.position(), moved_position);
+    assert_eq!(
+        base.bounding_box(),
+        EntityBaseState::make_bounding_box(moved_position, respawn_dimensions)
+    );
+}
+
+#[test]
+fn direct_bounding_box_changes_notify_after_releasing_base_state() {
+    let dimensions = EntityDimensions::new(0.25, 0.5, 0.25);
+    let base = Arc::new(EntityBase::new(
+        1,
+        DVec3::new(1.0, 2.0, 3.0),
+        dimensions,
+        Weak::<World>::new(),
+    ));
+    let callback = Arc::new(BoundingBoxCallback::default());
+    *callback.base.lock() = Arc::downgrade(&base);
+    base.replace_level_callback(Arc::clone(&callback) as Arc<dyn EntityLevelCallback>);
+
+    let original_box = base.bounding_box();
+    let custom_box = WorldAabb::new(-1.0, 1.0, -1.0, 3.0, 5.0, 3.0);
+    base.set_bounding_box(custom_box);
+    let posed_dimensions = EntityDimensions::new(0.8, 1.2, 0.9);
+    base.set_pose_and_dimensions(EntityPose::Sneaking, posed_dimensions);
+    let posed_box = base.bounding_box();
+    base.reset_for_player_respawn(dimensions);
+    let reset_box = base.bounding_box();
+
+    assert_eq!(
+        *callback.changes.lock(),
+        vec![
+            (original_box, custom_box),
+            (custom_box, posed_box),
+            (posed_box, reset_box),
+        ]
+    );
+}
+
+struct BlockingBoundingBoxCallback {
+    first_box: WorldAabb,
+    blocked_first_attempt: AtomicBool,
+    first_entered: Barrier,
+    release_first: Barrier,
+    commits: SyncMutex<Vec<(WorldAabb, bool)>>,
+}
+
+impl BlockingBoundingBoxCallback {
+    fn new(first_box: WorldAabb) -> Self {
+        Self {
+            first_box,
+            blocked_first_attempt: AtomicBool::new(false),
+            first_entered: Barrier::new(2),
+            release_first: Barrier::new(2),
+            commits: SyncMutex::new(Vec::new()),
+        }
+    }
+}
+
+impl EntityLevelCallback for BlockingBoundingBoxCallback {
+    fn commit_move(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
+        Ok(change.commit())
+    }
+
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        let Some((_old_box, new_box)) = change.bounding_box_change() else {
+            return change.commit();
+        };
+        if new_box == self.first_box && !self.blocked_first_attempt.swap(true, Ordering::SeqCst) {
+            self.first_entered.wait();
+            self.release_first.wait();
+        }
+        let result = change.commit();
+        self.commits.lock().push((
+            new_box,
+            matches!(result, EntitySpatialCommitResult::Committed(_)),
+        ));
+        result
+    }
+
+    fn on_remove(&self, _reason: RemovalReason) {}
+}
+
+#[test]
+fn superseded_spatial_attempt_retries_without_regressing_a_newer_commit() {
+    let base = Arc::new(EntityBase::new(
+        1,
+        DVec3::new(1.0, 2.0, 3.0),
+        EntityDimensions::new(0.25, 0.5, 0.25),
+        Weak::<World>::new(),
+    ));
+    let first_box = WorldAabb::new(10.0, 20.0, 30.0, 11.0, 21.0, 31.0);
+    let second_box = WorldAabb::new(40.0, 50.0, 60.0, 41.0, 51.0, 61.0);
+    let callback = Arc::new(BlockingBoundingBoxCallback::new(first_box));
+    base.replace_level_callback(Arc::clone(&callback) as Arc<dyn EntityLevelCallback>);
+
+    let first_base = Arc::clone(&base);
+    let first_writer = thread::spawn(move || first_base.set_bounding_box(first_box));
+    callback.first_entered.wait();
+
+    let second_base = Arc::clone(&base);
+    let second_writer = thread::spawn(move || second_base.set_bounding_box(second_box));
+    second_writer
+        .join()
+        .expect("newer spatial writer should not wait for the older callback");
+
+    callback.release_first.wait();
+    first_writer
+        .join()
+        .expect("first spatial writer should finish");
+
+    assert_eq!(base.bounding_box(), first_box);
+    assert_eq!(
+        *callback.commits.lock(),
+        vec![(second_box, true), (first_box, false), (first_box, true)]
+    );
+}
+
+struct ReentrantBoundingBoxCallback {
+    base: SyncMutex<Weak<EntityBase>>,
+    nested_box: WorldAabb,
+    reentered: AtomicBool,
+    committed_boxes: SyncMutex<Vec<WorldAabb>>,
+}
+
+impl EntityLevelCallback for ReentrantBoundingBoxCallback {
+    fn commit_move(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
+        Ok(change.commit())
+    }
+
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        if !self.reentered.swap(true, Ordering::SeqCst) {
+            let Some(base) = self.base.lock().upgrade() else {
+                panic!("reentrant callback should retain its base during the test");
+            };
+            assert!(base.state.try_lock().is_some());
+            assert!(base.level_callback.try_lock().is_some());
+            base.set_bounding_box(self.nested_box);
+        }
+
+        let result = change.commit();
+        if let EntitySpatialCommitResult::Committed(update) = result {
+            self.committed_boxes.lock().push(update.bounding_box());
+        }
+        result
+    }
+
+    fn on_remove(&self, _reason: RemovalReason) {}
+}
+
+#[test]
+fn spatial_callback_can_reenter_the_same_base_without_deadlocking() {
+    let base = Arc::new(EntityBase::new(
+        1,
+        DVec3::new(1.0, 2.0, 3.0),
+        EntityDimensions::new(0.25, 0.5, 0.25),
+        Weak::<World>::new(),
+    ));
+    let nested_box = WorldAabb::new(10.0, 20.0, 30.0, 11.0, 21.0, 31.0);
+    let outer_box = WorldAabb::new(40.0, 50.0, 60.0, 41.0, 51.0, 61.0);
+    let callback = Arc::new(ReentrantBoundingBoxCallback {
+        base: SyncMutex::new(Arc::downgrade(&base)),
+        nested_box,
+        reentered: AtomicBool::new(false),
+        committed_boxes: SyncMutex::new(Vec::new()),
+    });
+    base.replace_level_callback(Arc::clone(&callback) as Arc<dyn EntityLevelCallback>);
+
+    base.set_bounding_box(outer_box);
+
+    assert_eq!(base.bounding_box(), outer_box);
+    assert_eq!(
+        *callback.committed_boxes.lock(),
+        vec![nested_box, outer_box]
+    );
+}
+
+#[test]
+fn spatial_snapshot_never_combines_separate_position_commits() {
+    let dimensions = EntityDimensions::new(0.25, 0.5, 0.25);
+    let first_position = DVec3::new(1.0, 2.0, 3.0);
+    let second_position = DVec3::new(40.0, 50.0, 60.0);
+    let first_box = EntityBaseState::make_bounding_box(first_position, dimensions);
+    let second_box = EntityBaseState::make_bounding_box(second_position, dimensions);
+    let base = EntityBase::new(1, first_position, dimensions, Weak::<World>::new());
+    let start = Barrier::new(2);
+
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            start.wait();
+            for index in 0..50_000 {
+                let position = if index & 1 == 0 {
+                    second_position
+                } else {
+                    first_position
+                };
+                base.set_position_local(position);
+            }
+        });
+        scope.spawn(|| {
+            start.wait();
+            for _ in 0..50_000 {
+                let spatial = base.spatial_update();
+                let is_first =
+                    spatial.position() == first_position && spatial.bounding_box() == first_box;
+                let is_second =
+                    spatial.position() == second_position && spatial.bounding_box() == second_box;
+                assert!(is_first || is_second, "mixed spatial snapshot: {spatial:?}");
+            }
+        });
+    });
 }
 
 #[test]
@@ -349,7 +652,7 @@ fn set_position_local_panics_when_callback_requires_manager_commit() {
         EntityDimensions::new(0.25, 0.25, 0.125),
         Weak::<World>::new(),
     );
-    base.set_level_callback(Arc::new(CountingCallback::default()));
+    base.replace_level_callback(Arc::new(CountingCallback::default()));
 
     base.set_position_local(DVec3::new(4.0, 5.0, 6.0));
 }

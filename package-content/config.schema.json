@@ -249,6 +249,12 @@
               "description": "Worker threads for the Rayon chunk encoding pool",
               "minimum": 0,
               "default": 0
+            },
+            "gameplay_compute": {
+              "type": "integer",
+              "description": "Worker threads for synchronous intra-tick gameplay computation",
+              "minimum": 0,
+              "default": 0
             }
           },
           "additionalProperties": false

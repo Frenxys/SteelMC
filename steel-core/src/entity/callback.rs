@@ -1,11 +1,10 @@
 //! Entity lifecycle callbacks for movement and removal tracking.
 
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 
-use glam::DVec3;
-use steel_utils::ChunkPos;
-
-use super::EntityMoveError;
+use super::{
+    EntityMoveError, EntitySpatialChange, EntitySpatialCommitResult, SharedEntity, WeakEntity,
+};
 use crate::world::World;
 
 /// Reasons an entity can be removed from the world.
@@ -50,14 +49,58 @@ pub trait EntityLevelCallback: Send + Sync {
         false
     }
 
-    /// Called before an entity position change is committed.
-    fn validate_move(&self, old_pos: DVec3, new_pos: DVec3) -> Result<(), EntityMoveError>;
+    /// Validates and atomically commits an ordinary position change.
+    fn commit_move(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError>;
 
-    /// Called after an entity position change has been committed.
-    fn on_move_committed(&self, old_pos: DVec3, new_pos: DVec3) -> Result<(), EntityMoveError>;
+    /// Atomically commits a bounding-box, dimensions, or respawn spatial change.
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult;
 
     /// Called when entity is removed from the world.
     fn on_remove(&self, reason: RemovalReason);
+}
+
+struct EntityCallbackIdentity;
+
+/// Unforgeable identity for one manager callback installation.
+#[derive(Clone)]
+pub(crate) struct EntityCallbackToken(Arc<EntityCallbackIdentity>);
+
+impl EntityCallbackToken {
+    fn new() -> Self {
+        Self(Arc::new(EntityCallbackIdentity))
+    }
+
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// A level callback paired with the identity authenticated by the entity manager.
+pub(crate) struct BoundEntityCallback {
+    callback: Arc<dyn EntityLevelCallback>,
+    token: EntityCallbackToken,
+}
+
+impl BoundEntityCallback {
+    pub(crate) fn new(
+        create: impl FnOnce(EntityCallbackToken) -> Arc<dyn EntityLevelCallback>,
+    ) -> Self {
+        let token = EntityCallbackToken::new();
+        let callback = create(token.clone());
+        Self { callback, token }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn callback_for_test(&self) -> Arc<dyn EntityLevelCallback> {
+        Arc::clone(&self.callback)
+    }
+
+    pub(crate) fn into_parts(self) -> (Arc<dyn EntityLevelCallback>, EntityCallbackToken) {
+        (self.callback, self.token)
+    }
 }
 
 /// Null callback for entities not yet in the world.
@@ -68,12 +111,15 @@ impl EntityLevelCallback for NullEntityCallback {
         true
     }
 
-    fn validate_move(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
-        Ok(())
+    fn commit_move(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
+        Ok(change.commit())
     }
 
-    fn on_move_committed(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
-        Ok(())
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        change.commit()
     }
 
     fn on_remove(&self, _reason: RemovalReason) {}
@@ -93,16 +139,17 @@ impl InactiveEntityCallback {
 }
 
 impl EntityLevelCallback for InactiveEntityCallback {
-    fn validate_move(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
+    fn commit_move(
+        &self,
+        _change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
         Err(EntityMoveError::Inactive {
             entity_id: self.entity_id,
         })
     }
 
-    fn on_move_committed(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
-        Err(EntityMoveError::Inactive {
-            entity_id: self.entity_id,
-        })
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        change.commit()
     }
 
     fn on_remove(&self, _reason: RemovalReason) {}
@@ -123,60 +170,52 @@ impl PlayerEntityCallback {
     pub const fn new(entity_id: i32, world: Weak<World>) -> Self {
         Self { entity_id, world }
     }
+
+    pub(crate) fn bind(entity_id: i32, world: Weak<World>) -> BoundEntityCallback {
+        BoundEntityCallback::new(|_| Arc::new(Self::new(entity_id, world)))
+    }
 }
 
 impl EntityLevelCallback for PlayerEntityCallback {
-    fn validate_move(&self, old_pos: DVec3, new_pos: DVec3) -> Result<(), EntityMoveError> {
+    fn commit_move(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
         let Some(world) = self.world.upgrade() else {
             return Err(EntityMoveError::NotLive {
                 entity_id: self.entity_id,
             });
         };
-
-        world
-            .entity_manager()
-            .validate_move(self.entity_id, new_pos)
-            .inspect_err(|error| {
-                log::warn!("Rejected player entity move from {old_pos:?} to {new_pos:?}: {error}");
-            })
-    }
-
-    fn on_move_committed(&self, old_pos: DVec3, new_pos: DVec3) -> Result<(), EntityMoveError> {
-        let Some(world) = self.world.upgrade() else {
-            return Err(EntityMoveError::NotLive {
-                entity_id: self.entity_id,
-            });
+        let Some((old_pos, new_pos)) = change.position_change() else {
+            panic!("player move callback received a non-position spatial change");
         };
 
-        let update = world
+        let Some(update) = world
             .entity_manager()
-            .commit_move(self.entity_id, new_pos)
+            .commit_move(self.entity_id, change)
             .inspect_err(|error| {
                 log::warn!(
                     "Failed to commit player entity move from {old_pos:?} to {new_pos:?}: {error}"
                 );
-            })?;
+            })?
+        else {
+            return Ok(EntitySpatialCommitResult::Retry);
+        };
 
-        if update.section_changed() {
-            world.entity_tracker().on_entity_section_change(
-                self.entity_id,
-                update.old_chunk,
-                update.new_chunk,
-                |chunk| world.get_packet_tracking_players(chunk),
-                |player_id| world.players.get_by_entity_id(player_id),
-            );
+        world.drain_entity_manager_effects();
 
-            if let Some(player) = world.players.get_by_entity_id(self.entity_id)
-                && let Some(view) = *player.last_tracking_view.lock()
-            {
-                let sent_chunks = player.chunk_sender.lock().sent_chunks_snapshot();
-                world
-                    .entity_tracker()
-                    .update_player(&player, &view, |chunk| sent_chunks.contains(&chunk));
-            }
-        }
+        Ok(EntitySpatialCommitResult::Committed(
+            update.spatial_update(),
+        ))
+    }
 
-        Ok(())
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        let Some(world) = self.world.upgrade() else {
+            return change.commit();
+        };
+        world
+            .entity_manager()
+            .commit_spatial_change(self.entity_id, change)
     }
 
     fn on_remove(&self, _reason: RemovalReason) {
@@ -189,85 +228,77 @@ impl EntityLevelCallback for PlayerEntityCallback {
 /// Mirrors vanilla's `PersistentEntitySectionManager.Callback`.
 pub struct EntityChunkCallback {
     entity_id: i32,
+    entity: WeakEntity,
+    callback_token: EntityCallbackToken,
     world: Weak<World>,
 }
 
 impl EntityChunkCallback {
-    /// Creates a new callback for an entity.
-    #[must_use]
-    pub const fn new(entity_id: i32, world: Weak<World>) -> Self {
-        Self { entity_id, world }
+    pub(crate) fn bind(entity: &SharedEntity, world: Weak<World>) -> BoundEntityCallback {
+        BoundEntityCallback::new(|callback_token| {
+            Arc::new(Self {
+                entity_id: entity.id(),
+                entity: Arc::downgrade(entity),
+                callback_token,
+                world,
+            })
+        })
     }
 }
 
 impl EntityLevelCallback for EntityChunkCallback {
-    fn validate_move(&self, old_pos: DVec3, new_pos: DVec3) -> Result<(), EntityMoveError> {
+    fn commit_move(
+        &self,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
         let Some(world) = self.world.upgrade() else {
             return Err(EntityMoveError::NotLive {
                 entity_id: self.entity_id,
             });
         };
-
-        world
-            .entity_manager()
-            .validate_move(self.entity_id, new_pos)
-            .inspect_err(|error| {
-                log::warn!("Rejected entity move from {old_pos:?} to {new_pos:?}: {error}");
-            })
-    }
-
-    fn on_move_committed(&self, old_pos: DVec3, new_pos: DVec3) -> Result<(), EntityMoveError> {
-        let Some(world) = self.world.upgrade() else {
-            return Err(EntityMoveError::NotLive {
-                entity_id: self.entity_id,
-            });
+        let Some((old_pos, new_pos)) = change.position_change() else {
+            panic!("entity move callback received a non-position spatial change");
         };
 
-        let update = world
+        let Some(update) = world
             .entity_manager()
-            .commit_move(self.entity_id, new_pos)
+            .commit_move(self.entity_id, change)
             .inspect_err(|error| {
                 log::warn!("Failed to commit entity move from {old_pos:?} to {new_pos:?}: {error}");
-            })?;
+            })?
+        else {
+            return Ok(EntitySpatialCommitResult::Retry);
+        };
 
-        world.mark_chunk_dirty(update.new_chunk);
-        if update.chunk_changed() {
-            world.mark_chunk_dirty(update.old_chunk);
-        }
+        world.drain_entity_manager_effects();
 
-        if update.section_changed() {
-            if update.became_inaccessible() {
-                world.remove_entity_from_tracker(self.entity_id);
-            } else if update.became_accessible() {
-                if let Some(entity) = world.entity_manager().get_by_id(self.entity_id) {
-                    world.add_entity_to_tracker(&entity);
-                }
-            } else if update.new_accessible {
-                world.entity_tracker().on_entity_section_change(
-                    self.entity_id,
-                    update.old_chunk,
-                    update.new_chunk,
-                    |chunk| world.get_packet_tracking_players(chunk),
-                    |player_id| world.players.get_by_entity_id(player_id),
-                );
-            }
-        }
+        Ok(EntitySpatialCommitResult::Committed(
+            update.spatial_update(),
+        ))
+    }
 
-        Ok(())
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        let Some(world) = self.world.upgrade() else {
+            return change.commit();
+        };
+        world
+            .entity_manager()
+            .commit_spatial_change(self.entity_id, change)
     }
 
     fn on_remove(&self, reason: RemovalReason) {
         let Some(world) = self.world.upgrade() else {
             return;
         };
+        let Some(entity) = self.entity.upgrade() else {
+            return;
+        };
 
-        let entity = world
-            .entity_manager()
-            .remove_live_entity(self.entity_id, reason);
-        if let Some(entity) = entity {
-            world.mark_chunk_dirty(ChunkPos::from_entity_pos(entity.position()));
-        }
-
-        world.remove_entity_from_tracker(self.entity_id);
+        world.entity_manager().remove_live_entity_if_bound(
+            entity.as_ref(),
+            &self.callback_token,
+            reason,
+        );
+        world.drain_entity_manager_effects();
     }
 }

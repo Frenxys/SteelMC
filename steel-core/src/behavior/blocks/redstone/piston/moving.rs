@@ -14,7 +14,7 @@ use steel_utils::{BlockPos, BlockStateId, Downcast as _};
 use crate::behavior::{
     BLOCK_BEHAVIORS, BlockBehavior, BlockCollisionBoxes, BlockCollisionContext,
     BlockEntityCreation, BlockHitResult, BlockLootContext, BlockPlaceContext, InteractionResult,
-    InventoryAccess,
+    InventoryAccess, ResolvedBlockCollisionShape,
 };
 use crate::block_entity::{BlockEntityTicker, entities::PistonMovingBlockEntity};
 use crate::entity::ai::path::PathComputationType;
@@ -59,21 +59,23 @@ impl BlockBehavior for MovingPistonBlock {
         )
     }
 
-    fn get_collision_boxes(
+    fn get_resolved_collision_shape(
         &self,
         _state: BlockStateId,
         world: &dyn LevelReader,
         pos: BlockPos,
         _context: BlockCollisionContext,
-    ) -> BlockCollisionBoxes {
+    ) -> ResolvedBlockCollisionShape {
         let Some(block_entity) = world.get_block_entity(pos) else {
-            return BlockCollisionBoxes::new();
+            return ResolvedBlockCollisionShape::owned(BlockCollisionBoxes::new());
         };
-        block_entity
-            .downcast_ref::<PistonMovingBlockEntity>()
-            .map_or_else(BlockCollisionBoxes::new, |piston| {
-                piston.collision_boxes(world, pos)
-            })
+        ResolvedBlockCollisionShape::owned(
+            block_entity
+                .downcast_ref::<PistonMovingBlockEntity>()
+                .map_or_else(BlockCollisionBoxes::new, |piston| {
+                    piston.collision_boxes(world, pos)
+                }),
+        )
     }
 
     fn get_block_support_boxes(

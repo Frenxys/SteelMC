@@ -59,6 +59,10 @@ fn nanos_to_millis_string(nanos: u64) -> String {
     format!("{:.1}", nanos as f64 / 1_000_000.0)
 }
 
+fn nanos_to_precise_millis_string(nanos: u64) -> String {
+    format!("{:.3}", nanos as f64 / 1_000_000.0)
+}
+
 enum TickStatus {
     Sprinting,
     Frozen,
@@ -72,7 +76,15 @@ enum TickStatus {
     reason = "the bounded rate is intentionally truncated and executors share a fallible signature"
 )]
 fn query_tick(context: &SteelCommandContext<CommandSource>) -> Result<i32, CommandSyntaxError> {
-    let (tick_rate, busy_time_nanos, target_time_nanos, status, mut samples, sample_count) = {
+    let (
+        tick_rate,
+        busy_time_nanos,
+        target_time_nanos,
+        status,
+        mut samples,
+        sample_count,
+        max_tick_time_nanos,
+    ) = {
         let manager = context.source().server().tick_rate_manager.read();
         let busy_time_nanos = manager.get_average_tick_time_nanos();
         let status = if manager.is_sprinting() {
@@ -91,6 +103,7 @@ fn query_tick(context: &SteelCommandContext<CommandSource>) -> Result<i32, Comma
             status,
             manager.get_tick_times_nanos(),
             manager.get_sample_count(),
+            manager.get_max_tick_time_nanos(),
         )
     };
 
@@ -142,6 +155,13 @@ fn query_tick(context: &SteelCommandContext<CommandSource>) -> Result<i32, Comma
         ])
         .component();
     context.source().send_success(&message, false);
+    context.source().send_success(
+        &TextComponent::from(format!(
+            "Maximum full tick time: {}ms",
+            nanos_to_precise_millis_string(max_tick_time_nanos)
+        )),
+        false,
+    );
     Ok(tick_rate as i32)
 }
 

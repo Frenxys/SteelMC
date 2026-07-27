@@ -6,10 +6,7 @@ use steel_registry::vanilla_entities;
 use steel_utils::ChunkPos;
 
 use crate::{
-    entity::{
-        Entity, EntityOwnership, NullEntityCallback, PlayerEntityCallback, RemovalReason,
-        SharedEntity,
-    },
+    entity::{Entity, EntityOwnership, PlayerEntityCallback, RemovalReason, SharedEntity},
     player::connection::NetworkConnection,
     player::player_data::PersistentPlayerData,
     player::player_inventory::MenuRemovalStatus,
@@ -18,23 +15,18 @@ use crate::{
 };
 
 impl World {
-    fn attach_player_entity_callback(self: &Arc<Self>, player: &Arc<Player>) {
-        let callback = Arc::new(PlayerEntityCallback::new(player.id(), Arc::downgrade(self)));
-        player.set_level_callback(callback);
-    }
-
     fn register_player_entity(self: &Arc<Self>, player: &Arc<Player>) {
-        self.attach_player_entity_callback(player);
-
         let entity: SharedEntity = player.clone();
-        let lifecycle = match self
-            .entity_manager()
-            .add_live_entity(entity.clone(), EntityOwnership::External)
-        {
-            Ok(lifecycle) => lifecycle,
+        let callback = PlayerEntityCallback::bind(player.id(), Arc::downgrade(self));
+        match self.entity_manager().add_live_entity_with_callback(
+            entity.clone(),
+            EntityOwnership::External,
+            callback,
+        ) {
+            Ok(_) => {}
             Err(error) => panic!("failed to register player entity: {error}"),
-        };
-        self.apply_entity_lifecycle_changes(lifecycle);
+        }
+        self.drain_entity_manager_effects();
     }
 
     fn unride_player_for_removal(&self, player: &Player, store_root_vehicle: bool) {
@@ -70,13 +62,10 @@ impl World {
         }
     }
 
-    pub(crate) fn unregister_player_entity(&self, player: &Player) {
-        let entity_id = player.id();
-        self.remove_entity_from_tracker(entity_id);
-
+    pub(crate) fn unregister_player_entity(self: &Arc<Self>, player: &Player) {
         self.entity_manager()
-            .remove_live_entity(entity_id, RemovalReason::ChangedWorld);
-        player.set_level_callback(Arc::new(NullEntityCallback));
+            .remove_live_entity(player, RemovalReason::ChangedWorld);
+        self.drain_entity_manager_effects();
     }
 
     pub(crate) fn register_respawned_player_entity(self: &Arc<Self>, player: &Arc<Player>) {

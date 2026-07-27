@@ -276,6 +276,12 @@ enum BlockEffectSegmentResult {
     Removed,
 }
 
+#[derive(Default)]
+struct BlockEffectScratch {
+    traversal: block_effects::BlockTraversalScratch,
+    visited_blocks: block_effects::VisitedBlockSet,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BlockEffectFireSnapshot {
     was_on_fire: bool,
@@ -485,8 +491,8 @@ fn apply_block_effect_segment(
     from: DVec3,
     to: DVec3,
     max_iterations: i32,
+    scratch: &mut BlockEffectScratch,
     effect_collector: &mut InsideBlockEffectCollector,
-    visited_blocks: &mut FxHashSet<BlockPos>,
 ) -> BlockEffectSegmentResult {
     let aabb = entity.make_bounding_box_at(to).deflate(1.0E-5);
     if aabb.is_empty() {
@@ -494,8 +500,16 @@ fn apply_block_effect_segment(
     }
 
     let mut hit_iteration_limit = false;
-    let Some(iterations) =
-        block_effects::for_each_block_intersected_between(from, to, aabb, |pos, iteration| {
+    let BlockEffectScratch {
+        traversal,
+        visited_blocks,
+    } = scratch;
+    let Some(iterations) = block_effects::for_each_block_intersected_between(
+        from,
+        to,
+        aabb,
+        traversal,
+        |pos, iteration| {
             if entity.is_removed() {
                 return false;
             }
@@ -543,8 +557,8 @@ fn apply_block_effect_segment(
                     .entity_inside(world, pos, entity, effect_collector);
             }
             !entity.is_removed()
-        })
-    else {
+        },
+    ) else {
         if entity.is_removed() {
             return BlockEffectSegmentResult::Removed;
         }
@@ -624,7 +638,7 @@ fn apply_effects_from_block_movements(entity: &dyn Entity, movements: &[EntityMo
 
     apply_step_on_block(entity, &world);
 
-    let mut visited_blocks = FxHashSet::default();
+    let mut block_effect_scratch = BlockEffectScratch::default();
     let mut effect_collector = InsideBlockEffectCollector::new();
     let before_effects = BlockEffectFireSnapshot::from_entity(entity);
     for movement in movements.iter().copied() {
@@ -647,8 +661,8 @@ fn apply_effects_from_block_movements(entity: &dyn Entity, movements: &[EntityMo
                     segment_from,
                     segment_to,
                     remaining_iterations,
+                    &mut block_effect_scratch,
                     &mut effect_collector,
-                    &mut visited_blocks,
                 ) {
                     BlockEffectSegmentResult::Complete(iterations) => {
                         remaining_iterations -= iterations;
@@ -660,8 +674,8 @@ fn apply_effects_from_block_movements(entity: &dyn Entity, movements: &[EntityMo
                             movement.to(),
                             movement.to(),
                             1,
+                            &mut block_effect_scratch,
                             &mut effect_collector,
-                            &mut visited_blocks,
                         );
                         finish_inside_block_effects(entity, &mut effect_collector, before_effects);
                         return;
@@ -680,8 +694,8 @@ fn apply_effects_from_block_movements(entity: &dyn Entity, movements: &[EntityMo
                 movement.from(),
                 movement.to(),
                 remaining_iterations,
+                &mut block_effect_scratch,
                 &mut effect_collector,
-                &mut visited_blocks,
             ) {
                 BlockEffectSegmentResult::Complete(iterations) => {
                     remaining_iterations -= iterations;
@@ -693,8 +707,8 @@ fn apply_effects_from_block_movements(entity: &dyn Entity, movements: &[EntityMo
                         movement.to(),
                         movement.to(),
                         1,
+                        &mut block_effect_scratch,
                         &mut effect_collector,
-                        &mut visited_blocks,
                     );
                     finish_inside_block_effects(entity, &mut effect_collector, before_effects);
                     return;
@@ -713,8 +727,8 @@ fn apply_effects_from_block_movements(entity: &dyn Entity, movements: &[EntityMo
                 movement.to(),
                 movement.to(),
                 1,
+                &mut block_effect_scratch,
                 &mut effect_collector,
-                &mut visited_blocks,
             );
             finish_inside_block_effects(entity, &mut effect_collector, before_effects);
             return;
@@ -771,9 +785,10 @@ pub use base::{
     DEFAULT_MAX_AIR_SUPPLY, DEFAULT_TICKS_REQUIRED_TO_FREEZE, EntityAmethystStepSound, EntityBase,
     EntityBaseLoad, EntityBaseSaveData, EntityBaseState, EntityFireFreezeState,
     EntityGroundContact, EntityMovement, EntityMovementEmission, EntityMovementFlags,
-    EntityMovementProgress, EntityVerticalMovementStateUpdate, MAX_ENTITY_TAGS,
-    PendingWorldChangeToken,
+    EntityMovementProgress, EntitySpatialChange, EntitySpatialCommitResult, EntitySpatialUpdate,
+    EntityVerticalMovementStateUpdate, MAX_ENTITY_TAGS, PendingWorldChangeToken,
 };
+pub(crate) use callback::{BoundEntityCallback, EntityCallbackToken};
 pub use callback::{
     EntityChunkCallback, EntityLevelCallback, InactiveEntityCallback, NullEntityCallback,
     PlayerEntityCallback, RemovalReason,
@@ -794,6 +809,7 @@ pub use living_base::{
     MobEffectSyncPacket,
 };
 pub use living_entity::LivingEntity;
+pub(crate) use manager::EntityManagerEffect;
 pub use manager::{
     AddEntityError, ChunkEntityLoadResult, EntityLifecycleChanges, EntityMoveError,
     EntityMoveUpdate, EntityOwnership, EntityVisibility, WorldEntityManager,

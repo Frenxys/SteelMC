@@ -1,5 +1,7 @@
 //! This module contains the `Server` struct, which is the main entry point for the server.
 mod broadcasting;
+/// Synchronous worker pool for bounded intra-tick gameplay computation.
+pub mod gameplay_compute;
 /// Tick-polled server jobs.
 pub mod jobs;
 mod packet_processor;
@@ -63,6 +65,9 @@ use crate::portal::{
 };
 use crate::random_sequences::DomainRandomSequences;
 use crate::scoreboard::DomainScoreboards;
+use crate::server::gameplay_compute::{
+    GameplayComputePool, gameplay_compute_threads_for_available,
+};
 use crate::server::jobs::{FnServerJob, ServerJobContext, ServerJobQueue};
 use crate::server::packet_processor::PacketProcessor;
 use crate::server::registry_cache::RegistryCache;
@@ -172,6 +177,10 @@ fn configured_chunk_encoding_threads(configured_threads: Option<usize>) -> Optio
 
 fn configured_packet_workers(configured_workers: Option<usize>) -> usize {
     packet_workers_for_available(configured_workers, available_worker_threads())
+}
+
+fn configured_gameplay_compute_threads(configured_threads: Option<usize>) -> usize {
+    gameplay_compute_threads_for_available(configured_threads, available_worker_threads())
 }
 
 fn available_worker_threads() -> usize {
@@ -611,6 +620,12 @@ impl Server {
                 .build()
                 .map_err(|e| format!("failed to create generation thread pool: {e}"))?
         });
+        let gameplay_compute_pool = Arc::new(
+            GameplayComputePool::new(configured_gameplay_compute_threads(
+                config.gameplay_compute_threads,
+            ))
+            .map_err(|error| format!("failed to create gameplay compute thread pool: {error}"))?,
+        );
         let chunk_encoding_pool = Arc::new({
             let mut builder =
                 ThreadPoolBuilder::new().thread_name(|i| format!("rayon-chunk-encode-{i}"));
@@ -700,6 +715,7 @@ impl Server {
                 },
                 generation_pool.clone(),
                 Arc::clone(&chunk_encoding_pool),
+                Arc::clone(&gameplay_compute_pool),
             )
             .await
             .map_err(|e| format!("failed to create world {}: {e}", world_entry.key))?;

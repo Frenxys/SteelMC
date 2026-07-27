@@ -12,7 +12,7 @@ use steel_registry::{
 use steel_utils::random::{Random, legacy_random::LegacyRandom, xoroshiro::Xoroshiro};
 use uuid::Uuid;
 
-use crate::behavior::init_behaviors;
+use crate::behavior::{BlockCollisionBoxes, ResolvedBlockCollisionShape, init_behaviors};
 use crate::chunk::chunk_holder::TickingReadiness;
 use crate::chunk::chunk_ticket_manager::{ChunkTicket, ChunkTicketLevel};
 use crate::entity::{EntityBase, entities::PigEntity};
@@ -20,7 +20,42 @@ use crate::test_support::{fresh_test_world, insert_ready_full_chunk, test_world}
 
 const FIRST_HALF: BlockLocalAabb = BlockLocalAabb::new(0.0, 0.0, 0.0, 0.5, 1.0, 1.0);
 const SECOND_HALF: BlockLocalAabb = BlockLocalAabb::new(0.5, 0.0, 0.0, 1.0, 1.0, 1.0);
+const ZERO_HEIGHT: BlockLocalAabb = BlockLocalAabb::new(0.0, 0.5, 0.0, 1.0, 0.5, 1.0);
 static SPLIT_BLOCK: &[BlockLocalAabb] = &[FIRST_HALF, SECOND_HALF];
+static DEGENERATE_BLOCK: &[BlockLocalAabb] = &[ZERO_HEIGHT];
+
+struct RaycastTestReader {
+    states: Vec<(BlockPos, BlockStateId)>,
+}
+
+impl RaycastTestReader {
+    fn new(states: impl IntoIterator<Item = (BlockPos, BlockStateId)>) -> Self {
+        Self {
+            states: states.into_iter().collect(),
+        }
+    }
+}
+
+impl LevelReader for RaycastTestReader {
+    fn get_block_state(&self, pos: BlockPos) -> BlockStateId {
+        self.states
+            .iter()
+            .find_map(|(candidate, state)| (*candidate == pos).then_some(*state))
+            .unwrap_or_else(|| vanilla_blocks::AIR.default_state())
+    }
+
+    fn raw_brightness(&self, _pos: BlockPos, _sky_darkening: u8) -> u8 {
+        0
+    }
+
+    fn min_y(&self) -> i32 {
+        -64
+    }
+
+    fn height(&self) -> i32 {
+        384
+    }
+}
 
 #[test]
 fn loot_random_uses_explicit_seed_before_named_sequence() {
@@ -576,6 +611,189 @@ fn clip_shape_reports_inside_start_like_vanilla_voxel_shape() {
 }
 
 #[test]
+fn boolean_collider_clip_matches_full_clip_at_vanilla_boundaries() {
+    init_test_registry();
+    init_behaviors();
+    let world = fresh_test_world("boolean_collider_clip_boundaries");
+    let pos = BlockPos::new(0, 64, 0);
+    let reader = RaycastTestReader::new([(pos, vanilla_blocks::STONE.default_state())]);
+    let cases = [
+        (DVec3::new(0.5, 64.5, 0.5), DVec3::new(0.5, 64.5, 0.5), true),
+        (
+            DVec3::new(-1.0, 64.5, 0.5),
+            DVec3::new(2.0, 64.5, 0.5),
+            false,
+        ),
+        (DVec3::new(1.0, 64.5, 0.5), DVec3::new(2.0, 64.5, 0.5), true),
+        (
+            DVec3::new(1.0, 64.5, 0.5),
+            DVec3::new(0.0, 64.5, 0.5),
+            false,
+        ),
+        (
+            DVec3::new(-1.0, 64.5, 0.5),
+            DVec3::new(0.0, 64.5, 0.5),
+            true,
+        ),
+        (
+            DVec3::new(-1.0, 65.0, 0.5),
+            DVec3::new(2.0, 65.0, 0.5),
+            true,
+        ),
+        (
+            DVec3::new(-1.0, 65.0 + 2.0e-7, 0.5),
+            DVec3::new(2.0, 65.0 + 2.0e-7, 0.5),
+            true,
+        ),
+    ];
+
+    for (start, end, expected_clear) in cases {
+        let full_miss = world
+            .clip_with_reader_and_collision_context(
+                &reader,
+                start,
+                end,
+                ClipBlockShape::Collider,
+                ClipFluid::None,
+                BlockCollisionContext::empty(),
+            )
+            .is_miss();
+        let boolean_clear = World::is_block_collision_path_clear_with_reader(
+            &reader,
+            start,
+            end,
+            BlockCollisionContext::empty(),
+        );
+
+        assert_eq!(boolean_clear, full_miss, "start={start:?}, end={end:?}");
+        assert_eq!(
+            boolean_clear, expected_clear,
+            "start={start:?}, end={end:?}"
+        );
+    }
+}
+
+#[test]
+fn clip_shape_matches_vanilla_face_and_transverse_epsilon_rules() {
+    let full_block = OffsetVoxelShape::without_offset(VoxelShape::FULL_BLOCK);
+
+    assert!(
+        World::clip_shape(
+            BlockPos::ZERO,
+            DVec3::new(1.0, 0.5, 0.5),
+            DVec3::new(2.0, 0.5, 0.5),
+            full_block,
+        )
+        .is_none()
+    );
+    assert!(
+        World::clip_shape(
+            BlockPos::ZERO,
+            DVec3::new(-1.0, 0.5, 0.5),
+            DVec3::new(0.0, 0.5, 0.5),
+            full_block,
+        )
+        .is_none()
+    );
+    assert!(
+        World::clip_shape(
+            BlockPos::ZERO,
+            DVec3::new(-1.0, 1.0, 0.5),
+            DVec3::new(2.0, 1.0, 0.5),
+            full_block,
+        )
+        .is_some()
+    );
+    assert!(
+        World::clip_shape(
+            BlockPos::ZERO,
+            DVec3::new(-1.0, 1.0 + 2.0e-7, 0.5),
+            DVec3::new(2.0, 1.0 + 2.0e-7, 0.5),
+            full_block,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn degenerate_collision_boxes_are_empty_for_resolution_and_clipping() {
+    let shape = OffsetVoxelShape::without_offset(VoxelShape::from_boxes(DEGENERATE_BLOCK));
+    let borrowed = ResolvedBlockCollisionShape::borrowed(shape);
+    let owned_boxes = [ZERO_HEIGHT].into_iter().collect::<BlockCollisionBoxes>();
+    let owned = ResolvedBlockCollisionShape::owned(owned_boxes);
+
+    assert!(borrowed.is_empty());
+    assert!(owned.is_empty());
+    assert_eq!(borrowed.iter().count(), 0);
+    assert_eq!(owned.iter().count(), 0);
+    assert!(borrowed.into_boxes().is_empty());
+    assert!(owned.into_boxes().is_empty());
+    assert!(
+        World::clip_shape(
+            BlockPos::ZERO,
+            DVec3::new(-1.0, 0.5, 0.5),
+            DVec3::new(2.0, 0.5, 0.5),
+            shape,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn boolean_collider_clip_matches_context_selected_and_multi_box_shapes() {
+    init_test_registry();
+    init_behaviors();
+    let world = fresh_test_world("boolean_collider_clip_shapes");
+    let pos = BlockPos::new(0, 64, 0);
+    let cases = [
+        (
+            vanilla_blocks::STONE_SLAB.default_state(),
+            BlockCollisionContext::empty(),
+            DVec3::new(-1.0, 64.25, 0.5),
+            DVec3::new(2.0, 64.25, 0.5),
+        ),
+        (
+            vanilla_blocks::STONE_SLAB.default_state(),
+            BlockCollisionContext::empty(),
+            DVec3::new(-1.0, 64.75, 0.5),
+            DVec3::new(2.0, 64.75, 0.5),
+        ),
+        (
+            vanilla_blocks::POWDER_SNOW.default_state(),
+            BlockCollisionContext::entity(64.0, false),
+            DVec3::new(-1.0, 64.5, 0.5),
+            DVec3::new(2.0, 64.5, 0.5),
+        ),
+        (
+            vanilla_blocks::POWDER_SNOW.default_state(),
+            BlockCollisionContext::entity(64.0, false).with_fall_distance(3.0),
+            DVec3::new(-1.0, 64.5, 0.5),
+            DVec3::new(2.0, 64.5, 0.5),
+        ),
+    ];
+
+    for (state, context, start, end) in cases {
+        let reader = RaycastTestReader::new([(pos, state)]);
+        let full_miss = world
+            .clip_with_reader_and_collision_context(
+                &reader,
+                start,
+                end,
+                ClipBlockShape::Collider,
+                ClipFluid::None,
+                context,
+            )
+            .is_miss();
+
+        assert_eq!(
+            World::is_block_collision_path_clear_with_reader(&reader, start, end, context,),
+            full_miss,
+            "state={state:?}, start={start:?}, end={end:?}",
+        );
+    }
+}
+
+#[test]
 fn clip_local_aabb_supports_runtime_fluid_heights() {
     let Some(hit) = World::clip_local_aabb(
         BlockPos::ZERO,
@@ -588,6 +806,76 @@ fn clip_local_aabb_supports_runtime_fluid_heights() {
 
     assert_eq!(hit.direction, Direction::Up);
     assert_vec3_close(hit.location, DVec3::new(0.5, 0.5, 0.5));
+}
+
+#[test]
+fn clip_routes_block_state_reads_through_the_injected_reader() {
+    init_test_registry();
+    init_behaviors();
+    let world = fresh_test_world("raycast_injected_reader");
+    let pos = BlockPos::new(0, 64, 0);
+    insert_ready_full_chunk(&world, ChunkPos::from_block_pos(pos));
+    let start = DVec3::new(-1.0, 64.5, 0.5);
+    let end = DVec3::new(2.0, 64.5, 0.5);
+    let stone_reader = RaycastTestReader::new([(pos, vanilla_blocks::STONE.default_state())]);
+
+    assert!(
+        world
+            .clip(start, end, ClipBlockShape::Collider, ClipFluid::None)
+            .is_miss()
+    );
+    let injected_hit = world.clip_with_reader(
+        &stone_reader,
+        start,
+        end,
+        ClipBlockShape::Collider,
+        ClipFluid::None,
+    );
+    assert!(!injected_hit.is_miss());
+    assert_eq!(injected_hit.block_pos, pos);
+
+    assert!(world.set_block(
+        pos,
+        vanilla_blocks::STONE.default_state(),
+        UpdateFlags::UPDATE_NONE,
+    ));
+    let air_reader = RaycastTestReader::new([]);
+    assert!(
+        world
+            .clip_with_reader(
+                &air_reader,
+                start,
+                end,
+                ClipBlockShape::Collider,
+                ClipFluid::None,
+            )
+            .is_miss()
+    );
+    assert!(
+        !world
+            .clip(start, end, ClipBlockShape::Collider, ClipFluid::None)
+            .is_miss()
+    );
+}
+
+#[test]
+fn fluid_clip_height_reads_the_above_state_from_the_injected_reader() {
+    init_test_registry();
+    init_behaviors();
+    let pos = BlockPos::new(0, 64, 0);
+    let water = FluidState::source(&vanilla_fluids::WATER);
+    let same_fluid_reader =
+        RaycastTestReader::new([(pos.above(), vanilla_blocks::WATER.default_state())]);
+    let air_reader = RaycastTestReader::new([]);
+
+    assert_eq!(
+        World::fluid_clip_height(&same_fluid_reader, pos, water).to_bits(),
+        1.0_f64.to_bits()
+    );
+    assert_eq!(
+        World::fluid_clip_height(&air_reader, pos, water).to_bits(),
+        f64::from(water.own_height()).to_bits()
+    );
 }
 
 #[test]

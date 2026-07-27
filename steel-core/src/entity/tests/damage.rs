@@ -89,7 +89,7 @@ fn damage_reductions_use_victim_attached_world() {
     let attacker: SharedEntity = attacker;
     let registration = attached_world
         .entity_manager()
-        .add_live_entity(attacker, EntityOwnership::External);
+        .add_live_entity(Arc::clone(&attacker), EntityOwnership::External);
     assert!(registration.is_ok());
 
     let victim = LivingFluidTestEntity::new_in_world(0.0, 0.0, true, attached_world);
@@ -105,7 +105,7 @@ fn damage_reductions_use_victim_attached_world() {
     let health = victim.get_health();
     let removed = attached_world
         .entity_manager()
-        .remove_live_entity(attacker_id, RemovalReason::Discarded);
+        .remove_live_entity(attacker.as_ref(), RemovalReason::Discarded);
 
     assert!(removed.is_some());
     assert!(damage_applied);

@@ -59,6 +59,32 @@ pub struct ClipHitResult {
     pub world_border_hit: bool,
 }
 
+struct BlockShapeClipRay {
+    from: DVec3,
+    difference: DVec3,
+    inside_test_point: DVec3,
+}
+
+enum BlockShapeBoxHit {
+    Inside,
+    Entry { t: f64, direction: Direction },
+}
+
+impl BlockShapeClipRay {
+    fn new(from: DVec3, to: DVec3) -> Option<Self> {
+        let difference = to - from;
+        if difference.length_squared() < 1.0e-7 {
+            return None;
+        }
+
+        Some(Self {
+            from,
+            difference,
+            inside_test_point: from + difference * 0.001,
+        })
+    }
+}
+
 impl ClipHitResult {
     /// Returns whether this clip missed all selected block and fluid shapes.
     #[must_use]
@@ -93,7 +119,21 @@ impl World {
         block_shape: ClipBlockShape,
         fluid: ClipFluid,
     ) -> ClipHitResult {
-        self.clip_with_collision_context(
+        self.clip_with_reader(self, start_pos, end_pos, block_shape, fluid)
+    }
+
+    /// Performs a block/fluid clip with block reads routed through `reader`.
+    #[must_use]
+    pub(crate) fn clip_with_reader<R: LevelReader>(
+        &self,
+        reader: &R,
+        start_pos: DVec3,
+        end_pos: DVec3,
+        block_shape: ClipBlockShape,
+        fluid: ClipFluid,
+    ) -> ClipHitResult {
+        self.clip_with_reader_and_collision_context(
+            reader,
             start_pos,
             end_pos,
             block_shape,
@@ -112,114 +152,86 @@ impl World {
         fluid: ClipFluid,
         entity: &dyn Entity,
     ) -> ClipHitResult {
+        self.clip_for_entity_with_reader(self, start_pos, end_pos, block_shape, fluid, entity)
+    }
+
+    /// Performs an entity-context clip with block reads routed through `reader`.
+    #[must_use]
+    pub(crate) fn clip_for_entity_with_reader<R: LevelReader>(
+        &self,
+        reader: &R,
+        start_pos: DVec3,
+        end_pos: DVec3,
+        block_shape: ClipBlockShape,
+        fluid: ClipFluid,
+        entity: &dyn Entity,
+    ) -> ClipHitResult {
         let context = BlockCollisionContext::entity(entity.position().y, entity.is_descending())
             .with_fall_distance(entity.fall_distance())
             .with_can_walk_on_powder_snow(entity.can_walk_on_powder_snow())
             .with_falling_block(entity.entity_type() == &vanilla_entities::FALLING_BLOCK);
-        self.clip_with_collision_context(start_pos, end_pos, block_shape, fluid, context)
+        self.clip_with_reader_and_collision_context(
+            reader,
+            start_pos,
+            end_pos,
+            block_shape,
+            fluid,
+            context,
+        )
     }
 
-    fn clip_with_collision_context(
+    pub(crate) fn clip_with_reader_and_collision_context<R: LevelReader>(
         &self,
+        reader: &R,
         start_pos: DVec3,
         end_pos: DVec3,
         block_shape: ClipBlockShape,
         fluid: ClipFluid,
         collision_context: BlockCollisionContext,
     ) -> ClipHitResult {
-        if start_pos == end_pos {
-            return Self::clip_miss(start_pos, end_pos);
-        }
-
-        let adjust = -1.0e-7f64;
-        let to = end_pos.lerp(start_pos, adjust);
-        let from = start_pos.lerp(end_pos, adjust);
-
-        let mut block = BlockPos::new(
-            from.x.floor() as i32,
-            from.y.floor() as i32,
-            from.z.floor() as i32,
-        );
-
-        if let Some(hit) = self.clip_block_and_fluid(
-            block,
-            start_pos,
-            end_pos,
-            block_shape,
-            fluid,
-            collision_context,
-        ) {
-            return hit;
-        }
-
-        let difference = to - from;
-
-        let step = difference.signum().as_ivec3();
-
-        let delta = DVec3::new(
-            if step.x == 0 {
-                f64::MAX
-            } else {
-                (f64::from(step.x)) / difference.x
-            },
-            if step.y == 0 {
-                f64::MAX
-            } else {
-                (f64::from(step.y)) / difference.y
-            },
-            if step.z == 0 {
-                f64::MAX
-            } else {
-                (f64::from(step.z)) / difference.z
-            },
-        );
-
-        let mut next = DVec3::new(
-            delta.x
-                * (if step.x > 0 {
-                    1.0 - (from.x - from.x.floor())
-                } else {
-                    from.x - from.x.floor()
-                }),
-            delta.y
-                * (if step.y > 0 {
-                    1.0 - (from.y - from.y.floor())
-                } else {
-                    from.y - from.y.floor()
-                }),
-            delta.z
-                * (if step.z > 0 {
-                    1.0 - (from.z - from.z.floor())
-                } else {
-                    from.z - from.z.floor()
-                }),
-        );
-
-        while next.x <= 1.0 || next.y <= 1.0 || next.z <= 1.0 {
-            if next.x < next.y && next.x < next.z {
-                block.0.x += step.x;
-                next.x += delta.x;
-            } else if next.y < next.z {
-                block.0.y += step.y;
-                next.y += delta.y;
-            } else {
-                block.0.z += step.z;
-                next.z += delta.z;
-            }
-
-            if let Some(hit) = self.clip_block_and_fluid(
+        Self::traverse_blocks(start_pos, end_pos, |block| {
+            self.clip_block_and_fluid(
+                reader,
                 block,
                 start_pos,
                 end_pos,
                 block_shape,
                 fluid,
                 collision_context,
-            ) {
-                return hit;
-            }
-        }
+            )
+        })
+        .unwrap_or_else(|| Self::clip_miss(start_pos, end_pos))
+    }
 
-        Self::clip_miss(start_pos, end_pos)
+    /// Returns whether Vanilla's collider-only, fluid-free clip would miss every block shape.
+    ///
+    /// This retains the authoritative block behavior and entity collision context while omitting
+    /// hit location, face, and interaction-shape work that cannot affect hit versus miss.
+    pub(crate) fn is_block_collision_path_clear_with_reader<R: LevelReader>(
+        reader: &R,
+        start_pos: DVec3,
+        end_pos: DVec3,
+        collision_context: BlockCollisionContext,
+    ) -> bool {
+        let Some(ray) = BlockShapeClipRay::new(start_pos, end_pos) else {
+            return true;
+        };
+        let block_behaviors = &*BLOCK_BEHAVIORS;
+
+        Self::traverse_blocks(start_pos, end_pos, |block_pos| {
+            let state = reader.get_collision_candidate_state(block_pos)?;
+            if block_behaviors.is_collision_shape_guaranteed_empty(state) {
+                return None;
+            }
+            let shape = block_behaviors
+                .get_behavior(state.get_block())
+                .get_resolved_collision_shape(state, reader, block_pos, collision_context);
+            if shape.is_empty() {
+                return None;
+            }
+            Self::shape_blocks_ray(block_pos, &ray, shape.iter()).then_some(())
+        })
+        .is_none()
     }
 
     /// Performs vanilla `CollisionGetter.clipIncludingBorder`.
@@ -231,7 +243,20 @@ impl World {
         block_shape: ClipBlockShape,
         fluid: ClipFluid,
     ) -> ClipHitResult {
-        let hit = self.clip(start_pos, end_pos, block_shape, fluid);
+        self.clip_including_border_with_reader(self, start_pos, end_pos, block_shape, fluid)
+    }
+
+    /// Performs `CollisionGetter.clipIncludingBorder` through an injected reader.
+    #[must_use]
+    pub(crate) fn clip_including_border_with_reader<R: LevelReader>(
+        &self,
+        reader: &R,
+        start_pos: DVec3,
+        end_pos: DVec3,
+        block_shape: ClipBlockShape,
+        fluid: ClipFluid,
+    ) -> ClipHitResult {
+        let hit = self.clip_with_reader(reader, start_pos, end_pos, block_shape, fluid);
         let border = self.world_border_snapshot();
         if border.is_within_bounds_with_margin(start_pos.x, start_pos.z, 0.0)
             && !border.is_within_bounds_with_margin(hit.location.x, hit.location.z, 0.0)
@@ -250,8 +275,101 @@ impl World {
         hit
     }
 
-    pub(super) fn clip_block_and_fluid(
+    /// Traverses block positions in Vanilla `BlockGetter.traverseBlocks` order.
+    fn traverse_blocks<T>(
+        start_pos: DVec3,
+        end_pos: DVec3,
+        mut visitor: impl FnMut(BlockPos) -> Option<T>,
+    ) -> Option<T> {
+        if start_pos == end_pos {
+            return None;
+        }
+
+        let adjust = -1.0e-7f64;
+        let to = end_pos.lerp(start_pos, adjust);
+        let from = start_pos.lerp(end_pos, adjust);
+        let mut block = BlockPos::new(
+            from.x.floor() as i32,
+            from.y.floor() as i32,
+            from.z.floor() as i32,
+        );
+
+        if let Some(result) = visitor(block) {
+            return Some(result);
+        }
+
+        let difference = to - from;
+        let step = difference.signum().as_ivec3();
+        let delta = DVec3::new(
+            if step.x == 0 {
+                f64::MAX
+            } else {
+                f64::from(step.x) / difference.x
+            },
+            if step.y == 0 {
+                f64::MAX
+            } else {
+                f64::from(step.y) / difference.y
+            },
+            if step.z == 0 {
+                f64::MAX
+            } else {
+                f64::from(step.z) / difference.z
+            },
+        );
+        let mut next = DVec3::new(
+            delta.x
+                * if step.x > 0 {
+                    1.0 - (from.x - from.x.floor())
+                } else {
+                    from.x - from.x.floor()
+                },
+            delta.y
+                * if step.y > 0 {
+                    1.0 - (from.y - from.y.floor())
+                } else {
+                    from.y - from.y.floor()
+                },
+            delta.z
+                * if step.z > 0 {
+                    1.0 - (from.z - from.z.floor())
+                } else {
+                    from.z - from.z.floor()
+                },
+        );
+
+        while next.x <= 1.0 || next.y <= 1.0 || next.z <= 1.0 {
+            if next.x < next.y {
+                if next.x < next.z {
+                    block.0.x += step.x;
+                    next.x += delta.x;
+                } else {
+                    block.0.z += step.z;
+                    next.z += delta.z;
+                }
+            } else if next.y < next.z {
+                block.0.y += step.y;
+                next.y += delta.y;
+            } else {
+                block.0.z += step.z;
+                next.z += delta.z;
+            }
+
+            if let Some(result) = visitor(block) {
+                return Some(result);
+            }
+        }
+
+        None
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the injected reader extends Vanilla's block/fluid clip inputs without changing their shape"
+    )]
+    pub(super) fn clip_block_and_fluid<R: LevelReader>(
         &self,
+        reader: &R,
         pos: BlockPos,
         from: DVec3,
         to: DVec3,
@@ -259,15 +377,15 @@ impl World {
         fluid: ClipFluid,
         collision_context: BlockCollisionContext,
     ) -> Option<ClipHitResult> {
-        let state = self.get_block_state(pos);
-        let block_result = Self::clip_boxes(
-            pos,
-            from,
-            to,
-            self.clip_block_shape(state, pos, block_shape, collision_context),
-        )
-        .map(|hit| Self::clip_with_interaction_override(pos, from, to, state, hit));
-        let fluid_result = self.clip_fluid_shape(pos, from, to, state, fluid);
+        let state = reader.get_block_state(pos);
+        let shape = self.clip_block_shape(reader, state, pos, block_shape, collision_context);
+        let block_result = Self::clip_boxes(pos, from, to, shape.iter())
+            .map(|hit| Self::clip_with_interaction_override(pos, from, to, state, hit));
+        let fluid_result = if fluid == ClipFluid::None {
+            None
+        } else {
+            Self::clip_fluid_shape(reader, pos, from, to, state, fluid)
+        };
 
         match (block_result, fluid_result) {
             (Some(block_hit), Some(fluid_hit)) => {
@@ -308,25 +426,28 @@ impl World {
         }
     }
 
-    pub(super) fn clip_block_shape(
+    pub(super) fn clip_block_shape<R: LevelReader>(
         &self,
+        reader: &R,
         state: BlockStateId,
         pos: BlockPos,
         shape: ClipBlockShape,
         collision_context: BlockCollisionContext,
-    ) -> BlockCollisionBoxes {
+    ) -> ResolvedBlockCollisionShape {
         match shape {
             ClipBlockShape::Collider => BLOCK_BEHAVIORS
                 .get_behavior(state.get_block())
-                .get_collision_boxes(state, self, pos, collision_context),
-            ClipBlockShape::Outline => state.get_outline_shape_at(pos).iter().collect(),
-            ClipBlockShape::Visual => state.get_visual_shape_at(pos).iter().collect(),
+                .get_resolved_collision_shape(state, reader, pos, collision_context),
+            ClipBlockShape::Outline => {
+                ResolvedBlockCollisionShape::borrowed(state.get_outline_shape_at(pos))
+            }
+            ClipBlockShape::Visual => {
+                ResolvedBlockCollisionShape::borrowed(state.get_visual_shape_at(pos))
+            }
             ClipBlockShape::FallDamageResetting { entity_is_player } => {
-                OffsetVoxelShape::without_offset(
+                ResolvedBlockCollisionShape::borrowed(OffsetVoxelShape::without_offset(
                     self.fall_damage_resetting_shape(state, entity_is_player),
-                )
-                .iter()
-                .collect()
+                ))
             }
         }
     }
@@ -358,8 +479,8 @@ impl World {
         VoxelShape::EMPTY
     }
 
-    pub(super) fn clip_fluid_shape(
-        &self,
+    pub(super) fn clip_fluid_shape<R: LevelReader>(
+        reader: &R,
         pos: BlockPos,
         from: DVec3,
         to: DVec3,
@@ -377,7 +498,7 @@ impl World {
             return None;
         }
 
-        let height = self.fluid_clip_height(pos, fluid_state);
+        let height = Self::fluid_clip_height(reader, pos, fluid_state);
         Self::clip_local_aabb(
             pos,
             from,
@@ -386,8 +507,12 @@ impl World {
         )
     }
 
-    pub(super) fn fluid_clip_height(&self, pos: BlockPos, fluid_state: FluidState) -> f64 {
-        let above_fluid = self.get_block_state(pos.above()).get_fluid_state();
+    pub(super) fn fluid_clip_height<R: LevelReader>(
+        reader: &R,
+        pos: BlockPos,
+        fluid_state: FluidState,
+    ) -> f64 {
+        let above_fluid = reader.get_block_state(pos.above()).get_fluid_state();
         Self::fluid_clip_height_from_above(fluid_state, above_fluid)
     }
 
@@ -420,7 +545,57 @@ impl World {
         to: DVec3,
         boxes: impl IntoIterator<Item = BlockLocalAabb>,
     ) -> Option<ClipHitResult> {
-        if (to - from).length_squared() < 1.0e-7 {
+        let ray = BlockShapeClipRay::new(from, to)?;
+
+        let mut closest: Option<(f64, Direction)> = None;
+
+        for shape in boxes {
+            match Self::clip_shape_box(block_pos, &ray, shape) {
+                Some(BlockShapeBoxHit::Inside) => {
+                    return Some(ClipHitResult {
+                        location: ray.inside_test_point,
+                        direction: Self::approximate_nearest_direction(ray.difference).opposite(),
+                        block_pos,
+                        miss: false,
+                        inside: true,
+                        world_border_hit: false,
+                    });
+                }
+                Some(BlockShapeBoxHit::Entry { t, direction })
+                    if closest.is_none_or(|(best_t, _)| t < best_t) =>
+                {
+                    closest = Some((t, direction));
+                }
+                Some(BlockShapeBoxHit::Entry { .. }) | None => {}
+            }
+        }
+
+        closest.map(|(t, direction)| ClipHitResult {
+            location: ray.from + ray.difference * t,
+            direction,
+            block_pos,
+            miss: false,
+            inside: false,
+            world_border_hit: false,
+        })
+    }
+
+    fn shape_blocks_ray(
+        block_pos: BlockPos,
+        ray: &BlockShapeClipRay,
+        boxes: impl IntoIterator<Item = BlockLocalAabb>,
+    ) -> bool {
+        boxes
+            .into_iter()
+            .any(|shape| Self::clip_shape_box(block_pos, ray, shape).is_some())
+    }
+
+    fn clip_shape_box(
+        block_pos: BlockPos,
+        ray: &BlockShapeClipRay,
+        shape: BlockLocalAabb,
+    ) -> Option<BlockShapeBoxHit> {
+        if shape.is_empty() {
             return None;
         }
 
@@ -429,40 +604,14 @@ impl World {
             f64::from(block_pos.y()),
             f64::from(block_pos.z()),
         );
-        let inside_test_point = from + (to - from) * 0.001;
-        let mut closest: Option<(f64, Direction)> = None;
-
-        for shape in boxes {
-            if Self::local_aabb_contains_world_point(shape, block_vec, inside_test_point) {
-                return Some(ClipHitResult {
-                    location: inside_test_point,
-                    direction: Self::approximate_nearest_direction(to - from).opposite(),
-                    block_pos,
-                    miss: false,
-                    inside: true,
-                    world_border_hit: false,
-                });
-            }
-            let world_min = DVec3::new(shape.min_x(), shape.min_y(), shape.min_z()) + block_vec;
-            let world_max = DVec3::new(shape.max_x(), shape.max_y(), shape.max_z()) + block_vec;
-
-            if let Some(hit) = Self::intersects_aabb_with_t(from, to, world_min, world_max)
-                && hit.0 > 0.0
-                && hit.0 < 1.0
-                && closest.is_none_or(|(best_t, _)| hit.0 < best_t)
-            {
-                closest = Some(hit);
-            }
+        if Self::local_aabb_contains_world_point(shape, block_vec, ray.inside_test_point) {
+            return Some(BlockShapeBoxHit::Inside);
         }
 
-        closest.map(|(t, direction)| ClipHitResult {
-            location: from + (to - from) * t,
-            direction,
-            block_pos,
-            miss: false,
-            inside: false,
-            world_border_hit: false,
-        })
+        let world_min = DVec3::new(shape.min_x(), shape.min_y(), shape.min_z()) + block_vec;
+        let world_max = DVec3::new(shape.max_x(), shape.max_y(), shape.max_z()) + block_vec;
+        Self::intersects_aabb_with_delta(ray.from, ray.difference, world_min, world_max)
+            .map(|(t, direction)| BlockShapeBoxHit::Entry { t, direction })
     }
 
     pub(super) fn clip_local_aabb(
@@ -475,43 +624,25 @@ impl World {
             return None;
         }
 
-        if (to - from).length_squared() < 1.0e-7 {
-            return None;
-        }
-
-        let block_vec = DVec3::new(
-            f64::from(block_pos.x()),
-            f64::from(block_pos.y()),
-            f64::from(block_pos.z()),
-        );
-        let inside_test_point = from + (to - from) * 0.001;
-        if Self::local_aabb_contains_world_point(aabb, block_vec, inside_test_point) {
-            return Some(ClipHitResult {
-                location: inside_test_point,
-                direction: Self::approximate_nearest_direction(to - from).opposite(),
+        let ray = BlockShapeClipRay::new(from, to)?;
+        match Self::clip_shape_box(block_pos, &ray, aabb)? {
+            BlockShapeBoxHit::Inside => Some(ClipHitResult {
+                location: ray.inside_test_point,
+                direction: Self::approximate_nearest_direction(ray.difference).opposite(),
                 block_pos,
                 miss: false,
                 inside: true,
                 world_border_hit: false,
-            });
+            }),
+            BlockShapeBoxHit::Entry { t, direction } => Some(ClipHitResult {
+                location: ray.from + ray.difference * t,
+                direction,
+                block_pos,
+                miss: false,
+                inside: false,
+                world_border_hit: false,
+            }),
         }
-
-        let world_min = DVec3::new(aabb.min_x(), aabb.min_y(), aabb.min_z()) + block_vec;
-        let world_max = DVec3::new(aabb.max_x(), aabb.max_y(), aabb.max_z()) + block_vec;
-        Self::intersects_aabb_with_t(from, to, world_min, world_max).and_then(|(t, direction)| {
-            if t > 0.0 && t < 1.0 {
-                Some(ClipHitResult {
-                    location: from + (to - from) * t,
-                    direction,
-                    block_pos,
-                    miss: false,
-                    inside: false,
-                    world_border_hit: false,
-                })
-            } else {
-                None
-            }
-        })
     }
 
     pub(super) fn local_aabb_contains_world_point(
@@ -520,13 +651,7 @@ impl World {
         point: DVec3,
     ) -> bool {
         let local = point - block_vec;
-        !aabb.is_empty()
-            && local.x >= aabb.min_x()
-            && local.x <= aabb.max_x()
-            && local.y >= aabb.min_y()
-            && local.y <= aabb.max_y()
-            && local.z >= aabb.min_z()
-            && local.z <= aabb.max_z()
+        !aabb.is_empty() && aabb.contains(local)
     }
 
     pub(super) fn clip_miss(from: DVec3, to: DVec3) -> ClipHitResult {
@@ -560,80 +685,139 @@ impl World {
         result
     }
 
-    /// Ray-AABB intersection returning the entry t-parameter and the hit face.
-    ///
-    /// Returns `Some((tmin, direction))` where `tmin` is the ray parameter at entry
-    /// and `direction` is the face normal pointing away from the hit surface.
-    /// Returns `None` if the AABB is missed or entirely behind the ray origin.
-    ///
-    /// Used internally by [`ray_outline_check`] to pick the *closest* hit across
-    /// a multi-box voxel shape, matching vanilla's `VoxelShape.clip()` behavior.
-    pub(super) fn intersects_aabb_with_t(
+    /// Returns Vanilla's segment entry parameter and face for one AABB.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the linear axis order mirrors Vanilla's parity-sensitive clip-point sequence"
+    )]
+    fn intersects_aabb_with_delta(
         start: DVec3,
-        end: DVec3,
+        difference: DVec3,
         min: DVec3,
         max: DVec3,
     ) -> Option<(f64, Direction)> {
-        let dir = end - start;
+        let mut best_t = 1.0;
+        let mut hit_direction = None;
 
-        let mut tmin = f64::NEG_INFINITY;
-        let mut tmax = f64::INFINITY;
-        let mut hit_dir = None;
-
-        macro_rules! slab {
-            ($start:expr, $dir:expr, $min:expr, $max:expr, $neg:expr, $pos:expr) => {{
-                if $dir.abs() < 1e-8 {
-                    if $start < $min || $start > $max {
-                        return None;
-                    }
-                } else {
-                    let inv = 1.0 / $dir;
-                    let mut t1 = ($min - $start) * inv;
-                    let mut t2 = ($max - $start) * inv;
-
-                    let dir_hit = if t1 > t2 {
-                        std::mem::swap(&mut t1, &mut t2);
-                        $pos
-                    } else {
-                        $neg
-                    };
-
-                    if t1 > tmin {
-                        tmin = t1;
-                        hit_dir = Some(dir_hit);
-                    }
-
-                    tmax = tmax.min(t2);
-                    if tmin > tmax {
-                        return None;
-                    }
+        macro_rules! clip_point {
+            (
+                $da:expr, $db:expr, $dc:expr, $point:expr,
+                $min_b:expr, $max_b:expr, $min_c:expr, $max_c:expr,
+                $direction:expr, $from_a:expr, $from_b:expr, $from_c:expr
+            ) => {{
+                let t = ($point - $from_a) / $da;
+                let point_b = $from_b + t * $db;
+                let point_c = $from_c + t * $dc;
+                if 0.0 < t
+                    && t < best_t
+                    && $min_b - 1.0e-7 < point_b
+                    && point_b < $max_b + 1.0e-7
+                    && $min_c - 1.0e-7 < point_c
+                    && point_c < $max_c + 1.0e-7
+                {
+                    best_t = t;
+                    hit_direction = Some($direction);
                 }
             }};
         }
 
-        slab!(
-            start.x,
-            dir.x,
-            min.x,
-            max.x,
-            Direction::West,
-            Direction::East
-        );
-        slab!(start.y, dir.y, min.y, max.y, Direction::Down, Direction::Up);
-        slab!(
-            start.z,
-            dir.z,
-            min.z,
-            max.z,
-            Direction::North,
-            Direction::South
-        );
-
-        if tmax < 0.0 {
-            None
-        } else {
-            hit_dir.map(|d| (tmin, d))
+        if difference.x > 1.0e-7 {
+            clip_point!(
+                difference.x,
+                difference.y,
+                difference.z,
+                min.x,
+                min.y,
+                max.y,
+                min.z,
+                max.z,
+                Direction::West,
+                start.x,
+                start.y,
+                start.z
+            );
+        } else if difference.x < -1.0e-7 {
+            clip_point!(
+                difference.x,
+                difference.y,
+                difference.z,
+                max.x,
+                min.y,
+                max.y,
+                min.z,
+                max.z,
+                Direction::East,
+                start.x,
+                start.y,
+                start.z
+            );
         }
+
+        if difference.y > 1.0e-7 {
+            clip_point!(
+                difference.y,
+                difference.z,
+                difference.x,
+                min.y,
+                min.z,
+                max.z,
+                min.x,
+                max.x,
+                Direction::Down,
+                start.y,
+                start.z,
+                start.x
+            );
+        } else if difference.y < -1.0e-7 {
+            clip_point!(
+                difference.y,
+                difference.z,
+                difference.x,
+                max.y,
+                min.z,
+                max.z,
+                min.x,
+                max.x,
+                Direction::Up,
+                start.y,
+                start.z,
+                start.x
+            );
+        }
+
+        if difference.z > 1.0e-7 {
+            clip_point!(
+                difference.z,
+                difference.x,
+                difference.y,
+                min.z,
+                min.x,
+                max.x,
+                min.y,
+                max.y,
+                Direction::North,
+                start.z,
+                start.x,
+                start.y
+            );
+        } else if difference.z < -1.0e-7 {
+            clip_point!(
+                difference.z,
+                difference.x,
+                difference.y,
+                max.z,
+                min.x,
+                max.x,
+                min.y,
+                max.y,
+                Direction::South,
+                start.z,
+                start.x,
+                start.y
+            );
+        }
+
+        hit_direction.map(|direction| (best_t, direction))
     }
 
     /// Performs a raytrace in the world.

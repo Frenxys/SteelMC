@@ -93,6 +93,7 @@ impl ServerConfig {
             packet_workers: self.threads.packet_workers,
             chunk_generation_threads: self.threads.chunk_generation,
             chunk_encoding_threads: self.threads.chunk_encoding,
+            gameplay_compute_threads: self.threads.gameplay_compute,
         }
     }
 }
@@ -113,6 +114,8 @@ pub struct ThreadConfig {
     pub chunk_generation: Option<usize>,
     /// Worker threads for the Rayon chunk encoding pool.
     pub chunk_encoding: Option<usize>,
+    /// Worker threads for synchronous intra-tick gameplay computation.
+    pub gameplay_compute: Option<usize>,
 }
 
 /// Validates the server configuration.

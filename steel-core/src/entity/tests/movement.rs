@@ -18,9 +18,11 @@ fn move_without_physics_returns_none_when_position_commit_rejects() {
     init_test_registry();
     let entity = PushableTestEntity::shared(1, DVec3::ZERO);
     entity.set_no_physics(true);
-    entity.set_level_callback(Arc::new(CommitRejectingCallback {
-        entity_id: entity.id(),
-    }));
+    entity
+        .base()
+        .replace_level_callback(Arc::new(CommitRejectingCallback {
+            entity_id: entity.id(),
+        }));
 
     let result = entity.move_without_physics(DVec3::new(1.0, 0.0, 0.0));
 

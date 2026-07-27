@@ -897,7 +897,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
         let local_x = Self::local_coord(pos.x());
         let local_y = Self::local_coord(pos.y());
         let local_z = Self::local_coord(pos.z());
-        let old_state = section_guard.states.get(local_x, local_y, local_z);
+        let old_state = section_guard.states().get(local_x, local_y, local_z);
         let Some(state) = replacement(old_state) else {
             Self::record_ore_write_time(ore_profile, started_at);
             return false;
@@ -968,7 +968,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
                 let local_x = usize::from(pos.x());
                 let local_y = usize::from(pos.y());
                 let local_z = usize::from(pos.z());
-                let old_state = section_guard.states.get(local_x, local_y, local_z);
+                let old_state = section_guard.states().get(local_x, local_y, local_z);
                 if let Some(state) = replacement(old_state) {
                     let old_state = Self::set_bulk_block_state(
                         &chunk.guard,
@@ -988,7 +988,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
                 let local_x = usize::from(pos.x());
                 let local_y = usize::from(pos.y());
                 let local_z = usize::from(pos.z());
-                let old_state = section_guard.states.get(local_x, local_y, local_z);
+                let old_state = section_guard.states().get(local_x, local_y, local_z);
                 if let Some(state) = replacement(old_state) {
                     let old_state = Self::set_bulk_block_state(
                         &chunk.guard,
@@ -1056,12 +1056,12 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
         } else {
             section.read()
         };
-        if section_guard.states.has_only_air() {
+        if section_guard.states().has_only_air() {
             Self::record_ore_read_time(ore_profile, started_at);
             return air;
         }
 
-        let state = section_guard.states.get(
+        let state = section_guard.states().get(
             Self::local_coord(pos.x()),
             Self::local_coord(pos.y()),
             Self::local_coord(pos.z()),

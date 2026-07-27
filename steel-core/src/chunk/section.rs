@@ -4,7 +4,7 @@ use std::{
     io::Cursor,
     ops::{Deref, DerefMut},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -15,7 +15,10 @@ use steel_registry::vanilla_biomes;
 use steel_registry::{REGISTRY, RegistryEntry};
 use steel_utils::{BlockPos, BlockStateId, ChunkPos, locks::SyncRwLock, serial::WriteTo};
 
-use crate::chunk::paletted_container::{BiomePalette, BlockPalette};
+use crate::{
+    behavior::BLOCK_BEHAVIORS,
+    chunk::paletted_container::{BiomePalette, BlockPalette},
+};
 
 /// Lock-free index of sections containing randomly-ticking blocks or fluids.
 ///
@@ -235,6 +238,139 @@ pub(crate) struct BlockStateSectionCounts {
 }
 
 const BLOCKS_PER_SECTION: u16 = 16 * 16 * 16;
+const COLLISION_OCCUPANCY_WORDS: usize = BlockPalette::VOLUME / u64::BITS as usize;
+
+/// Behavior-authoritative collision candidates for one chunk section.
+///
+/// The common uniform cases do not allocate. Mixed sections pay for one bit per
+/// block and retain a count so tracked writes can collapse them back to a
+/// uniform representation.
+#[derive(Debug)]
+enum CollisionOccupancy {
+    AllGuaranteedEmpty,
+    AllCandidates,
+    Mixed {
+        candidates: Box<[u64; COLLISION_OCCUPANCY_WORDS]>,
+        candidate_count: u16,
+    },
+}
+
+impl CollisionOccupancy {
+    fn from_states(states: &BlockPalette) -> Self {
+        let block_behaviors = &*BLOCK_BEHAVIORS;
+        let has_guaranteed_empty =
+            states.maybe_has(|state| block_behaviors.is_collision_shape_guaranteed_empty(state));
+        let has_candidate =
+            states.maybe_has(|state| !block_behaviors.is_collision_shape_guaranteed_empty(state));
+
+        if !has_candidate {
+            return Self::AllGuaranteedEmpty;
+        }
+        if !has_guaranteed_empty {
+            return Self::AllCandidates;
+        }
+
+        let mut candidates = Box::new([0; COLLISION_OCCUPANCY_WORDS]);
+        let mut candidate_count = 0;
+        for index in 0..BlockPalette::VOLUME {
+            if block_behaviors.is_collision_shape_guaranteed_empty(states.get_at_index(index)) {
+                continue;
+            }
+            candidates[index / u64::BITS as usize] |= 1_u64 << (index % u64::BITS as usize);
+            candidate_count += 1;
+        }
+        Self::Mixed {
+            candidates,
+            candidate_count,
+        }
+    }
+
+    #[inline]
+    fn contains(&self, index: usize) -> bool {
+        match self {
+            Self::AllGuaranteedEmpty => false,
+            Self::AllCandidates => true,
+            Self::Mixed { candidates, .. } => {
+                candidates[index / u64::BITS as usize] & (1_u64 << (index % u64::BITS as usize))
+                    != 0
+            }
+        }
+    }
+
+    fn contains_in_box(
+        &self,
+        min_x: usize,
+        max_x: usize,
+        min_y: usize,
+        max_y: usize,
+        min_z: usize,
+        max_z: usize,
+    ) -> bool {
+        match self {
+            Self::AllGuaranteedEmpty => false,
+            Self::AllCandidates => true,
+            Self::Mixed { candidates, .. } => {
+                let x_width = max_x - min_x + 1;
+                let x_mask = u64::MAX >> (u64::BITS as usize - x_width);
+                for y in min_y..=max_y {
+                    for z in min_z..=max_z {
+                        let first_index = min_x + z * 16 + y * 16 * 16;
+                        let shifted_mask = x_mask << (first_index % u64::BITS as usize);
+                        if candidates[first_index / u64::BITS as usize] & shifted_mask != 0 {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    fn set(&mut self, index: usize, candidate: bool) {
+        if self.contains(index) == candidate {
+            return;
+        }
+
+        match self {
+            Self::AllGuaranteedEmpty => {
+                let mut candidates = Box::new([0; COLLISION_OCCUPANCY_WORDS]);
+                candidates[index / u64::BITS as usize] |= 1_u64 << (index % u64::BITS as usize);
+                *self = Self::Mixed {
+                    candidates,
+                    candidate_count: 1,
+                };
+            }
+            Self::AllCandidates => {
+                let mut candidates = Box::new([u64::MAX; COLLISION_OCCUPANCY_WORDS]);
+                candidates[index / u64::BITS as usize] &= !(1_u64 << (index % u64::BITS as usize));
+                *self = Self::Mixed {
+                    candidates,
+                    candidate_count: BLOCKS_PER_SECTION - 1,
+                };
+            }
+            Self::Mixed {
+                candidates,
+                candidate_count,
+            } => {
+                let bit = 1_u64 << (index % u64::BITS as usize);
+                let word = &mut candidates[index / u64::BITS as usize];
+                if candidate {
+                    *word |= bit;
+                    *candidate_count += 1;
+                    if *candidate_count == BLOCKS_PER_SECTION {
+                        *self = Self::AllCandidates;
+                    }
+                } else {
+                    *word &= !bit;
+                    *candidate_count -= 1;
+                    if *candidate_count == 0 {
+                        *self = Self::AllGuaranteedEmpty;
+                    }
+                }
+            }
+        }
+    }
+}
 
 impl Sections {
     /// Creates a new `Sections` from a box of owned `ChunkSection`s.
@@ -386,6 +522,7 @@ impl Sections {
         while i < blocks.len() {
             let section_idx = blocks[i].0 / DIM;
             let mut guard = self.sections[section_idx].write();
+            guard.invalidate_collision_occupancy();
             guard.states.enter_building_mode();
             let Some(cube) = guard.states.as_building_slice_mut() else {
                 unreachable!("just entered building mode")
@@ -414,6 +551,7 @@ impl Sections {
         while i < blocks.len() {
             let section_idx = blocks[i].1 / DIM;
             let mut guard = self.sections[section_idx].write();
+            guard.invalidate_collision_occupancy();
             guard.states.enter_building_mode();
             let Some(cube) = guard.states.as_building_slice_mut() else {
                 // enter_building_mode just transitioned to Building.
@@ -492,7 +630,7 @@ impl Sections {
 #[derive(Debug)]
 pub struct ChunkSection {
     /// The block states in the section.
-    pub states: BlockPalette,
+    states: BlockPalette,
     /// The biomes in the section.
     pub biomes: BiomePalette,
     /// Number of non-air blocks in this section (0-4096).
@@ -505,6 +643,8 @@ pub struct ChunkSection {
     pub ticking_block_count: u16,
     /// Number of randomly-ticking fluids in this section (0-4096).
     ticking_fluid_count: u16,
+    /// Lazily-built, non-serialized collision-candidate occupancy.
+    collision_occupancy: OnceLock<CollisionOccupancy>,
 }
 
 impl ChunkSection {
@@ -521,6 +661,7 @@ impl ChunkSection {
             fluid_count: 0,
             ticking_block_count: 0,
             ticking_fluid_count: 0,
+            collision_occupancy: OnceLock::new(),
         }
     }
 
@@ -535,7 +676,50 @@ impl ChunkSection {
             fluid_count: 0,
             ticking_block_count: 0,
             ticking_fluid_count: 0,
+            collision_occupancy: OnceLock::new(),
         }
+    }
+
+    /// Returns the block-state palette for read-only inspection.
+    #[must_use]
+    pub const fn states(&self) -> &BlockPalette {
+        &self.states
+    }
+
+    /// Returns the exact state when this cell may have a collision shape.
+    ///
+    /// `None` is authoritative: the registered behavior guarantees an empty
+    /// collision shape for the current state.
+    #[inline]
+    pub(crate) fn collision_candidate_state(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+    ) -> Option<BlockStateId> {
+        let index = x + z * 16 + y * 16 * 16;
+        let occupancy = self
+            .collision_occupancy
+            .get_or_init(|| CollisionOccupancy::from_states(&self.states));
+        occupancy
+            .contains(index)
+            .then(|| self.states.get_at_index(index))
+    }
+
+    /// Returns whether an inclusive local cuboid contains any collision candidate.
+    #[inline]
+    pub(crate) fn has_collision_candidate_in_box(
+        &self,
+        min_x: usize,
+        max_x: usize,
+        min_y: usize,
+        max_y: usize,
+        min_z: usize,
+        max_z: usize,
+    ) -> bool {
+        self.collision_occupancy
+            .get_or_init(|| CollisionOccupancy::from_states(&self.states))
+            .contains_in_box(min_x, max_x, min_y, max_y, min_z, max_z)
     }
 
     /// Returns true if this section contains no non-air blocks.
@@ -745,6 +929,10 @@ impl ChunkSection {
             let old_counts = Self::block_state_section_counts(old_state);
             let new_counts = Self::block_state_section_counts(new_state);
             self.apply_count_change(old_counts, new_counts);
+            if let Some(occupancy) = self.collision_occupancy.get_mut() {
+                let candidate = !BLOCK_BEHAVIORS.is_collision_shape_guaranteed_empty(new_state);
+                occupancy.set(x + z * 16 + y * 16 * 16, candidate);
+            }
         }
 
         old_state
@@ -762,8 +950,13 @@ impl ChunkSection {
         z: usize,
         new_state: BlockStateId,
     ) -> BlockStateId {
+        self.invalidate_collision_occupancy();
         self.states.enter_building_mode();
         self.states.set(x, y, z, new_state)
+    }
+
+    fn invalidate_collision_occupancy(&mut self) {
+        let _previous = self.collision_occupancy.take();
     }
 
     /// Returns the cached-counter traits for a block state.
@@ -992,6 +1185,55 @@ mod tests {
             section.finalize_generation_counts_if_needed();
         }
         assert_eq!(bits.next(0), Some(0));
+    }
+
+    #[test]
+    fn collision_occupancy_tracks_regular_writes_and_invalidates_raw_writes() {
+        init_test_behaviors();
+        let air = vanilla_blocks::AIR.default_state();
+        let stone = vanilla_blocks::STONE.default_state();
+        let sections = Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice());
+
+        {
+            let section = sections.sections[0].read();
+            assert_eq!(section.collision_candidate_state(3, 4, 5), None);
+            assert!(matches!(
+                section.collision_occupancy.get(),
+                Some(CollisionOccupancy::AllGuaranteedEmpty)
+            ));
+        }
+        {
+            let mut section = sections.sections[0].write();
+            section.set_block_state(3, 4, 5, stone);
+            assert_eq!(section.collision_candidate_state(3, 4, 5), Some(stone));
+            assert!(matches!(
+                section.collision_occupancy.get(),
+                Some(CollisionOccupancy::Mixed {
+                    candidate_count: 1,
+                    ..
+                })
+            ));
+
+            section.set_block_state(3, 4, 5, air);
+            assert_eq!(section.collision_candidate_state(3, 4, 5), None);
+            assert!(matches!(
+                section.collision_occupancy.get(),
+                Some(CollisionOccupancy::AllGuaranteedEmpty)
+            ));
+        }
+
+        sections.write_block_batch(&[(3, 4, 5, stone)]);
+        {
+            let section = sections.sections[0].read();
+            assert!(section.collision_occupancy.get().is_none());
+            assert_eq!(section.collision_candidate_state(3, 4, 5), Some(stone));
+        }
+        {
+            let mut section = sections.sections[0].write();
+            section.set_block_state_for_generation(3, 4, 5, air);
+            assert!(section.collision_occupancy.get().is_none());
+            assert_eq!(section.collision_candidate_state(3, 4, 5), None);
+        }
     }
 
     #[test]

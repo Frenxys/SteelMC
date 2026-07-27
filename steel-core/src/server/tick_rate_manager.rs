@@ -54,6 +54,10 @@ pub struct TickRateManager {
     // Tick time tracking (vanilla-style)
     /// Rolling buffer of the last 100 tick times in nanoseconds.
     tick_times_nanos: [u64; TICK_STATS_SPAN],
+    /// Number of valid entries currently held in `tick_times_nanos`.
+    tick_time_sample_count: usize,
+    /// Ring position that receives the next completed tick duration.
+    next_tick_time_sample_index: usize,
     /// Aggregated sum of tick times for fast average calculation.
     aggregated_tick_times_nanos: u64,
     /// Exponentially smoothed tick time in milliseconds.
@@ -77,6 +81,8 @@ impl TickRateManager {
             sprint_time_spent: 0,
             previous_is_frozen: false,
             tick_times_nanos: [0; TICK_STATS_SPAN],
+            tick_time_sample_count: 0,
+            next_tick_time_sample_index: 0,
             aggregated_tick_times_nanos: 0,
             smoothed_tick_time_ms: 0.0,
         }
@@ -262,12 +268,14 @@ impl TickRateManager {
     /// Records the duration of a tick in nanoseconds.
     /// This should be called at the end of each server tick.
     pub fn record_tick_time(&mut self, tick_time_nanos: u64) {
-        let tick_index = (self.tick_count as usize) % TICK_STATS_SPAN;
+        let tick_index = self.next_tick_time_sample_index;
 
         // Remove old value from aggregated sum, add new value
         self.aggregated_tick_times_nanos -= self.tick_times_nanos[tick_index];
         self.aggregated_tick_times_nanos += tick_time_nanos;
         self.tick_times_nanos[tick_index] = tick_time_nanos;
+        self.next_tick_time_sample_index = (tick_index + 1) % TICK_STATS_SPAN;
+        self.tick_time_sample_count = (self.tick_time_sample_count + 1).min(TICK_STATS_SPAN);
 
         // Update smoothed tick time (vanilla uses 80/20 exponential smoothing)
         let tick_time_ms = tick_time_nanos as f32 / NANOS_PER_MS as f32;
@@ -278,8 +286,7 @@ impl TickRateManager {
     /// Returns the average tick time in nanoseconds over the last 100 ticks.
     #[must_use]
     pub fn get_average_tick_time_nanos(&self) -> u64 {
-        let sample_count = self.tick_count.min(TICK_STATS_SPAN as u64).max(1);
-        self.aggregated_tick_times_nanos / sample_count
+        self.aggregated_tick_times_nanos / self.tick_time_sample_count.max(1) as u64
     }
 
     /// Returns the average tick time in milliseconds over the last 100 ticks.
@@ -312,6 +319,16 @@ impl TickRateManager {
         self.tick_times_nanos
     }
 
+    /// Returns the slowest completed tick in the rolling window, in nanoseconds.
+    #[must_use]
+    pub fn get_max_tick_time_nanos(&self) -> u64 {
+        self.tick_times_nanos[..self.tick_time_sample_count]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or_default()
+    }
+
     // Percentile methods (vanilla-style, used by /tick query)
 
     /// Returns the P50 (median) tick time in milliseconds.
@@ -334,8 +351,8 @@ impl TickRateManager {
 
     /// Returns the number of tick samples currently available.
     #[must_use]
-    pub fn get_sample_count(&self) -> usize {
-        (self.tick_count as usize).min(TICK_STATS_SPAN)
+    pub const fn get_sample_count(&self) -> usize {
+        self.tick_time_sample_count
     }
 
     /// Returns the tick time at a given percentile in milliseconds.
@@ -357,5 +374,74 @@ impl TickRateManager {
 impl Default for TickRateManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record_tick(manager: &mut TickRateManager, duration_nanos: u64) {
+        manager.increment_tick_count();
+        manager.record_tick_time(duration_nanos);
+    }
+
+    #[test]
+    fn first_completed_tick_occupies_the_first_valid_sample() {
+        let mut manager = TickRateManager::new();
+
+        record_tick(&mut manager, 12_345_678);
+
+        assert_eq!(manager.get_sample_count(), 1);
+        assert_eq!(manager.get_tick_times_nanos()[0], 12_345_678);
+        assert_eq!(manager.get_average_tick_time_nanos(), 12_345_678);
+        let duration_ms = 12_345_678_f32 / 1_000_000_f32;
+        assert_eq!(manager.get_p50().to_bits(), duration_ms.to_bits());
+        assert_eq!(manager.get_p95().to_bits(), duration_ms.to_bits());
+        assert_eq!(manager.get_p99().to_bits(), duration_ms.to_bits());
+        assert_eq!(manager.get_max_tick_time_nanos(), 12_345_678);
+    }
+
+    #[test]
+    fn current_tick_is_not_a_timing_sample_until_it_completes() {
+        let mut manager = TickRateManager::new();
+        record_tick(&mut manager, 20);
+
+        manager.increment_tick_count();
+
+        assert_eq!(manager.get_sample_count(), 1);
+        assert_eq!(manager.get_average_tick_time_nanos(), 20);
+        assert_eq!(manager.get_max_tick_time_nanos(), 20);
+    }
+
+    #[test]
+    fn rolling_window_replaces_the_oldest_sample_and_recomputes_maximum() {
+        let mut manager = TickRateManager::new();
+        record_tick(&mut manager, 1_000);
+        for duration in 2..=TICK_STATS_SPAN as u64 {
+            record_tick(&mut manager, duration);
+        }
+        assert_eq!(manager.get_max_tick_time_nanos(), 1_000);
+
+        record_tick(&mut manager, 101);
+
+        let samples = manager.get_tick_times_nanos();
+        assert_eq!(manager.get_sample_count(), TICK_STATS_SPAN);
+        assert_eq!(samples[0], 101);
+        assert_eq!(samples[1], 2);
+        assert_eq!(manager.get_average_tick_time_nanos(), 51);
+        assert_eq!(manager.get_max_tick_time_nanos(), 101);
+    }
+
+    #[test]
+    fn empty_window_has_zero_average_percentiles_and_maximum() {
+        let manager = TickRateManager::new();
+
+        assert_eq!(manager.get_sample_count(), 0);
+        assert_eq!(manager.get_average_tick_time_nanos(), 0);
+        assert_eq!(manager.get_p50().to_bits(), 0.0_f32.to_bits());
+        assert_eq!(manager.get_p95().to_bits(), 0.0_f32.to_bits());
+        assert_eq!(manager.get_p99().to_bits(), 0.0_f32.to_bits());
+        assert_eq!(manager.get_max_tick_time_nanos(), 0);
     }
 }

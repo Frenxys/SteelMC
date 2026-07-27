@@ -48,16 +48,16 @@ use crate::world::{LevelReader, World};
 use super::{
     ActiveMobEffect, AttributeModifier, AttributeModifierOperation, DAMAGE_KNOCKBACK_POWER,
     DEFAULT_SWING_DURATION, DEFAULT_TICKS_REQUIRED_TO_FREEZE, Entity, EntityBase,
-    EntityFluidContact, EntityLevelCallback, EntityMoveError, EntityOwnership, EntitySyncedData,
-    EntityVerticalMovementStateUpdate, InsideBlockEffectCollector, InsideBlockEffectType,
-    LivingEntity, LivingEntityBase, LivingTravelInput, MobEffectInstance, RemovalReason,
-    SPEED_MODIFIER_POWDER_SNOW_ID, SharedEntity, block_state_suffocates_eye_box,
-    change_entity_world, closest_open_space_direction, fall_damage_reset_clip_target,
-    fall_flying_collision_damage, fall_flying_free_fall_interval, get_input_vector,
-    indirect_passengers, passenger_transition_position, passenger_transition_rotation,
-    remove_after_changing_dimensions, should_apply_entity_cramming_damage,
-    should_apply_resolved_movement, start_riding_entities, transfer_leashables_to_holder,
-    trapdoor_usable_as_ladder_state,
+    EntityFluidContact, EntityLevelCallback, EntityMoveError, EntityOwnership, EntitySpatialChange,
+    EntitySpatialCommitResult, EntitySyncedData, EntityVerticalMovementStateUpdate,
+    InsideBlockEffectCollector, InsideBlockEffectType, LivingEntity, LivingEntityBase,
+    LivingTravelInput, MobEffectInstance, RemovalReason, SPEED_MODIFIER_POWDER_SNOW_ID,
+    SharedEntity, block_state_suffocates_eye_box, change_entity_world,
+    closest_open_space_direction, fall_damage_reset_clip_target, fall_flying_collision_damage,
+    fall_flying_free_fall_interval, get_input_vector, indirect_passengers,
+    passenger_transition_position, passenger_transition_rotation, remove_after_changing_dimensions,
+    should_apply_entity_cramming_damage, should_apply_resolved_movement, start_riding_entities,
+    transfer_leashables_to_holder, trapdoor_usable_as_ladder_state,
 };
 
 struct PushableTestEntity {
@@ -585,14 +585,17 @@ struct CommitRejectingCallback {
 }
 
 impl EntityLevelCallback for CommitRejectingCallback {
-    fn validate_move(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
-        Ok(())
-    }
-
-    fn on_move_committed(&self, _old_pos: DVec3, _new_pos: DVec3) -> Result<(), EntityMoveError> {
+    fn commit_move(
+        &self,
+        _change: &EntitySpatialChange<'_>,
+    ) -> Result<EntitySpatialCommitResult, EntityMoveError> {
         Err(EntityMoveError::NotLive {
             entity_id: self.entity_id,
         })
+    }
+
+    fn commit_spatial_change(&self, change: &EntitySpatialChange<'_>) -> EntitySpatialCommitResult {
+        change.commit()
     }
 
     fn on_remove(&self, _reason: RemovalReason) {}

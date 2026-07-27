@@ -22,6 +22,7 @@ use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::section::{ChunkSection, Sections};
 use crate::entity::Entity;
 use crate::level_data::WorldGenerationSettings;
+use crate::server::gameplay_compute::GameplayComputePool;
 use crate::world::game_event::GameEventContext;
 use crate::world::{
     LevelAccessor, LevelReader, ScheduledTickAccess, World, WorldConfig, WorldStorageConfig,
@@ -129,6 +130,7 @@ pub(crate) fn world_border_projectile_test_world() -> &'static Arc<World> {
 struct TestWorldResources {
     runtime: Arc<Runtime>,
     generation_pool: Arc<rayon::ThreadPool>,
+    gameplay_compute_pool: Arc<GameplayComputePool>,
 }
 
 fn test_world_resources() -> &'static TestWorldResources {
@@ -147,6 +149,9 @@ fn test_world_resources() -> &'static TestWorldResources {
                 .thread_name(|index| format!("steel-test-world-{index}"))
                 .build()
                 .expect("test world generation pool should start"),
+        ),
+        gameplay_compute_pool: Arc::new(
+            GameplayComputePool::new(1).expect("test gameplay compute pool should start"),
         ),
     })
 }
@@ -194,6 +199,7 @@ fn create_test_world_with_key(key: Identifier, difficulty: Difficulty) -> Arc<Wo
                 difficulty,
             },
             Arc::clone(&resources.generation_pool),
+            Arc::clone(&resources.gameplay_compute_pool),
         ))
         .expect("test world should initialize")
 }

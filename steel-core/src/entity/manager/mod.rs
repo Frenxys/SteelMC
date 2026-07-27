@@ -5,19 +5,30 @@
 //! of chunk load state; chunks are still the persistence boundary, and only
 //! full simulated chunks tick entities.
 
-use std::{collections::BTreeMap, error::Error, fmt, slice, sync::Arc};
+mod spatial_index;
+
+use std::{
+    collections::{BTreeMap, VecDeque},
+    error::Error,
+    fmt, mem, ptr, slice,
+    sync::Arc,
+};
 
 use glam::DVec3;
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use steel_registry::vanilla_entities;
-use steel_utils::locks::SyncRwLock;
+use steel_utils::locks::{SyncMutex, SyncRwLock};
 use steel_utils::{ChunkPos, PackedSectionPos, SectionPos, WorldAabb};
 use uuid::Uuid;
 
 use super::{
-    Entity, NullEntityCallback, RemovalReason, SharedEntity, snapshot_old_pos_and_rot_for_tick,
+    BoundEntityCallback, Entity, EntityCallbackToken, EntityLevelCallback, EntitySpatialChange,
+    EntitySpatialCommitResult, EntitySpatialUpdate, InactiveEntityCallback, NullEntityCallback,
+    RemovalReason, SharedEntity, snapshot_old_pos_and_rot_for_tick,
     tick_vehicle_passengers_with_ticked_if,
 };
+use spatial_index::{EntitySpatialIndex, EntitySpatialMembership};
 
 /// Error returned when adding an entity to the runtime world fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,8 +187,10 @@ impl EntityLifecycleChanges {
 }
 
 /// Section/chunk membership update caused by a committed entity move.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EntityMoveUpdate {
+    entity: SharedEntity,
+    ownership: EntityOwnership,
     /// Entity network ID.
     pub entity_id: i32,
     /// Previous section membership.
@@ -196,9 +209,52 @@ pub struct EntityMoveUpdate {
     pub old_ticking: bool,
     /// Whether the manager-owned entity is in the tick list after the move.
     pub new_ticking: bool,
+    spatial_update: EntitySpatialUpdate,
+}
+
+pub(crate) enum EntityManagerEffect {
+    TrackingStart(SharedEntity),
+    TrackingStop(i32),
+    SpatialMove(EntityMoveUpdate),
+    Removal {
+        entity: SharedEntity,
+        chunk: ChunkPos,
+        ownership: EntityOwnership,
+    },
+}
+
+#[derive(Default)]
+struct EntityManagerEffectQueue {
+    pending: VecDeque<EntityManagerEffect>,
+    dispatching: bool,
+}
+
+struct EntityManagerEffectDrainGuard<'a> {
+    queue: &'a SyncMutex<EntityManagerEffectQueue>,
+    armed: bool,
+}
+
+impl Drop for EntityManagerEffectDrainGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.queue.lock().dispatching = false;
+        }
+    }
 }
 
 impl EntityMoveUpdate {
+    pub(crate) const fn spatial_update(&self) -> EntitySpatialUpdate {
+        self.spatial_update
+    }
+
+    pub(crate) fn entity(&self) -> &SharedEntity {
+        &self.entity
+    }
+
+    pub(crate) const fn ownership(&self) -> EntityOwnership {
+        self.ownership
+    }
+
     /// Returns whether the entity changed sections.
     #[must_use]
     pub fn section_changed(&self) -> bool {
@@ -280,23 +336,58 @@ pub struct ChunkEntityUnloadStart {
 #[derive(Clone)]
 struct EntityEntry {
     entity: SharedEntity,
+    callback_token: EntityCallbackToken,
     uuid: Uuid,
     section: SectionPos,
     chunk: ChunkPos,
+    committed_position: DVec3,
+    committed_bounding_box: WorldAabb,
+    committed_spatial_revision: u64,
     ownership: EntityOwnership,
+    section_insertion_order: u64,
+    spatial_membership: EntitySpatialMembership,
+    retained_callback: Option<Arc<dyn EntityLevelCallback>>,
+}
+
+struct EntityQueryCandidate {
+    entity: SharedEntity,
+    bounding_box: WorldAabb,
+    order: (i32, PackedSectionPos, u64),
 }
 
 impl EntityEntry {
-    fn new(entity: SharedEntity, ownership: EntityOwnership) -> Self {
-        let section = SectionPos::from_entity_pos(entity.position());
+    fn new(
+        entity: SharedEntity,
+        ownership: EntityOwnership,
+        spatial_update: EntitySpatialUpdate,
+        callback_token: EntityCallbackToken,
+    ) -> Self {
+        let committed_position = spatial_update.position();
+        let section = SectionPos::from_entity_pos(committed_position);
         let chunk = ChunkPos::new(section.x(), section.z());
+        let committed_bounding_box = spatial_update.bounding_box();
         Self {
             uuid: entity.uuid(),
             entity,
+            callback_token,
             section,
             chunk,
+            committed_position,
+            committed_bounding_box,
+            committed_spatial_revision: spatial_update.revision(),
             ownership,
+            section_insertion_order: 0,
+            spatial_membership: EntitySpatialMembership::default(),
+            retained_callback: None,
         }
+    }
+
+    fn refresh_spatial_update(&mut self, spatial_update: EntitySpatialUpdate) {
+        self.committed_position = spatial_update.position();
+        self.committed_bounding_box = spatial_update.bounding_box();
+        self.committed_spatial_revision = spatial_update.revision();
+        self.section = SectionPos::from_entity_pos(self.committed_position);
+        self.chunk = ChunkPos::new(self.section.x(), self.section.z());
     }
 
     #[must_use]
@@ -321,6 +412,8 @@ struct ManagerState {
     accessible_order: OrderedEntityIds,
     by_section: BTreeMap<PackedSectionPos, OrderedEntityIds>,
     by_chunk: FxHashMap<ChunkPos, FxHashSet<i32>>,
+    spatial_index: EntitySpatialIndex,
+    next_section_insertion_order: u64,
     unloading_by_chunk: FxHashMap<ChunkPos, Vec<EntityEntry>>,
     save_pending_by_chunk: FxHashMap<ChunkPos, Vec<EntityEntry>>,
     tick_list: EntityTickList,
@@ -395,15 +488,19 @@ impl EntityTickList {
 /// Central world entity manager.
 pub struct WorldEntityManager {
     state: SyncRwLock<ManagerState>,
+    effects: SyncMutex<EntityManagerEffectQueue>,
 }
 
 impl fmt::Debug for WorldEntityManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state.read();
+        let effects = self.effects.lock();
         f.debug_struct("WorldEntityManager")
             .field("chunk_visibility", &state.chunk_visibility.len())
             .field("live_entities", &state.live_by_id.len())
             .field("unloading_chunks", &state.unloading_by_chunk.len())
+            .field("pending_effects", &effects.pending.len())
+            .field("dispatching_effects", &effects.dispatching)
             .finish()
     }
 }
@@ -414,6 +511,69 @@ impl WorldEntityManager {
     pub fn new() -> Self {
         Self {
             state: SyncRwLock::new(ManagerState::default()),
+            effects: SyncMutex::new(EntityManagerEffectQueue::default()),
+        }
+    }
+
+    fn enqueue_tracking_effects(
+        &self,
+        tracking_stopped: &[SharedEntity],
+        tracking_started: &[SharedEntity],
+    ) {
+        if tracking_stopped.is_empty() && tracking_started.is_empty() {
+            return;
+        }
+
+        let mut effects = self.effects.lock();
+        effects.pending.extend(
+            tracking_stopped
+                .iter()
+                .map(|entity| EntityManagerEffect::TrackingStop(entity.id())),
+        );
+        effects.pending.extend(
+            tracking_started
+                .iter()
+                .cloned()
+                .map(EntityManagerEffect::TrackingStart),
+        );
+    }
+
+    fn enqueue_lifecycle_effects(&self, changes: &EntityLifecycleChanges) {
+        self.enqueue_tracking_effects(&changes.tracking_stopped, &changes.tracking_started);
+    }
+
+    fn enqueue_effect(&self, effect: EntityManagerEffect) {
+        self.effects.lock().pending.push_back(effect);
+    }
+
+    /// Applies manager effects in the same order as their state commits.
+    ///
+    /// The queue lock is never held while `handler` runs. Reentrant drain calls
+    /// return immediately; the active drainer will observe any newly queued work.
+    pub(crate) fn drain_effects(&self, mut handler: impl FnMut(EntityManagerEffect)) {
+        {
+            let mut effects = self.effects.lock();
+            if effects.dispatching {
+                return;
+            }
+            effects.dispatching = true;
+        }
+
+        let mut guard = EntityManagerEffectDrainGuard {
+            queue: &self.effects,
+            armed: true,
+        };
+        loop {
+            let effect = {
+                let mut effects = self.effects.lock();
+                let Some(effect) = effects.pending.pop_front() else {
+                    effects.dispatching = false;
+                    guard.armed = false;
+                    return;
+                };
+                effect
+            };
+            handler(effect);
         }
     }
 
@@ -427,6 +587,10 @@ impl WorldEntityManager {
     }
 
     /// Marks a chunk as loaded and reactivates retained unloading entities.
+    ///
+    /// # Panics
+    ///
+    /// Panics if retained manager state is missing its live callback binding.
     pub fn on_chunk_loaded(&self, pos: ChunkPos) -> ChunkEntityLoadResult {
         let mut state = self.state.write();
         state
@@ -437,8 +601,13 @@ impl WorldEntityManager {
         let mut result = ChunkEntityLoadResult::default();
         if let Some(entries) = state.unloading_by_chunk.remove(&pos) {
             result.restored.reserve(entries.len());
-            for entry in entries {
+            for mut entry in entries {
                 if entry.entity.is_removed() {
+                    entry.retained_callback = None;
+                    entry
+                        .entity
+                        .base()
+                        .replace_level_callback(Arc::new(NullEntityCallback));
                     if entry.should_save() {
                         result.needs_save = true;
                         state
@@ -450,6 +619,30 @@ impl WorldEntityManager {
                     continue;
                 }
 
+                let Some(callback) = entry.retained_callback.take() else {
+                    panic!(
+                        "retained entity {} had no live callback to restore",
+                        entry.entity.id()
+                    );
+                };
+                entry.entity.base().replace_level_callback(callback);
+                let spatial_update = entry.entity.base().spatial_update();
+                entry.refresh_spatial_update(spatial_update);
+                if entry.entity.is_removed() {
+                    entry
+                        .entity
+                        .base()
+                        .replace_level_callback(Arc::new(NullEntityCallback));
+                    if entry.should_save() {
+                        result.needs_save = true;
+                        state
+                            .save_pending_by_chunk
+                            .entry(pos)
+                            .or_default()
+                            .push(entry);
+                    }
+                    continue;
+                }
                 let entity = entry.entity.clone();
                 Self::insert_live_entry(&mut state, entry);
                 let lifecycle = Self::apply_entity_lifecycle_after_insert(&mut state, entity.id());
@@ -459,6 +652,7 @@ impl WorldEntityManager {
             }
         }
 
+        self.enqueue_tracking_effects(&[], &result.tracking_started);
         result
     }
 
@@ -478,7 +672,9 @@ impl WorldEntityManager {
             return EntityLifecycleChanges::default();
         }
 
-        Self::apply_chunk_visibility_change(&mut state, pos, previous, visibility)
+        let changes = Self::apply_chunk_visibility_change(&mut state, pos, previous, visibility);
+        self.enqueue_lifecycle_effects(&changes);
+        changes
     }
 
     fn push_unique_entity(
@@ -558,6 +754,7 @@ impl WorldEntityManager {
                 .extend(retained);
         }
 
+        self.enqueue_tracking_effects(&result.tracking_stopped, &[]);
         result
     }
 
@@ -574,7 +771,7 @@ impl WorldEntityManager {
             return;
         }
 
-        let Some(entry) = Self::remove_live_entry(state, entity_id) else {
+        let Some(mut entry) = Self::remove_live_entry(state, entity_id) else {
             return;
         };
 
@@ -595,6 +792,14 @@ impl WorldEntityManager {
         }
 
         let passengers = entry.entity.passengers();
+        let callback = entry
+            .entity
+            .base()
+            .replace_level_callback(Arc::new(InactiveEntityCallback::new(entity_id)));
+        assert!(
+            entry.retained_callback.replace(callback).is_none(),
+            "live entity {entity_id} already retained a callback"
+        );
         Self::push_unique_entity(&entry.entity, tracking_stopped_ids, tracking_stopped);
         retained_entities.push(Arc::clone(&entry.entity));
         retained.push(entry);
@@ -623,49 +828,111 @@ impl WorldEntityManager {
         for entry in entries {
             entry
                 .entity
-                .set_level_callback(Arc::new(NullEntityCallback));
+                .base()
+                .replace_level_callback(Arc::new(NullEntityCallback));
             entry.entity.set_removed(RemovalReason::UnloadedToChunk);
         }
     }
 
-    /// Registers a live runtime entity.
-    ///
-    /// # Panics
-    ///
-    /// Panics if an entity with the same session network ID is already present. Duplicate runtime
-    /// IDs indicate corrupted manager ownership and cannot be recovered without losing identity.
+    #[cfg(test)]
+    /// Registers an entity with a local test callback.
     pub fn add_live_entity(
         &self,
         entity: SharedEntity,
         ownership: EntityOwnership,
     ) -> Result<EntityLifecycleChanges, AddEntityError> {
-        let entry = Self::checked_live_entry(entity, ownership)?;
-        let entity_id = entry.entity.id();
-        let mut state = self.state.write();
-        Self::validate_live_entries(&state, slice::from_ref(&entry), ownership, true)?;
-        Self::insert_live_entry(&mut state, entry);
-        Ok(Self::apply_entity_lifecycle_after_insert(
-            &mut state, entity_id,
-        ))
+        self.add_live_entity_with_callback(
+            entity,
+            ownership,
+            BoundEntityCallback::new(|_| Arc::new(NullEntityCallback)),
+        )
     }
 
-    /// Adds a related group of live entities atomically.
-    ///
-    /// Use this for persisted vehicle/passenger trees so registration either
-    /// publishes the whole tree or leaves world indexes unchanged.
+    /// Registers a live runtime entity and atomically binds its manager callback.
     ///
     /// # Panics
     ///
-    /// Panics if the entity tree contains the same session network ID more
-    /// than once. Duplicate runtime IDs indicate corrupted ownership.
+    /// Panics if an entity with the same session network ID is already present. Duplicate runtime
+    /// IDs indicate corrupted manager ownership and cannot be recovered without losing identity.
+    pub(crate) fn add_live_entity_with_callback(
+        &self,
+        entity: SharedEntity,
+        ownership: EntityOwnership,
+        callback: BoundEntityCallback,
+    ) -> Result<EntityLifecycleChanges, AddEntityError> {
+        let (callback, callback_token) = callback.into_parts();
+        let mut entry = Self::checked_live_entry(entity, ownership, callback_token)?;
+        let entity_id = entry.entity.id();
+        let mut state = self.state.write();
+        let previous_callback = entry.entity.base().replace_level_callback(callback);
+        let spatial_update = entry.entity.base().spatial_update();
+        entry.refresh_spatial_update(spatial_update);
+        if entry.entity.is_removed() {
+            entry
+                .entity
+                .base()
+                .replace_level_callback(previous_callback);
+            return Err(AddEntityError::RemovedEntity { entity_id });
+        }
+        if let Err(error) =
+            Self::validate_live_entries(&state, slice::from_ref(&entry), ownership, true)
+        {
+            entry
+                .entity
+                .base()
+                .replace_level_callback(previous_callback);
+            return Err(error);
+        }
+        Self::insert_live_entry(&mut state, entry);
+        let lifecycle = Self::apply_entity_lifecycle_after_insert(&mut state, entity_id);
+        self.enqueue_lifecycle_effects(&lifecycle);
+        Ok(lifecycle)
+    }
+
+    #[cfg(test)]
+    /// Registers an entity tree with local test callbacks.
     pub fn add_live_entity_tree(
         &self,
         entities: &[SharedEntity],
         ownership: EntityOwnership,
     ) -> Result<EntityLifecycleChanges, AddEntityError> {
+        let callbacks = entities
+            .iter()
+            .map(|_| BoundEntityCallback::new(|_| Arc::new(NullEntityCallback)))
+            .collect::<Vec<_>>();
+        self.add_live_entity_tree_with_callbacks(entities, ownership, callbacks)
+    }
+
+    /// Adds a related group of live entities and binds all callbacks atomically.
+    ///
+    /// Use this for persisted vehicle/passenger trees so registration either
+    /// publishes the whole tree or leaves world indexes and callback bindings unchanged.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity tree contains the same session network ID more
+    /// than once or `callbacks` does not contain exactly one callback per entity.
+    pub(crate) fn add_live_entity_tree_with_callbacks(
+        &self,
+        entities: &[SharedEntity],
+        ownership: EntityOwnership,
+        callbacks: Vec<BoundEntityCallback>,
+    ) -> Result<EntityLifecycleChanges, AddEntityError> {
+        assert_eq!(
+            entities.len(),
+            callbacks.len(),
+            "live entity tree requires exactly one callback per entity"
+        );
         let mut entries = Vec::with_capacity(entities.len());
-        for entity in entities {
-            entries.push(Self::checked_live_entry(Arc::clone(entity), ownership)?);
+        let mut level_callbacks = Vec::with_capacity(callbacks.len());
+        for (entity, callback) in entities.iter().zip(callbacks) {
+            let (callback, callback_token) = callback.into_parts();
+            entries.push(Self::checked_live_entry(
+                Arc::clone(entity),
+                ownership,
+                callback_token,
+            )?);
+            level_callbacks.push(callback);
         }
 
         let mut seen_ids = FxHashSet::default();
@@ -685,7 +952,37 @@ impl WorldEntityManager {
         }
 
         let mut state = self.state.write();
-        Self::validate_live_entries(&state, &entries, ownership, false)?;
+        let mut previous_callbacks = Vec::with_capacity(entries.len());
+        for (entry, callback) in entries.iter_mut().zip(&level_callbacks) {
+            previous_callbacks.push(
+                entry
+                    .entity
+                    .base()
+                    .replace_level_callback(Arc::clone(callback)),
+            );
+            let spatial_update = entry.entity.base().spatial_update();
+            entry.refresh_spatial_update(spatial_update);
+        }
+        let validation = entries
+            .iter()
+            .find(|entry| entry.entity.is_removed())
+            .map_or_else(
+                || Self::validate_live_entries(&state, &entries, ownership, false),
+                |entry| {
+                    Err(AddEntityError::RemovedEntity {
+                        entity_id: entry.entity.id(),
+                    })
+                },
+            );
+        if let Err(error) = validation {
+            for (entry, previous_callback) in entries.iter().zip(previous_callbacks) {
+                entry
+                    .entity
+                    .base()
+                    .replace_level_callback(previous_callback);
+            }
+            return Err(error);
+        }
         let entity_ids = entries
             .iter()
             .map(|entry| entry.entity.id())
@@ -699,12 +996,14 @@ impl WorldEntityManager {
                 &mut state, entity_id,
             ));
         }
+        self.enqueue_lifecycle_effects(&lifecycle);
         Ok(lifecycle)
     }
 
     fn checked_live_entry(
         entity: SharedEntity,
         ownership: EntityOwnership,
+        callback_token: EntityCallbackToken,
     ) -> Result<EntityEntry, AddEntityError> {
         if entity.is_removed() {
             return Err(AddEntityError::RemovedEntity {
@@ -712,7 +1011,13 @@ impl WorldEntityManager {
             });
         }
 
-        Ok(EntityEntry::new(entity, ownership))
+        let spatial_update = entity.base().spatial_update();
+        Ok(EntityEntry::new(
+            entity,
+            ownership,
+            spatial_update,
+            callback_token,
+        ))
     }
 
     fn validate_live_entries(
@@ -746,15 +1051,49 @@ impl WorldEntityManager {
         Ok(())
     }
 
-    /// Removes a live entity for an explicit entity removal reason.
+    /// Removes this exact live entity for an explicit removal reason.
+    ///
+    /// A different entity that reused the same network ID is left untouched.
     pub fn remove_live_entity(
         &self,
-        entity_id: i32,
+        entity: &dyn Entity,
         reason: RemovalReason,
     ) -> Option<SharedEntity> {
+        self.remove_live_entity_matching(entity, None, reason)
+    }
+
+    /// Removes an entity only if the callback still owns its current manager binding.
+    pub(crate) fn remove_live_entity_if_bound(
+        &self,
+        entity: &dyn Entity,
+        callback_token: &EntityCallbackToken,
+        reason: RemovalReason,
+    ) -> Option<SharedEntity> {
+        self.remove_live_entity_matching(entity, Some(callback_token), reason)
+    }
+
+    fn remove_live_entity_matching(
+        &self,
+        entity: &dyn Entity,
+        callback_token: Option<&EntityCallbackToken>,
+        reason: RemovalReason,
+    ) -> Option<SharedEntity> {
+        let entity_id = entity.id();
         let mut state = self.state.write();
+        let current = state.live_by_id.get(&entity_id)?;
+        if !ptr::eq(current.entity.as_ref(), entity) {
+            return None;
+        }
+        if callback_token.is_some_and(|token| !current.callback_token.matches(token)) {
+            return None;
+        }
         let entry = Self::remove_live_entry(&mut state, entity_id)?;
         let entity = entry.entity.clone();
+        let chunk = entry.chunk;
+        let ownership = entry.ownership;
+        entity
+            .base()
+            .replace_level_callback(Arc::new(NullEntityCallback));
 
         if reason.should_save() && entry.should_save() {
             state
@@ -764,6 +1103,11 @@ impl WorldEntityManager {
                 .push(entry);
         }
 
+        self.enqueue_effect(EntityManagerEffect::Removal {
+            entity: Arc::clone(&entity),
+            chunk,
+            ownership,
+        });
         Some(entity)
     }
 
@@ -816,18 +1160,48 @@ impl WorldEntityManager {
         Ok(())
     }
 
+    fn missing_move_commit_result(
+        entity_id: i32,
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<Option<EntityMoveUpdate>, EntityMoveError> {
+        if change.callback_is_current() {
+            Err(EntityMoveError::NotLive { entity_id })
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Commits manager indexes after a live entity position change.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `change` is not a position mutation or one coherent spatial
+    /// revision identifies different positions in the manager and base.
     pub fn commit_move(
         &self,
         entity_id: i32,
-        new_pos: DVec3,
-    ) -> Result<EntityMoveUpdate, EntityMoveError> {
+        change: &EntitySpatialChange<'_>,
+    ) -> Result<Option<EntityMoveUpdate>, EntityMoveError> {
+        let Some((_old_pos, requested_position)) = change.position_change() else {
+            panic!("entity move commit received a non-position spatial change");
+        };
         let mut state = self.state.write();
         let Some(current) = state.live_by_id.get(&entity_id) else {
-            return Err(EntityMoveError::NotLive { entity_id });
+            return Self::missing_move_commit_result(entity_id, change);
         };
+        if !change.originates_from(current.entity.base()) {
+            return Err(EntityMoveError::NotLive { entity_id });
+        }
+        if current.committed_spatial_revision != change.expected().revision() {
+            return Ok(None);
+        }
+        assert_eq!(
+            current.committed_position,
+            change.expected().position(),
+            "entity manager and base prepared different positions"
+        );
 
-        let new_section = SectionPos::from_entity_pos(new_pos);
+        let new_section = SectionPos::from_entity_pos(requested_position);
         let new_chunk = ChunkPos::new(new_section.x(), new_section.z());
         if current.ownership == EntityOwnership::ManagerOwned
             && !Self::can_move_manager_owned_to_chunk(&state, current, new_chunk)
@@ -849,52 +1223,58 @@ impl WorldEntityManager {
         let old_ticking = old_visibility.is_ticking();
         let new_ticking = new_visibility.is_ticking();
         let entity = current.entity.clone();
-        if old_section == new_section && old_chunk == new_chunk {
-            return Ok(EntityMoveUpdate {
-                entity_id,
-                old_section,
-                new_section,
-                old_chunk,
-                new_chunk,
-                old_accessible,
-                new_accessible,
-                old_ticking,
-                new_ticking,
-            });
-        }
-
-        Self::remove_from_section(&mut state, old_section, entity_id);
-        Self::remove_from_chunk(&mut state, old_chunk, entity_id);
-
+        let ownership = current.ownership;
+        let EntitySpatialCommitResult::Committed(spatial_update) = change.commit() else {
+            return Ok(None);
+        };
+        assert_eq!(
+            spatial_update.position(),
+            requested_position,
+            "entity move committed a different position than its requested destination"
+        );
+        Self::refresh_spatial_membership(&mut state, entity_id, spatial_update.bounding_box());
         if let Some(entry) = state.live_by_id.get_mut(&entity_id) {
-            entry.section = new_section;
-            entry.chunk = new_chunk;
+            entry.committed_position = spatial_update.position();
+            entry.committed_spatial_revision = spatial_update.revision();
+        }
+        if old_section != new_section || old_chunk != new_chunk {
+            Self::remove_from_section(&mut state, old_section, entity_id);
+            Self::remove_from_chunk(&mut state, old_chunk, entity_id);
+
+            let new_section_insertion_order = Self::take_section_insertion_order(&mut state);
+            if let Some(entry) = state.live_by_id.get_mut(&entity_id) {
+                entry.section = new_section;
+                entry.chunk = new_chunk;
+                entry.section_insertion_order = new_section_insertion_order;
+            }
+
+            state
+                .by_section
+                .entry(PackedSectionPos::from(new_section))
+                .or_default()
+                .insert(entity_id);
+            state
+                .by_chunk
+                .entry(new_chunk)
+                .or_default()
+                .insert(entity_id);
+
+            if old_accessible && !new_accessible {
+                state.accessible_order.remove(entity_id);
+            } else if !old_accessible && new_accessible {
+                state.accessible_order.insert(entity_id);
+            }
+
+            if old_ticking && !new_ticking {
+                state.tick_list.remove(entity_id);
+            } else if !old_ticking && new_ticking {
+                state.tick_list.add(&entity);
+            }
         }
 
-        state
-            .by_section
-            .entry(PackedSectionPos::from(new_section))
-            .or_default()
-            .insert(entity_id);
-        state
-            .by_chunk
-            .entry(new_chunk)
-            .or_default()
-            .insert(entity_id);
-
-        if old_accessible && !new_accessible {
-            state.accessible_order.remove(entity_id);
-        } else if !old_accessible && new_accessible {
-            state.accessible_order.insert(entity_id);
-        }
-
-        if old_ticking && !new_ticking {
-            state.tick_list.remove(entity_id);
-        } else if !old_ticking && new_ticking {
-            state.tick_list.add(&entity);
-        }
-
-        Ok(EntityMoveUpdate {
+        let update = EntityMoveUpdate {
+            entity,
+            ownership,
             entity_id,
             old_section,
             new_section,
@@ -904,7 +1284,60 @@ impl WorldEntityManager {
             new_accessible,
             old_ticking,
             new_ticking,
-        })
+            spatial_update,
+        };
+        self.enqueue_effect(EntityManagerEffect::SpatialMove(update.clone()));
+        Ok(Some(update))
+    }
+
+    /// Commits a non-position spatial change with its manager indexes.
+    pub(crate) fn commit_spatial_change(
+        &self,
+        entity_id: i32,
+        change: &EntitySpatialChange<'_>,
+    ) -> EntitySpatialCommitResult {
+        let mut state = self.state.write();
+        let Some(current) = state.live_by_id.get(&entity_id) else {
+            assert!(
+                !change.callback_is_current(),
+                "entity {entity_id} current manager callback had no live entry"
+            );
+            return EntitySpatialCommitResult::Retry;
+        };
+        if !change.originates_from(current.entity.base()) {
+            assert!(
+                !change.callback_is_current(),
+                "entity {entity_id} current manager callback targeted a different live entity"
+            );
+            return EntitySpatialCommitResult::Retry;
+        }
+        if current.committed_spatial_revision != change.expected().revision() {
+            return EntitySpatialCommitResult::Retry;
+        }
+        let committed_position = current.committed_position;
+        assert!(
+            change.position_change().is_none(),
+            "non-position spatial commit received an entity move"
+        );
+        assert_eq!(
+            committed_position,
+            change.expected().position(),
+            "non-position entity spatial change did not start from the manager position"
+        );
+        let result = change.commit();
+        let EntitySpatialCommitResult::Committed(spatial_update) = result else {
+            return result;
+        };
+        assert_eq!(
+            committed_position,
+            spatial_update.position(),
+            "non-position entity spatial change moved the entity"
+        );
+        Self::refresh_spatial_membership(&mut state, entity_id, spatial_update.bounding_box());
+        if let Some(entry) = state.live_by_id.get_mut(&entity_id) {
+            entry.committed_spatial_revision = spatial_update.revision();
+        }
+        result
     }
 
     fn can_move_manager_owned_to_chunk(
@@ -1004,9 +1437,10 @@ impl WorldEntityManager {
         aabb: &WorldAabb,
         mut predicate: impl FnMut(&dyn Entity) -> bool,
     ) -> Vec<SharedEntity> {
-        self.get_entities_in_aabb(aabb)
+        self.entity_query_candidates(aabb)
             .into_iter()
-            .filter(|entity| predicate(entity.as_ref()))
+            .filter(|candidate| predicate(candidate.entity.as_ref()))
+            .map(|candidate| candidate.entity)
             .collect()
     }
 
@@ -1017,24 +1451,9 @@ impl WorldEntityManager {
         aabb: &WorldAabb,
         mut predicate: impl FnMut(&dyn Entity) -> bool,
     ) -> bool {
-        let state = self.state.read();
-        for entity_ids in Self::entity_query_sections(&state, aabb) {
-            for entity_id in entity_ids.iter() {
-                let Some(entry) = state.live_by_id.get(entity_id) else {
-                    continue;
-                };
-                if !Self::is_accessible(&state, entry) {
-                    continue;
-                }
-
-                let bounding_box = entry.entity.bounding_box();
-                if bounding_box.intersects(*aabb) && predicate(entry.entity.as_ref()) {
-                    return true;
-                }
-            }
-        }
-
-        false
+        self.entity_query_candidates(aabb)
+            .into_iter()
+            .any(|candidate| predicate(candidate.entity.as_ref()))
     }
 
     /// Gets matching live entity bounding boxes that intersect `aabb`.
@@ -1044,25 +1463,12 @@ impl WorldEntityManager {
         aabb: &WorldAabb,
         mut predicate: impl FnMut(&dyn Entity) -> bool,
     ) -> Vec<WorldAabb> {
-        let state = self.state.read();
-        let mut result = Vec::new();
-        for entity_ids in Self::entity_query_sections(&state, aabb) {
-            for entity_id in entity_ids.iter() {
-                let Some(entry) = state.live_by_id.get(entity_id) else {
-                    continue;
-                };
-                if !Self::is_accessible(&state, entry) {
-                    continue;
-                }
-
-                let bounding_box = entry.entity.bounding_box();
-                if bounding_box.intersects(*aabb) && predicate(entry.entity.as_ref()) {
-                    result.push(bounding_box);
-                }
-            }
-        }
-
-        result
+        self.entity_query_candidates(aabb)
+            .into_iter()
+            .filter_map(|candidate| {
+                predicate(candidate.entity.as_ref()).then_some(candidate.bounding_box)
+            })
+            .collect()
     }
 
     #[must_use]
@@ -1087,22 +1493,10 @@ impl WorldEntityManager {
     #[must_use]
     /// Gets live entities whose bounding boxes intersect `aabb`.
     pub fn get_entities_in_aabb(&self, aabb: &WorldAabb) -> Vec<SharedEntity> {
-        let state = self.state.read();
-        let mut result = Vec::new();
-        for entity_ids in Self::entity_query_sections(&state, aabb) {
-            for entity_id in entity_ids.iter() {
-                let Some(entry) = state.live_by_id.get(entity_id) else {
-                    continue;
-                };
-                if Self::is_accessible(&state, entry)
-                    && entry.entity.bounding_box().intersects(*aabb)
-                {
-                    result.push(entry.entity.clone());
-                }
-            }
-        }
-
-        result
+        self.entity_query_candidates(aabb)
+            .into_iter()
+            .map(|candidate| candidate.entity)
+            .collect()
     }
 
     /// Gets all live entities visible to vanilla gameplay lookups.
@@ -1118,27 +1512,117 @@ impl WorldEntityManager {
             .collect()
     }
 
-    fn entity_query_sections<'a>(
-        state: &'a ManagerState,
+    /// Snapshots intersecting entities before extensible predicates run.
+    ///
+    /// Fine-grained candidates are gathered under the manager read lock, then
+    /// sorted outside it into Vanilla section and section-insertion order.
+    fn entity_query_candidates(&self, aabb: &WorldAabb) -> SmallVec<[EntityQueryCandidate; 16]> {
+        let (mut candidates, needs_sort) = {
+            let state = self.state.read();
+            let mut candidates = SmallVec::<[EntityQueryCandidate; 16]>::new();
+            let (minimum, maximum) = Self::entity_query_section_bounds(aabb);
+            let used_spatial_index =
+                state
+                    .spatial_index
+                    .try_visit_candidate_ids(*aabb, |entity_id| {
+                        let Some(entry) = state.live_by_id.get(&entity_id) else {
+                            return;
+                        };
+                        if !Self::section_is_within_query_bounds(entry.section, minimum, maximum)
+                            || !Self::is_accessible(&state, entry)
+                        {
+                            return;
+                        }
+
+                        let bounding_box = entry.committed_bounding_box;
+                        if bounding_box.intersects(*aabb) {
+                            candidates.push(Self::entity_query_candidate(entry, bounding_box));
+                        }
+                    });
+
+            if !used_spatial_index {
+                Self::visit_intersecting_entity_query_entries_by_section(
+                    &state,
+                    aabb,
+                    |entry, bounding_box| {
+                        candidates.push(Self::entity_query_candidate(entry, bounding_box));
+                    },
+                );
+            }
+            (candidates, used_spatial_index)
+        };
+
+        if needs_sort {
+            candidates.sort_unstable_by_key(|candidate| candidate.order);
+        }
+        candidates
+    }
+
+    fn entity_query_candidate(
+        entry: &EntityEntry,
+        bounding_box: WorldAabb,
+    ) -> EntityQueryCandidate {
+        EntityQueryCandidate {
+            entity: Arc::clone(&entry.entity),
+            bounding_box,
+            order: (
+                entry.section.x(),
+                PackedSectionPos::from(entry.section),
+                entry.section_insertion_order,
+            ),
+        }
+    }
+
+    fn visit_intersecting_entity_query_entries_by_section(
+        state: &ManagerState,
         aabb: &WorldAabb,
-    ) -> Vec<&'a OrderedEntityIds> {
+        mut visitor: impl FnMut(&EntityEntry, WorldAabb),
+    ) {
         let (minimum, maximum) = Self::entity_query_section_bounds(aabb);
-        let mut sections = Vec::new();
         for x in minimum.x()..=maximum.x() {
             let first = PackedSectionPos::from(SectionPos::new(x, 0, 0));
             let last = PackedSectionPos::from(SectionPos::new(x, -1, -1));
             for (packed, entity_ids) in state.by_section.range(first..=last) {
                 let section = packed.to_section_pos();
-                if section.y() >= minimum.y()
-                    && section.y() <= maximum.y()
-                    && section.z() >= minimum.z()
-                    && section.z() <= maximum.z()
+                if section.y() < minimum.y()
+                    || section.y() > maximum.y()
+                    || section.z() < minimum.z()
+                    || section.z() > maximum.z()
                 {
-                    sections.push(entity_ids);
+                    continue;
+                }
+
+                let manager_owned_accessible =
+                    Self::chunk_visibility(state, ChunkPos::new(section.x(), section.z()))
+                        .is_accessible();
+                for entity_id in entity_ids.iter() {
+                    let Some(entry) = state.live_by_id.get(entity_id) else {
+                        continue;
+                    };
+                    if entry.ownership != EntityOwnership::External && !manager_owned_accessible {
+                        continue;
+                    }
+
+                    let bounding_box = entry.committed_bounding_box;
+                    if bounding_box.intersects(*aabb) {
+                        visitor(entry, bounding_box);
+                    }
                 }
             }
         }
-        sections
+    }
+
+    const fn section_is_within_query_bounds(
+        section: SectionPos,
+        minimum: SectionPos,
+        maximum: SectionPos,
+    ) -> bool {
+        section.x() >= minimum.x()
+            && section.x() <= maximum.x()
+            && section.y() >= minimum.y()
+            && section.y() <= maximum.y()
+            && section.z() >= minimum.z()
+            && section.z() <= maximum.z()
     }
 
     fn entity_ids_in_chunk_order(state: &ManagerState, chunk: ChunkPos) -> Vec<i32> {
@@ -1516,8 +2000,12 @@ impl WorldEntityManager {
         }
     }
 
-    fn insert_live_entry(state: &mut ManagerState, entry: EntityEntry) {
+    fn insert_live_entry(state: &mut ManagerState, mut entry: EntityEntry) {
         let entity_id = entry.entity.id();
+        assert!(
+            entry.retained_callback.is_none(),
+            "live entity {entity_id} retained an inactive callback binding"
+        );
         let is_accessible = Self::is_accessible_at(state, entry.ownership, entry.chunk);
         assert!(
             !state.live_by_id.contains_key(&entity_id),
@@ -1528,6 +2016,12 @@ impl WorldEntityManager {
             "entity uuid {} is already registered in the world entity manager",
             entry.uuid
         );
+        entry.section_insertion_order = Self::take_section_insertion_order(state);
+        entry.spatial_membership =
+            EntitySpatialMembership::for_bounding_box(entry.committed_bounding_box);
+        state
+            .spatial_index
+            .insert(entity_id, &entry.spatial_membership);
         state
             .by_section
             .entry(PackedSectionPos::from(entry.section))
@@ -1611,12 +2105,49 @@ impl WorldEntityManager {
 
     fn remove_live_entry(state: &mut ManagerState, entity_id: i32) -> Option<EntityEntry> {
         let entry = state.live_by_id.remove(&entity_id)?;
+        state
+            .spatial_index
+            .remove(entity_id, &entry.spatial_membership);
         state.tick_list.remove(entity_id);
         state.live_by_uuid.remove(&entry.uuid);
         state.accessible_order.remove(entity_id);
         Self::remove_from_section(state, entry.section, entity_id);
         Self::remove_from_chunk(state, entry.chunk, entity_id);
         Some(entry)
+    }
+
+    fn take_section_insertion_order(state: &mut ManagerState) -> u64 {
+        assert!(
+            state.next_section_insertion_order != u64::MAX,
+            "world entity manager exhausted section insertion order"
+        );
+        let order = state.next_section_insertion_order;
+        state.next_section_insertion_order += 1;
+        order
+    }
+
+    fn refresh_spatial_membership(
+        state: &mut ManagerState,
+        entity_id: i32,
+        bounding_box: WorldAabb,
+    ) {
+        let new_membership = EntitySpatialMembership::for_bounding_box(bounding_box);
+        let old_membership = {
+            let Some(entry) = state.live_by_id.get_mut(&entity_id) else {
+                return;
+            };
+            entry.committed_bounding_box = bounding_box;
+            if entry.spatial_membership == new_membership {
+                return;
+            }
+            mem::take(&mut entry.spatial_membership)
+        };
+
+        state.spatial_index.remove(entity_id, &old_membership);
+        state.spatial_index.insert(entity_id, &new_membership);
+        if let Some(entry) = state.live_by_id.get_mut(&entity_id) {
+            entry.spatial_membership = new_membership;
+        }
     }
 
     fn remove_from_section(state: &mut ManagerState, section: SectionPos, entity_id: i32) {

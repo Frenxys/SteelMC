@@ -69,6 +69,7 @@ fn packaged_schema_declares_server_thread_settings() {
 
     assert!(thread_properties.contains_key("packet_workers"));
     assert!(thread_properties.contains_key("chunk_encoding"));
+    assert!(thread_properties.contains_key("gameplay_compute"));
 }
 
 #[tokio::test]
@@ -196,7 +197,8 @@ fn configured_thread_counts_parse_and_flow_to_runtime_config() {
         .replace("chunk_runtime = 0", "chunk_runtime = 4")
         .replace("packet_workers = 0", "packet_workers = 5")
         .replace("chunk_generation = 0", "chunk_generation = 6")
-        .replace("chunk_encoding = 0", "chunk_encoding = 7");
+        .replace("chunk_encoding = 0", "chunk_encoding = 7")
+        .replace("gameplay_compute = 0", "gameplay_compute = 8");
     let config: SteelConfig = toml::from_str(&config_toml).expect("config parses");
 
     assert_eq!(config.server.threads.main_runtime, Some(3));
@@ -204,6 +206,7 @@ fn configured_thread_counts_parse_and_flow_to_runtime_config() {
     assert_eq!(config.server.threads.packet_workers, Some(5));
     assert_eq!(config.server.threads.chunk_generation, Some(6));
     assert_eq!(config.server.threads.chunk_encoding, Some(7));
+    assert_eq!(config.server.threads.gameplay_compute, Some(8));
     assert_eq!(
         config.server.clone().into_runtime_config().packet_workers,
         Some(5)
@@ -211,6 +214,7 @@ fn configured_thread_counts_parse_and_flow_to_runtime_config() {
     let runtime_config = config.server.into_runtime_config();
     assert_eq!(runtime_config.chunk_generation_threads, Some(6));
     assert_eq!(runtime_config.chunk_encoding_threads, Some(7));
+    assert_eq!(runtime_config.gameplay_compute_threads, Some(8));
 }
 
 #[test]

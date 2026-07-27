@@ -6,11 +6,11 @@ use glam::DVec3;
 use steel_registry::{blocks::block_state_ext::BlockStateExt, vanilla_blocks, vanilla_entities};
 use steel_utils::{BlockLocalAabb, BlockPos, BlockStateId, WorldAabb};
 
-use crate::behavior::{BLOCK_BEHAVIORS, BlockCollisionBoxes, BlockCollisionContext};
+use crate::behavior::{BLOCK_BEHAVIORS, BlockCollisionContext, ResolvedBlockCollisionShape};
 use crate::entity::Entity;
 use crate::physics::COLLISION_EPSILON;
 use crate::physics::shapes::join_is_not_empty;
-use crate::world::World;
+use crate::world::{GameplayBlockReadRegion, GameplayBlockReadWindowError, LevelReader, World};
 
 const BLOCK_COLLISION_EPSILON: f64 = 1.0e-7;
 const ENTITY_COLLISION_EPSILON: f64 = 1.0e-7;
@@ -166,6 +166,20 @@ impl BlockCollisionSearchBounds {
             _ => CollisionCursorType::Corner,
         }
     }
+
+    fn positions(self) -> impl Iterator<Item = BlockPos> {
+        (self.min_z..=self.max_z).flat_map(move |z| {
+            (self.min_y..=self.max_y)
+                .flat_map(move |y| (self.min_x..=self.max_x).map(move |x| BlockPos::new(x, y, z)))
+        })
+    }
+
+    fn read_region(self) -> Result<GameplayBlockReadRegion, GameplayBlockReadWindowError> {
+        GameplayBlockReadRegion::from_corners(
+            BlockPos::new(self.min_x, self.min_y, self.min_z),
+            BlockPos::new(self.max_x, self.max_y, self.max_z),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,19 +191,12 @@ enum CollisionCursorType {
 }
 
 struct CollisionShape {
-    boxes: BlockCollisionBoxes,
+    shape: ResolvedBlockCollisionShape,
 }
 
 impl CollisionShape {
     fn has_large_collision_shape(&self) -> bool {
-        self.boxes.iter().any(|aabb| {
-            aabb.min_x() < 0.0
-                || aabb.min_y() < 0.0
-                || aabb.min_z() < 0.0
-                || aabb.max_x() > 1.0
-                || aabb.max_y() > 1.0
-                || aabb.max_z() > 1.0
-        })
+        self.shape.has_large_collision_shape()
     }
 }
 
@@ -242,16 +249,107 @@ impl<'a> WorldCollisionProvider<'a> {
     }
 
     fn get_collision_shape(
-        &self,
+        reader: &dyn LevelReader,
         block_state: BlockStateId,
         block_pos: BlockPos,
         context: BlockCollisionContext,
     ) -> CollisionShape {
         let behavior = BLOCK_BEHAVIORS.get_behavior(block_state.get_block());
-        let boxes =
-            behavior.get_collision_boxes(block_state, self.world.as_ref(), block_pos, context);
+        let shape = behavior.get_resolved_collision_shape(block_state, reader, block_pos, context);
 
-        CollisionShape { boxes }
+        CollisionShape { shape }
+    }
+
+    fn with_block_collision_reader<R>(
+        &self,
+        bounds: BlockCollisionSearchBounds,
+        operation: impl Fn(&dyn LevelReader) -> R,
+    ) -> R {
+        let Ok(region) = bounds.read_region() else {
+            return operation(self.world.as_ref());
+        };
+
+        // Collision-shape enumeration is pure. Keep the pinned scope around only
+        // that enumeration so entity queries, movement commits, and block effects
+        // retain their live ordering and never run while section guards are held.
+        match self
+            .world
+            .with_gameplay_block_state_read_batch(region, |reader| operation(reader))
+        {
+            Ok(result) => result,
+            Err(GameplayBlockReadWindowError::RetryLive) => {
+                match self
+                    .world
+                    .with_gameplay_block_reader(region, |reader| operation(reader))
+                {
+                    Ok(result) => result,
+                    Err(_) => operation(self.world.as_ref()),
+                }
+            }
+            Err(_) => operation(self.world.as_ref()),
+        }
+    }
+
+    fn block_collisions_from_reader(
+        reader: &dyn LevelReader,
+        aabb: &WorldAabb,
+        bounds: BlockCollisionSearchBounds,
+        context: BlockCollisionContext,
+    ) -> Vec<WorldAabb> {
+        let mut collisions = Vec::new();
+        Self::visit_block_collisions_from_reader(reader, aabb, bounds, context, |collision| {
+            collisions.push(collision);
+            false
+        });
+        collisions
+    }
+
+    fn has_block_collision_from_reader(
+        reader: &dyn LevelReader,
+        aabb: &WorldAabb,
+        bounds: BlockCollisionSearchBounds,
+        context: BlockCollisionContext,
+    ) -> bool {
+        Self::visit_block_collisions_from_reader(reader, aabb, bounds, context, |_collision| true)
+    }
+
+    /// Visits intersecting shapes in Vanilla's block-position and shape order.
+    /// Returns `true` as soon as the visitor requests an early stop.
+    fn visit_block_collisions_from_reader(
+        reader: &dyn LevelReader,
+        aabb: &WorldAabb,
+        bounds: BlockCollisionSearchBounds,
+        context: BlockCollisionContext,
+        mut visitor: impl FnMut(WorldAabb) -> bool,
+    ) -> bool {
+        for block_pos in bounds.positions() {
+            let cursor_type = bounds.cursor_type(block_pos.x(), block_pos.y(), block_pos.z());
+            if cursor_type == CollisionCursorType::Corner {
+                continue;
+            }
+
+            let block_state = reader.get_block_state(block_pos);
+            if block_state.is_air() {
+                continue;
+            }
+
+            let collision_shape =
+                Self::get_collision_shape(reader, block_state, block_pos, context);
+            if collision_shape.shape.is_empty()
+                || !should_query_collision_shape(block_state, &collision_shape, cursor_type)
+            {
+                continue;
+            }
+
+            for shape_aabb in &collision_shape.shape {
+                let world_aabb = translate_collision_shape(&shape_aabb, block_pos);
+                if aabb.intersects(world_aabb) && visitor(world_aabb) {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     fn entity_collision_context(
@@ -315,48 +413,44 @@ impl<'a> WorldCollisionProvider<'a> {
         let mut main_support = None;
         let mut main_support_distance = f64::MAX;
 
-        for y in bounds.min_y..=bounds.max_y {
-            for z in bounds.min_z..=bounds.max_z {
-                for x in bounds.min_x..=bounds.max_x {
-                    let cursor_type = bounds.cursor_type(x, y, z);
-                    if cursor_type == CollisionCursorType::Corner {
-                        continue;
-                    }
+        for block_pos in bounds.positions() {
+            let cursor_type = bounds.cursor_type(block_pos.x(), block_pos.y(), block_pos.z());
+            if cursor_type == CollisionCursorType::Corner {
+                continue;
+            }
 
-                    let block_pos = BlockPos::new(x, y, z);
-                    let block_state = self.world.get_block_state(block_pos);
-                    if block_state.is_air() {
-                        continue;
-                    }
+            let block_state = self.world.get_block_state(block_pos);
+            if block_state.is_air() {
+                continue;
+            }
 
-                    let collision_shape = self.get_collision_shape(block_state, block_pos, context);
-                    if collision_shape.boxes.is_empty() {
-                        continue;
-                    }
-                    if !should_query_collision_shape(block_state, &collision_shape, cursor_type) {
-                        continue;
-                    }
+            let collision_shape =
+                Self::get_collision_shape(self.world.as_ref(), block_state, block_pos, context);
+            if collision_shape.shape.is_empty() {
+                continue;
+            }
+            if !should_query_collision_shape(block_state, &collision_shape, cursor_type) {
+                continue;
+            }
 
-                    let supports_entity = collision_shape
-                        .boxes
-                        .iter()
-                        .map(|shape_aabb| translate_collision_shape(shape_aabb, block_pos))
-                        .any(|world_aabb| aabb.intersects(world_aabb));
-                    if !supports_entity {
-                        continue;
-                    }
+            let supports_entity = collision_shape
+                .shape
+                .iter()
+                .map(|shape_aabb| translate_collision_shape(&shape_aabb, block_pos))
+                .any(|world_aabb| aabb.intersects(world_aabb));
+            if !supports_entity {
+                continue;
+            }
 
-                    let distance = block_pos_center_distance_sq(block_pos, entity_position);
-                    let should_replace = distance < main_support_distance
-                        || distance == main_support_distance
-                            && main_support
-                                .is_none_or(|support| vanilla_block_pos_less(support, block_pos));
+            let distance = block_pos_center_distance_sq(block_pos, entity_position);
+            let should_replace = distance < main_support_distance
+                || distance == main_support_distance
+                    && main_support
+                        .is_none_or(|support| vanilla_block_pos_less(support, block_pos));
 
-                    if should_replace {
-                        main_support = Some(block_pos);
-                        main_support_distance = distance;
-                    }
-                }
+            if should_replace {
+                main_support = Some(block_pos);
+                main_support_distance = distance;
             }
         }
 
@@ -593,46 +687,10 @@ impl CollisionWorld for WorldCollisionProvider<'_> {
         aabb: &WorldAabb,
         context: BlockCollisionContext,
     ) -> Vec<WorldAabb> {
-        let mut collisions = Vec::new();
-
         let bounds = BlockCollisionSearchBounds::from_aabb(aabb);
-
-        for y in bounds.min_y..=bounds.max_y {
-            for z in bounds.min_z..=bounds.max_z {
-                for x in bounds.min_x..=bounds.max_x {
-                    let cursor_type = bounds.cursor_type(x, y, z);
-                    if cursor_type == CollisionCursorType::Corner {
-                        continue;
-                    }
-
-                    let block_pos = BlockPos::new(x, y, z);
-                    let block_state = self.world.get_block_state(block_pos);
-
-                    if block_state.is_air() {
-                        continue;
-                    }
-
-                    let collision_shape = self.get_collision_shape(block_state, block_pos, context);
-
-                    if collision_shape.boxes.is_empty() {
-                        continue;
-                    }
-                    if !should_query_collision_shape(block_state, &collision_shape, cursor_type) {
-                        continue;
-                    }
-
-                    for shape_aabb in &collision_shape.boxes {
-                        let world_aabb = translate_collision_shape(shape_aabb, block_pos);
-
-                        if aabb.intersects(world_aabb) {
-                            collisions.push(world_aabb);
-                        }
-                    }
-                }
-            }
-        }
-
-        collisions
+        self.with_block_collision_reader(bounds, |reader| {
+            Self::block_collisions_from_reader(reader, aabb, bounds, context)
+        })
     }
 
     fn has_block_collision_with_context(
@@ -641,43 +699,9 @@ impl CollisionWorld for WorldCollisionProvider<'_> {
         context: BlockCollisionContext,
     ) -> bool {
         let bounds = BlockCollisionSearchBounds::from_aabb(aabb);
-
-        for y in bounds.min_y..=bounds.max_y {
-            for z in bounds.min_z..=bounds.max_z {
-                for x in bounds.min_x..=bounds.max_x {
-                    let cursor_type = bounds.cursor_type(x, y, z);
-                    if cursor_type == CollisionCursorType::Corner {
-                        continue;
-                    }
-
-                    let block_pos = BlockPos::new(x, y, z);
-                    let block_state = self.world.get_block_state(block_pos);
-
-                    if block_state.is_air() {
-                        continue;
-                    }
-
-                    let collision_shape = self.get_collision_shape(block_state, block_pos, context);
-
-                    if collision_shape.boxes.is_empty() {
-                        continue;
-                    }
-                    if !should_query_collision_shape(block_state, &collision_shape, cursor_type) {
-                        continue;
-                    }
-
-                    for shape_aabb in &collision_shape.boxes {
-                        let world_aabb = translate_collision_shape(shape_aabb, block_pos);
-
-                        if aabb.intersects(world_aabb) {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-
-        false
+        self.with_block_collision_reader(bounds, |reader| {
+            Self::has_block_collision_from_reader(reader, aabb, bounds, context)
+        })
     }
 
     fn get_pre_move_collisions(
@@ -772,12 +796,20 @@ impl CollisionWorld for WorldCollisionProvider<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::iter;
+    use std::{iter, sync::Arc};
 
     use super::*;
-    use steel_registry::blocks::shapes::VoxelShape;
+    use steel_registry::blocks::properties::{BlockStateProperties, Direction, PistonType};
+    use steel_registry::blocks::shapes::{OffsetVoxelShape, VoxelShape};
     use steel_registry::test_support;
-    use steel_utils::BlockLocalAabb;
+    use steel_utils::types::UpdateFlags;
+    use steel_utils::{BlockLocalAabb, ChunkPos};
+
+    use crate::behavior::init_behaviors;
+    use crate::block_entity::{
+        SharedBlockEntity, entities::PistonMovingBlockEntity, init_block_entities,
+    };
+    use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
 
     const LARGE_COLLISION_SHAPE: &[BlockLocalAabb] =
         &[BlockLocalAabb::new(-0.25, 0.0, 0.0, 1.0, 1.0, 1.0)];
@@ -860,6 +892,32 @@ mod tests {
         let aabb3 = WorldAabb::new(5.0, 5.0, 5.0, 6.0, 6.0, 6.0);
 
         assert!(!aabb1.intersects(aabb3));
+    }
+
+    #[test]
+    fn collision_search_positions_match_vanilla_cursor_order() {
+        let bounds = BlockCollisionSearchBounds {
+            min_x: 0,
+            min_y: 0,
+            min_z: 0,
+            max_x: 1,
+            max_y: 1,
+            max_z: 1,
+        };
+
+        assert_eq!(
+            bounds.positions().collect::<Vec<_>>(),
+            vec![
+                BlockPos::new(0, 0, 0),
+                BlockPos::new(1, 0, 0),
+                BlockPos::new(0, 1, 0),
+                BlockPos::new(1, 1, 0),
+                BlockPos::new(0, 0, 1),
+                BlockPos::new(1, 0, 1),
+                BlockPos::new(0, 1, 1),
+                BlockPos::new(1, 1, 1),
+            ]
+        );
     }
 
     #[test]
@@ -1050,7 +1108,7 @@ mod tests {
         let moving_piston = vanilla_blocks::MOVING_PISTON.default_state();
         let large_shape = VoxelShape::from_boxes(LARGE_COLLISION_SHAPE);
         let shape = |shape: VoxelShape| CollisionShape {
-            boxes: shape.into_iter().copied().collect(),
+            shape: ResolvedBlockCollisionShape::borrowed(OffsetVoxelShape::without_offset(shape)),
         };
 
         assert!(should_query_collision_shape(
@@ -1091,10 +1149,10 @@ mod tests {
 
         let stone = vanilla_blocks::STONE.default_state();
         let shifted_full_block = CollisionShape {
-            boxes: VoxelShape::FULL_BLOCK
-                .into_iter()
-                .map(|aabb| aabb.translate(DVec3::new(0.25, 0.0, 0.0)))
-                .collect(),
+            shape: ResolvedBlockCollisionShape::borrowed(OffsetVoxelShape::new(
+                VoxelShape::FULL_BLOCK,
+                DVec3::new(0.25, 0.0, 0.0),
+            )),
         };
 
         assert!(should_query_collision_shape(
@@ -1102,5 +1160,99 @@ mod tests {
             &shifted_full_block,
             CollisionCursorType::Face
         ));
+    }
+
+    #[test]
+    fn pinned_static_block_collisions_exactly_match_live_collection() {
+        test_support::init_test_registry();
+        init_behaviors();
+        let world = fresh_test_world("pinned_static_block_collisions");
+        let pos = BlockPos::new(8, 64, 8);
+        insert_ready_full_chunk(&world, ChunkPos::from_block_pos(pos));
+        assert!(world.set_block(
+            pos,
+            vanilla_blocks::STONE.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        ));
+
+        let query = WorldAabb::new(8.25, 64.25, 8.25, 8.75, 64.75, 8.75);
+        let bounds = BlockCollisionSearchBounds::from_aabb(&query);
+        let context = BlockCollisionContext::empty();
+        let provider = WorldCollisionProvider::new(&world);
+        let live = WorldCollisionProvider::block_collisions_from_reader(
+            world.as_ref(),
+            &query,
+            bounds,
+            context,
+        );
+        assert!(!live.is_empty());
+
+        let Ok(region) = bounds.read_region() else {
+            panic!("small collision region should be representable");
+        };
+        let pinned = world.with_gameplay_block_state_read_batch(region, |reader| {
+            WorldCollisionProvider::block_collisions_from_reader(reader, &query, bounds, context)
+        });
+        let Ok(pinned) = pinned else {
+            panic!("static block collision collection should stay on the pinned path");
+        };
+
+        assert_eq!(pinned, live);
+        assert_eq!(
+            provider.get_block_collisions_with_context(&query, context),
+            live
+        );
+    }
+
+    #[test]
+    fn moving_piston_block_collisions_retry_the_whole_collection_live() {
+        test_support::init_test_registry();
+        init_behaviors();
+        init_block_entities();
+        let world = fresh_test_world("moving_piston_block_collision_retry");
+        let pos = BlockPos::new(8, 64, 8);
+        insert_ready_full_chunk(&world, ChunkPos::from_block_pos(pos));
+        let moving_state = vanilla_blocks::MOVING_PISTON
+            .default_state()
+            .set_value(&BlockStateProperties::FACING, Direction::East)
+            .set_value(&BlockStateProperties::PISTON_TYPE, PistonType::Normal);
+        assert!(world.set_block(pos, moving_state, UpdateFlags::UPDATE_NONE));
+        let block_entity: SharedBlockEntity = Arc::new(PistonMovingBlockEntity::new_moving(
+            Arc::downgrade(&world),
+            pos,
+            moving_state,
+            vanilla_blocks::STONE.default_state(),
+            Direction::East,
+            true,
+            false,
+        ));
+        assert!(world.set_block_entity(block_entity));
+
+        // At progress zero an east-extending moved block occupies the cell west
+        // of the moving-piston state, so the query must resolve its block entity.
+        let query = WorldAabb::new(7.25, 64.25, 8.25, 7.75, 64.75, 8.75);
+        let bounds = BlockCollisionSearchBounds::from_aabb(&query);
+        let context = BlockCollisionContext::empty();
+        let provider = WorldCollisionProvider::new(&world);
+        let live = WorldCollisionProvider::block_collisions_from_reader(
+            world.as_ref(),
+            &query,
+            bounds,
+            context,
+        );
+        assert!(!live.is_empty());
+
+        let Ok(region) = bounds.read_region() else {
+            panic!("small collision region should be representable");
+        };
+        let pinned = world.with_gameplay_block_state_read_batch(region, |reader| {
+            WorldCollisionProvider::block_collisions_from_reader(reader, &query, bounds, context)
+        });
+        assert_eq!(pinned, Err(GameplayBlockReadWindowError::RetryLive));
+
+        assert_eq!(
+            provider.get_block_collisions_with_context(&query, context),
+            live
+        );
     }
 }

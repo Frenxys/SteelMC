@@ -1,7 +1,8 @@
 use std::mem;
 
 use glam::{DVec3, IVec3};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxBuildHasher, FxHashSet};
+use smallvec::SmallVec;
 use steel_registry::blocks::shapes::VoxelShape;
 use steel_utils::{BlockPos, WorldAabb, axis::Axis};
 
@@ -9,11 +10,63 @@ const SMALL_MOVEMENT_EPSILON_SQ: f64 = 9.999_999_4e-11;
 const CLIP_EPSILON: f64 = 1.0e-7;
 const CORNER_HIT_EPSILON: f64 = 1.0e-5;
 const ENTITY_INSIDE_SWEEP_INFLATE_EPSILON: f64 = 1.0e-7;
+// Holds both 2x2x2 endpoint volumes inline; larger traversals promote before dedup grows unbounded.
+const INLINE_VISITED_BLOCK_CAPACITY: usize = 16;
+
+pub(super) enum VisitedBlockSet {
+    Inline(SmallVec<[BlockPos; INLINE_VISITED_BLOCK_CAPACITY]>),
+    Hashed(FxHashSet<BlockPos>),
+}
+
+impl Default for VisitedBlockSet {
+    fn default() -> Self {
+        Self::Inline(SmallVec::new())
+    }
+}
+
+impl VisitedBlockSet {
+    pub(super) fn insert(&mut self, pos: BlockPos) -> bool {
+        match self {
+            Self::Inline(blocks) => {
+                if blocks.contains(&pos) {
+                    return false;
+                }
+                if blocks.len() < INLINE_VISITED_BLOCK_CAPACITY {
+                    blocks.push(pos);
+                    return true;
+                }
+
+                let mut hashed = FxHashSet::with_capacity_and_hasher(
+                    INLINE_VISITED_BLOCK_CAPACITY * 2,
+                    FxBuildHasher,
+                );
+                hashed.extend(blocks.iter().copied());
+                let inserted = hashed.insert(pos);
+                *self = Self::Hashed(hashed);
+                inserted
+            }
+            Self::Hashed(blocks) => blocks.insert(pos),
+        }
+    }
+
+    fn clear(&mut self) {
+        match self {
+            Self::Inline(blocks) => blocks.clear(),
+            Self::Hashed(blocks) => blocks.clear(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct BlockTraversalScratch {
+    visited: VisitedBlockSet,
+}
 
 pub(super) fn for_each_block_intersected_between(
     from: DVec3,
     to: DVec3,
     aabb_at_target: WorldAabb,
+    scratch: &mut BlockTraversalScratch,
     mut visitor: impl FnMut(BlockPos, i32) -> bool,
 ) -> Option<i32> {
     let mut last_iteration = 0;
@@ -29,14 +82,18 @@ pub(super) fn for_each_block_intersected_between(
         return Some(last_iteration + 1);
     }
 
-    let mut visited = FxHashSet::default();
+    scratch.visited.clear();
+    let visited = &mut scratch.visited;
     let aabb_at_start = aabb_at_target.translate(-travel);
-    for pos in between_corners_in_direction(aabb_at_start, travel) {
+    if !for_each_between_corners_in_direction(aabb_at_start, travel, |pos| {
         last_iteration = 0;
         if !visitor(pos, 0) {
-            return None;
+            return false;
         }
         visited.insert(pos);
+        true
+    }) {
+        return None;
     }
 
     let iterations = ({
@@ -44,16 +101,19 @@ pub(super) fn for_each_block_intersected_between(
             last_iteration = iteration;
             visitor(pos, iteration)
         };
-        add_collisions_along_travel(&mut visited, travel, aabb_at_target, &mut traced_visitor)
+        add_collisions_along_travel(visited, travel, aabb_at_target, &mut traced_visitor)
     })?;
 
-    for pos in between_corners_in_direction(aabb_at_target, travel) {
+    if !for_each_between_corners_in_direction(aabb_at_target, travel, |pos| {
         if visited.insert(pos) {
             last_iteration = iterations + 1;
             if !visitor(pos, iterations + 1) {
-                return None;
+                return false;
             }
         }
+        true
+    }) {
+        return None;
     }
 
     Some(last_iteration + 1)
@@ -94,7 +154,7 @@ pub(super) fn collided_with_aabb_moving_from(
     reason = "keeps the vanilla BlockGetter.addCollisionsAlongTravel port auditable"
 )]
 fn add_collisions_along_travel(
-    visited: &mut FxHashSet<BlockPos>,
+    visited: &mut VisitedBlockSet,
     travel: DVec3,
     aabb_at_target: WorldAabb,
     visitor: &mut impl FnMut(BlockPos, i32) -> bool,
@@ -197,10 +257,18 @@ fn add_collisions_along_travel(
                 (corner_hit_z - box_size.z * f64::from(corner_dir.z)).floor() as i32,
             );
 
-            for pos in between_corners_in_direction_between(corner_block, opposite_corner, travel) {
-                if visited.insert(pos) && !visitor(pos, iterations) {
-                    return None;
-                }
+            if !for_each_between_corners_in_direction_between(
+                corner_block,
+                opposite_corner,
+                travel,
+                |pos| {
+                    if visited.insert(pos) && !visitor(pos, iterations) {
+                        return false;
+                    }
+                    true
+                },
+            ) {
+                return None;
             }
         }
     }
@@ -232,7 +300,11 @@ pub(super) fn for_each_block_in_aabb(
     true
 }
 
-fn between_corners_in_direction(aabb: WorldAabb, direction: DVec3) -> Vec<BlockPos> {
+fn for_each_between_corners_in_direction(
+    aabb: WorldAabb,
+    direction: DVec3,
+    visitor: impl FnMut(BlockPos) -> bool,
+) -> bool {
     let first_corner = IVec3::new(
         aabb.min(Axis::X).floor() as i32,
         aabb.min(Axis::Y).floor() as i32,
@@ -243,14 +315,15 @@ fn between_corners_in_direction(aabb: WorldAabb, direction: DVec3) -> Vec<BlockP
         aabb.max(Axis::Y).floor() as i32,
         aabb.max(Axis::Z).floor() as i32,
     );
-    between_corners_in_direction_between(first_corner, second_corner, direction)
+    for_each_between_corners_in_direction_between(first_corner, second_corner, direction, visitor)
 }
 
-fn between_corners_in_direction_between(
+fn for_each_between_corners_in_direction_between(
     first_corner: IVec3,
     second_corner: IVec3,
     direction: DVec3,
-) -> Vec<BlockPos> {
+    mut visitor: impl FnMut(BlockPos) -> bool,
+) -> bool {
     let min_corner = first_corner.min(second_corner);
     let max_corner = first_corner.max(second_corner);
     let diff = max_corner - min_corner;
@@ -281,7 +354,6 @@ fn between_corners_in_direction_between(
     let first_max = axis_value(diff, first_axis);
     let second_max = axis_value(diff, second_axis);
     let third_max = axis_value(diff, third_axis);
-    let mut positions = Vec::new();
 
     for first_index in 0..=first_max {
         for second_index in 0..=second_max {
@@ -290,12 +362,14 @@ fn between_corners_in_direction_between(
                     + first_step * first_index
                     + second_step * second_index
                     + third_step * third_index;
-                positions.push(BlockPos::new(position.x, position.y, position.z));
+                if !visitor(BlockPos::new(position.x, position.y, position.z)) {
+                    return false;
+                }
             }
         }
     }
 
-    positions
+    true
 }
 
 fn clip_block(pos: BlockPos, from: DVec3, to: DVec3) -> Option<DVec3> {
@@ -466,11 +540,18 @@ mod tests {
 
     fn visited_positions(from: DVec3, to: DVec3, aabb_at_target: WorldAabb) -> Vec<BlockPos> {
         let mut positions = Vec::new();
+        let mut scratch = BlockTraversalScratch::default();
         assert!(
-            for_each_block_intersected_between(from, to, aabb_at_target, |pos, _iteration| {
-                positions.push(pos);
-                true
-            })
+            for_each_block_intersected_between(
+                from,
+                to,
+                aabb_at_target,
+                &mut scratch,
+                |pos, _iteration| {
+                    positions.push(pos);
+                    true
+                }
+            )
             .is_some()
         );
         positions
@@ -549,10 +630,12 @@ mod tests {
     #[test]
     fn visitor_can_stop_trace() {
         let mut visited = Vec::new();
+        let mut scratch = BlockTraversalScratch::default();
         let completed = for_each_block_intersected_between(
             DVec3::new(0.5, 64.0, 0.5),
             DVec3::new(2.5, 64.0, 0.5),
             WorldAabb::new(2.2, 64.0, 0.2, 2.8, 64.9, 0.8),
+            &mut scratch,
             |pos, _iteration| {
                 visited.push(pos);
                 false
@@ -561,5 +644,100 @@ mod tests {
 
         assert!(completed.is_none());
         assert_eq!(visited.len(), 1);
+    }
+
+    #[test]
+    fn directional_corner_visitor_preserves_vanilla_axis_and_sign_order() {
+        let mut visited = Vec::new();
+        assert!(for_each_between_corners_in_direction_between(
+            IVec3::ZERO,
+            IVec3::ONE,
+            DVec3::new(0.25, -3.0, 1.0),
+            |pos| {
+                visited.push(pos);
+                true
+            },
+        ));
+
+        assert_eq!(
+            visited,
+            [
+                BlockPos::new(0, 1, 0),
+                BlockPos::new(1, 1, 0),
+                BlockPos::new(0, 1, 1),
+                BlockPos::new(1, 1, 1),
+                BlockPos::new(0, 0, 0),
+                BlockPos::new(1, 0, 0),
+                BlockPos::new(0, 0, 1),
+                BlockPos::new(1, 0, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn directional_corner_visitor_stops_at_the_same_candidate() {
+        let mut visited = Vec::new();
+        let completed = for_each_between_corners_in_direction_between(
+            IVec3::ZERO,
+            IVec3::ONE,
+            DVec3::new(0.25, -3.0, 1.0),
+            |pos| {
+                visited.push(pos);
+                visited.len() < 3
+            },
+        );
+
+        assert!(!completed);
+        assert_eq!(
+            visited,
+            [
+                BlockPos::new(0, 1, 0),
+                BlockPos::new(1, 1, 0),
+                BlockPos::new(0, 1, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn visited_block_set_preserves_entries_when_promoted() {
+        let mut visited = VisitedBlockSet::default();
+        for x in 0..INLINE_VISITED_BLOCK_CAPACITY as i32 {
+            assert!(visited.insert(BlockPos::new(x, 64, 0)));
+        }
+        assert!(matches!(visited, VisitedBlockSet::Inline(_)));
+        assert!(!visited.insert(BlockPos::new(7, 64, 0)));
+
+        assert!(visited.insert(BlockPos::new(INLINE_VISITED_BLOCK_CAPACITY as i32, 64, 0,)));
+        assert!(matches!(visited, VisitedBlockSet::Hashed(_)));
+        for x in 0..=INLINE_VISITED_BLOCK_CAPACITY as i32 {
+            assert!(!visited.insert(BlockPos::new(x, 64, 0)));
+        }
+    }
+
+    #[test]
+    fn traversal_scratch_is_cleared_between_segments() {
+        let from = DVec3::new(0.5, 64.0, 0.5);
+        let to = DVec3::new(2.5, 64.0, 0.5);
+        let aabb = WorldAabb::new(2.2, 64.0, 0.2, 2.8, 64.9, 0.8);
+        let mut scratch = BlockTraversalScratch::default();
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+
+        assert!(
+            for_each_block_intersected_between(from, to, aabb, &mut scratch, |pos, iteration| {
+                first.push((pos, iteration));
+                true
+            })
+            .is_some()
+        );
+        assert!(
+            for_each_block_intersected_between(from, to, aabb, &mut scratch, |pos, iteration| {
+                second.push((pos, iteration));
+                true
+            })
+            .is_some()
+        );
+
+        assert_eq!(second, first);
     }
 }

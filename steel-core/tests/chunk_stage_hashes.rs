@@ -31,6 +31,7 @@ use steel_core::chunk::light::{
 use steel_core::chunk::proto_chunk::ProtoChunk;
 use steel_core::chunk::section::{ChunkSection, Sections};
 use steel_core::level_data::WorldGenerationSettings;
+use steel_core::server::gameplay_compute::GameplayComputePool;
 use steel_core::world::{World, WorldConfig, WorldStorageConfig};
 use steel_core::worldgen::{ChunkGenerator, ChunkGeneratorType, WorldGenContext};
 use steel_registry::blocks::block_state_ext::BlockStateExt;
@@ -251,6 +252,9 @@ fn create_test_world(
         "minecraft:the_end" => 0,
         _ => 63,
     };
+    let gameplay_compute_pool = Arc::new(
+        GameplayComputePool::new(1).expect("chunk-stage gameplay compute pool should start"),
+    );
 
     runtime
         .block_on(World::new_with_config(
@@ -273,6 +277,7 @@ fn create_test_world(
                 difficulty: Difficulty::Normal,
             },
             generation_pool,
+            gameplay_compute_pool,
         ))
         .expect("failed to create chunk-stage hash test world")
 }
@@ -320,7 +325,7 @@ fn compute_block_hash(sections: &Sections) -> String {
         'scan: for y in 0..16 {
             for z in 0..16 {
                 for x in 0..16 {
-                    if !section.states.get(x, y, z).is_air() {
+                    if !section.states().get(x, y, z).is_air() {
                         all_air = false;
                         break 'scan;
                     }
@@ -333,7 +338,7 @@ fn compute_block_hash(sections: &Sections) -> String {
             for y in 0..16 {
                 for z in 0..16 {
                     for x in 0..16 {
-                        let state = section.states.get(x, y, z);
+                        let state = section.states().get(x, y, z);
                         let state_id = u32::from(state.0);
                         ctx.consume([(state_id >> 24) as u8]);
                         ctx.consume([(state_id >> 16) as u8]);
@@ -566,7 +571,7 @@ fn diff_chunk(sections: &Sections, reference: &ChunkBlockData, min_y: i32) -> Ve
 
         match ref_section {
             Some(Some(ref_ids)) => {
-                if section.states.has_only_air() {
+                if section.states().has_only_air() {
                     // Steel says all air, vanilla has data
                     for (idx, &vanilla_id) in ref_ids.iter().enumerate() {
                         if vanilla_id != 0 {
@@ -589,7 +594,7 @@ fn diff_chunk(sections: &Sections, reference: &ChunkBlockData, min_y: i32) -> Ve
                                 let idx = y_local * 256 + z * 16 + x;
                                 let vanilla_id = ref_ids[idx];
                                 let steel_id =
-                                    u32::from(section.states.get(x, y_local, z).0) as i32;
+                                    u32::from(section.states().get(x, y_local, z).0) as i32;
                                 if vanilla_id != steel_id {
                                     diffs.push(BlockDiff {
                                         x,
@@ -606,12 +611,12 @@ fn diff_chunk(sections: &Sections, reference: &ChunkBlockData, min_y: i32) -> Ve
             }
             Some(None) | None => {
                 // Vanilla says all air (or section missing). Check if Steel also has air.
-                if !section.states.has_only_air() {
+                if !section.states().has_only_air() {
                     for y_local in 0..16usize {
                         for z in 0..16usize {
                             for x in 0..16usize {
                                 let steel_id =
-                                    u32::from(section.states.get(x, y_local, z).0) as i32;
+                                    u32::from(section.states().get(x, y_local, z).0) as i32;
                                 if steel_id != 0 {
                                     diffs.push(BlockDiff {
                                         x,

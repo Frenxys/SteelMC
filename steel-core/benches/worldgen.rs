@@ -25,6 +25,7 @@ use steel_core::chunk::proto_chunk::ProtoChunk;
 use steel_core::chunk::section::{ChunkSection, Sections};
 use steel_core::entity::init_entities;
 use steel_core::level_data::WorldGenerationSettings;
+use steel_core::server::gameplay_compute::GameplayComputePool;
 use steel_core::world::{World, WorldConfig, WorldStorageConfig};
 use steel_core::worldgen::{
     ChunkGenerator, ChunkGeneratorType, EndGenerator, GeneratorOutput, NetherGenerator,
@@ -69,6 +70,9 @@ static BENCH_GENERATION_POOL: LazyLock<Arc<rayon::ThreadPool>> = LazyLock::new(|
             .build()
             .expect("bench generation pool should build"),
     )
+});
+static BENCH_GAMEPLAY_COMPUTE_POOL: LazyLock<Arc<GameplayComputePool>> = LazyLock::new(|| {
+    Arc::new(GameplayComputePool::new(1).expect("bench gameplay compute pool should build"))
 });
 const BENCH_HOLDER_LOAD_LEVEL: ChunkTicketLevel = ChunkTicketLevel::STRONGEST;
 
@@ -593,6 +597,7 @@ fn build_feature_fixture_at(
             seed,
             world_config,
             generation_pool,
+            Arc::clone(&BENCH_GAMEPLAY_COMPUTE_POOL),
         ))
         .expect("feature benchmark world should build");
     let context = world.chunk_map.world_gen_context.clone();
@@ -866,6 +871,7 @@ fn build_concurrent_feature_fixture(
             seed,
             world_config,
             generation_pool.clone(),
+            Arc::clone(&BENCH_GAMEPLAY_COMPUTE_POOL),
         ))
         .expect("feature benchmark world should build");
     let context = world.chunk_map.world_gen_context.clone();
@@ -956,6 +962,7 @@ fn build_concurrent_full_pipeline_fixture(
             seed,
             world_config,
             generation_pool.clone(),
+            Arc::clone(&BENCH_GAMEPLAY_COMPUTE_POOL),
         ))
         .expect("full-pipeline benchmark world should build");
     let chunk_map = world.chunk_map.clone();
@@ -1047,6 +1054,7 @@ fn build_concurrent_light_fixture(
             seed,
             world_config,
             generation_pool.clone(),
+            Arc::clone(&BENCH_GAMEPLAY_COMPUTE_POOL),
         ))
         .expect("light benchmark world should build");
     let chunk_map = world.chunk_map.clone();

@@ -520,11 +520,14 @@ impl BlockRegistry {
             && self
                 .blocks_by_id
                 .get(id)
-                .is_some_and(|registered| *registered == block)
+                .is_some_and(|registered| std::ptr::eq(*registered, block))
         {
             return Some(id);
         }
 
+        // A non-identical reference can still name the same registry entry.
+        // Keep the key lookup as the compatibility path, but avoid comparing
+        // registry keys on the normal cached-reference path.
         self.blocks_by_key.get(&block.key).copied()
     }
 
