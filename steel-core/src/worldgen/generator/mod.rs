@@ -8,7 +8,7 @@ pub(crate) mod vanilla;
 
 pub use empty::EmptyChunkGenerator;
 pub use flat::FlatChunkGenerator;
-pub use vanilla::VanillaGenerator;
+pub use vanilla::{SteelPostNoiseState, VanillaGenerator, VanillaPostNoiseStateType};
 
 use enum_dispatch::enum_dispatch;
 use glam::IVec3;

@@ -63,10 +63,7 @@ pub struct SourceChunk {
 
 /// Runtime context for a single `apply_carvers` invocation on one chunk.
 ///
-/// Mirrors vanilla's `CarvingContext`. Owns the freshly-built [`Aquifer`] for
-/// this chunk; the aquifer is regenerated per carver invocation rather than
-/// cached on the [`Chunk`](crate::chunk::Chunk) — see the TODO on `Chunk::carving_mask`
-/// for discussion.
+/// Mirrors vanilla's `CarvingContext` and borrows the Aquifer retained from Noise.
 pub struct CarvingContext<'a, N: DimensionNoises> {
     /// Dimension minimum Y (inclusive).
     pub min_y: i32,
@@ -74,9 +71,8 @@ pub struct CarvingContext<'a, N: DimensionNoises> {
     pub gen_depth: i32,
     /// Surface system (biome-specific surface noise + clay bands).
     pub surface_system: &'a SurfaceSystem,
-    /// Owned aquifer for this chunk. Built fresh from the dimension's noises
-    /// at the start of `apply_carvers`.
-    pub aquifer: Aquifer<N>,
+    /// Aquifer for this chunk, retained from Noise or reconstructed after a disk reload.
+    pub aquifer: &'a mut Aquifer<N>,
     /// Default solid block for this dimension (stone / netherrack /
     /// `end_stone`).
     pub default_block_id: BlockStateId,

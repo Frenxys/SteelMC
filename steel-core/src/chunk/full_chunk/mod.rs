@@ -262,6 +262,9 @@ impl Chunk {
     #[must_use]
     pub(crate) fn promote_to_full(&self) -> FullChunkPromotion<'_> {
         let proto_chunk = self;
+        // Generation-only caches are never retained by a Full chunk. Carvers normally
+        // consume them earlier; promotion is the defensive lifecycle boundary.
+        proto_chunk.clear_transient_generation_state();
         let min_y = proto_chunk.min_y();
         let height = proto_chunk.height();
         let level = proto_chunk.level_weak();

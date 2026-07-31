@@ -18,4 +18,7 @@ pub(crate) fn generate(
     };
 
     context.generator.apply_carvers(&chunk);
+    // Generator-specific implementations normally consume their own state. This
+    // central boundary also covers skipped work and future custom generators.
+    chunk.clear_transient_generation_state();
 }

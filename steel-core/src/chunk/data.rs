@@ -1,4 +1,5 @@
 //! Chunk data retained from generation through Full runtime use.
+use std::fmt::{self, Formatter};
 use std::sync::{
     Arc, OnceLock, Weak,
     atomic::{AtomicBool, Ordering},
@@ -13,7 +14,7 @@ use steel_registry::{
     vanilla_blocks,
 };
 use steel_utils::{
-    BlockPos, BlockStateId, ChunkPos, SectionPos,
+    BlockPos, BlockStateId, ChunkPos, Downcast as _, DowncastType, ErasedType, SectionPos,
     locks::{SyncMutex, SyncRwLock},
     types::UpdateFlags,
 };
@@ -51,6 +52,23 @@ pub(crate) fn postprocessing_from_disk(
     postprocessing.resize_with(section_count, Vec::new);
     postprocessing.truncate(section_count);
     postprocessing.into_boxed_slice()
+}
+
+#[derive(Default)]
+struct TransientGenerationState {
+    value: Option<Box<dyn ErasedType + Send + Sync>>,
+}
+
+impl fmt::Debug for TransientGenerationState {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TransientGenerationState")
+            .field(
+                "type_key",
+                &self.value.as_deref().map(ErasedType::downcast_type_key),
+            )
+            .finish()
+    }
 }
 
 /// Canonical chunk storage retained across generation and Full runtime phases.
@@ -91,14 +109,8 @@ pub struct Chunk {
     pub light: SyncRwLock<ChunkLightData>,
     /// Full-only runtime state, installed once before Full publication.
     full_runtime: OnceLock<Box<FullChunkRuntime>>,
-    // TODO: research persisting NoiseChunk/Aquifer across stages like vanilla
-    // does. Vanilla caches `NoiseChunk` on `ChunkAccess` so noise, surface,
-    // and carvers share one instance; we currently rebuild per stage. Blocked
-    // by the storage boundary: `NoiseChunk<N: DimensionNoises>` is generic,
-    // while `Chunk` is not.
-    // Options to evaluate: (1) object-safe trait returning carver-needed
-    // values, (2) generic `Chunk<N>` (big ripple), (3) stay as-is if
-    // rebuild cost stays negligible.
+    /// Generator-owned state retained only between generation stages.
+    transient_generation_state: SyncMutex<TransientGenerationState>,
 }
 
 enum PendingPromotionCommit {
@@ -139,6 +151,7 @@ impl Chunk {
             )),
             light: SyncRwLock::new(ChunkLightData::for_valid_world_height(min_y, height)),
             full_runtime: OnceLock::new(),
+            transient_generation_state: SyncMutex::new(TransientGenerationState::default()),
         }
     }
 
@@ -200,6 +213,7 @@ impl Chunk {
             )),
             light: SyncRwLock::new(light),
             full_runtime: OnceLock::new(),
+            transient_generation_state: SyncMutex::new(TransientGenerationState::default()),
         };
 
         if status >= ChunkStatus::InitializeLight {
@@ -449,6 +463,89 @@ impl Chunk {
     #[must_use]
     pub(crate) fn full_runtime(&self) -> Option<&FullChunkRuntime> {
         self.full_runtime.get().map(Box::as_ref)
+    }
+
+    /// Installs generator-owned state for reuse by later generation stages.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the current generator has already installed transient state.
+    pub(crate) fn install_transient_generation_state<T>(&self, state: T)
+    where
+        T: DowncastType + Send + Sync,
+    {
+        let mut slot = self.transient_generation_state.lock();
+        if let Some(current) = slot.value.as_deref() {
+            panic!(
+                "chunk transient generation state {} was not consumed before installing {}",
+                current.downcast_type_key(),
+                T::TYPE_KEY
+            );
+        }
+        slot.value = Some(Box::new(state));
+    }
+
+    /// Borrows generator-owned state without extending its lifetime beyond the callback.
+    ///
+    /// Returns `None` when no state was installed, such as after reloading a partially
+    /// generated chunk from disk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another generator's state occupies this chunk.
+    pub(crate) fn with_transient_generation_state_mut<T, R>(
+        &self,
+        f: impl FnOnce(&mut T) -> R,
+    ) -> Option<R>
+    where
+        T: DowncastType + Send + Sync,
+    {
+        let mut slot = self.transient_generation_state.lock();
+        let state = slot.value.as_deref_mut()?;
+        let actual_key = state.downcast_type_key();
+        let Some(state) = state.downcast_mut::<T>() else {
+            panic!(
+                "chunk transient generation state type mismatch: expected {}, found {}",
+                T::TYPE_KEY,
+                actual_key
+            );
+        };
+        Some(f(state))
+    }
+
+    /// Removes generator-owned state and passes it to `f` before dropping it.
+    ///
+    /// The erased allocation is moved out before the callback, so it is also dropped if
+    /// the callback unwinds. `None` represents a cold continuation loaded from disk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if another generator's state occupies this chunk.
+    pub(crate) fn consume_transient_generation_state<T, R>(
+        &self,
+        f: impl FnOnce(Option<&mut T>) -> R,
+    ) -> R
+    where
+        T: DowncastType + Send + Sync,
+    {
+        let state = self.transient_generation_state.lock().value.take();
+        let Some(mut state) = state else {
+            return f(None);
+        };
+        let actual_key = state.downcast_type_key();
+        let Some(state) = state.downcast_mut::<T>() else {
+            panic!(
+                "chunk transient generation state type mismatch: expected {}, found {}",
+                T::TYPE_KEY,
+                actual_key
+            );
+        };
+        f(Some(state))
+    }
+
+    /// Drops any generator-owned state that is no longer needed by the pipeline.
+    pub(crate) fn clear_transient_generation_state(&self) {
+        self.transient_generation_state.lock().value = None;
     }
 
     /// Returns a write guard to this chunk's carving mask, initializing it on
@@ -1062,7 +1159,10 @@ impl Chunk {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Weak};
+    use std::sync::{
+        Arc, Weak,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use super::{Chunk, PendingPromotionCommit};
     use crate::behavior::{BlockEntityCreation, init_behaviors};
@@ -1079,7 +1179,71 @@ mod tests {
     use steel_registry::{
         test_support::init_test_registry, vanilla_block_entity_types, vanilla_blocks,
     };
-    use steel_utils::{BlockPos, ChunkPos, types::UpdateFlags};
+    use steel_utils::{BlockPos, ChunkPos, DowncastType, DowncastTypeKey, types::UpdateFlags};
+
+    struct DropSentinel(Arc<AtomicUsize>);
+
+    // SAFETY: This key uniquely identifies the test-only sentinel type.
+    unsafe impl DowncastType for DropSentinel {
+        const TYPE_KEY: DowncastTypeKey =
+            DowncastTypeKey::new("steel:test/chunk/transient_generation_state");
+    }
+
+    impl Drop for DropSentinel {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn transient_generation_state_survives_borrow_and_is_consumed_once() {
+        init_test_registry();
+        let chunk = Chunk::new(
+            Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
+            ChunkPos::new(0, 0),
+            0,
+            16,
+            Weak::new(),
+        );
+        let drops = Arc::new(AtomicUsize::new(0));
+        chunk.install_transient_generation_state(DropSentinel(Arc::clone(&drops)));
+
+        assert!(
+            chunk
+                .with_transient_generation_state_mut::<DropSentinel, _>(|_| ())
+                .is_some()
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+
+        let present =
+            chunk.consume_transient_generation_state::<DropSentinel, _>(|state| state.is_some());
+        assert!(present);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(
+            !chunk
+                .consume_transient_generation_state::<DropSentinel, _>(|state| { state.is_some() })
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn full_promotion_drops_leftover_transient_generation_state() {
+        init_test_registry();
+        init_behaviors();
+        let chunk = Chunk::new(
+            Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
+            ChunkPos::new(0, 0),
+            0,
+            16,
+            Weak::new(),
+        );
+        let drops = Arc::new(AtomicUsize::new(0));
+        chunk.install_transient_generation_state(DropSentinel(Arc::clone(&drops)));
+
+        let _ = chunk.promote_to_full();
+
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
 
     #[test]
     fn postprocessing_offset_pack_unpack_matches_vanilla_layout() {

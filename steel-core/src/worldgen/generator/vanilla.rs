@@ -12,8 +12,11 @@ use steel_registry::{REGISTRY, RegistryEntry, RegistryExt, vanilla_biomes};
 use steel_utils::random::{
     Random, RandomSource, RandomSplitter, legacy_random::LegacyRandom, xoroshiro::Xoroshiro,
 };
-use steel_utils::{BlockPos, BlockStateId, ChunkPos, Identifier};
+use steel_utils::{BlockPos, BlockStateId, ChunkPos, DowncastType, DowncastTypeKey, Identifier};
 use steel_worldgen::density::{ColumnCache, DimensionNoises, NoiseSettings};
+use steel_worldgen::density_functions::{
+    end::EndNoises, nether::NetherNoises, overworld::OverworldNoises,
+};
 use steel_worldgen::noise_parameters::get_noise_parameters;
 use steel_worldgen::surface::{
     SurfaceBiomeProvider, SurfaceConditionNoiseCache, SurfaceRuleContext,
@@ -38,6 +41,64 @@ use steel_worldgen::noise::{Aquifer, AquiferResult, LazyAquifer, preliminary_sur
 use steel_worldgen::structure::GenerationContext;
 
 const CARVER_SOURCE_CHUNK_COUNT: usize = 17 * 17;
+
+/// Associates a dimension's statically typed Aquifer with its transient erased state.
+///
+/// Custom dimension noise implementations own their state type and downcast key. Steel
+/// only erases the value between stages; every hot-path Aquifer call remains monomorphized.
+pub trait VanillaPostNoiseStateType: DimensionNoises + 'static {
+    /// Concrete state stored transiently on the generating chunk.
+    type State: DowncastType + Send + Sync;
+
+    /// Wraps the Aquifer after the Noise stage.
+    fn wrap_post_noise_aquifer(aquifer: Aquifer<Self>) -> Self::State;
+
+    /// Recovers the concrete Aquifer at a later generation stage.
+    fn post_noise_aquifer(state: &mut Self::State) -> &mut Aquifer<Self>;
+}
+
+/// Steel-owned post-Noise state for the built-in dimensions.
+#[doc(hidden)]
+pub struct SteelPostNoiseState<N: DimensionNoises> {
+    aquifer: Aquifer<N>,
+}
+
+// SAFETY: Each key uniquely identifies this exact Steel-owned specialization.
+unsafe impl DowncastType for SteelPostNoiseState<OverworldNoises> {
+    const TYPE_KEY: DowncastTypeKey =
+        DowncastTypeKey::new("steel:worldgen_state/post_noise_overworld");
+}
+
+// SAFETY: Each key uniquely identifies this exact Steel-owned specialization.
+unsafe impl DowncastType for SteelPostNoiseState<NetherNoises> {
+    const TYPE_KEY: DowncastTypeKey =
+        DowncastTypeKey::new("steel:worldgen_state/post_noise_nether");
+}
+
+// SAFETY: Each key uniquely identifies this exact Steel-owned specialization.
+unsafe impl DowncastType for SteelPostNoiseState<EndNoises> {
+    const TYPE_KEY: DowncastTypeKey = DowncastTypeKey::new("steel:worldgen_state/post_noise_end");
+}
+
+macro_rules! impl_post_noise_state_type {
+    ($noises:ty) => {
+        impl VanillaPostNoiseStateType for $noises {
+            type State = SteelPostNoiseState<Self>;
+
+            fn wrap_post_noise_aquifer(aquifer: Aquifer<Self>) -> Self::State {
+                SteelPostNoiseState { aquifer }
+            }
+
+            fn post_noise_aquifer(state: &mut Self::State) -> &mut Aquifer<Self> {
+                &mut state.aquifer
+            }
+        }
+    };
+}
+
+impl_post_noise_state_type!(OverworldNoises);
+impl_post_noise_state_type!(NetherNoises);
+impl_post_noise_state_type!(EndNoises);
 
 /// A chunk generator for vanilla (normal) world generation.
 ///
@@ -185,7 +246,42 @@ impl<N: DimensionNoises> VanillaGenerator<N> {
     }
 }
 
-impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
+impl<N: VanillaPostNoiseStateType> VanillaGenerator<N> {
+    fn preliminary_surface_corners(
+        &self,
+        chunk: &Chunk,
+        chunk_min_x: i32,
+        chunk_min_z: i32,
+    ) -> PreliminarySurfaceCorners {
+        let noises = &*self.noises;
+        if let Some(corners) = chunk.with_transient_generation_state_mut::<N::State, _>(|state| {
+            let aquifer = N::post_noise_aquifer(state);
+            PreliminarySurfaceCorners {
+                nw: aquifer.preliminary_surface_level(noises, chunk_min_x, chunk_min_z),
+                ne: aquifer.preliminary_surface_level(noises, chunk_min_x + 16, chunk_min_z),
+                sw: aquifer.preliminary_surface_level(noises, chunk_min_x, chunk_min_z + 16),
+                se: aquifer.preliminary_surface_level(noises, chunk_min_x + 16, chunk_min_z + 16),
+            }
+        }) {
+            return corners;
+        }
+
+        let mut cache = N::ColumnCache::default();
+        PreliminarySurfaceCorners {
+            nw: preliminary_surface_level::<N>(noises, &mut cache, chunk_min_x, chunk_min_z),
+            ne: preliminary_surface_level::<N>(noises, &mut cache, chunk_min_x + 16, chunk_min_z),
+            sw: preliminary_surface_level::<N>(noises, &mut cache, chunk_min_x, chunk_min_z + 16),
+            se: preliminary_surface_level::<N>(
+                noises,
+                &mut cache,
+                chunk_min_x + 16,
+                chunk_min_z + 16,
+            ),
+        }
+    }
+}
+
+impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
     fn min_y(&self) -> i32 {
         N::Settings::MIN_Y
     }
@@ -393,10 +489,15 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
             chunk.write_block_batch_for_generation(ChunkStatus::Biomes, &pending_writes);
         }
 
-        let proto = chunk;
-        let mut heightmaps = proto.heightmaps.write();
-        heightmaps.replace(ocean_floor_wg);
-        heightmaps.replace(world_surface_wg);
+        {
+            let mut heightmaps = chunk.heightmaps.write();
+            heightmaps.replace(ocean_floor_wg);
+            heightmaps.replace(world_surface_wg);
+        }
+
+        if N::Settings::AQUIFERS_ENABLED {
+            chunk.install_transient_generation_state(N::wrap_post_noise_aquifer(aquifer));
+        }
     }
 
     #[expect(clippy::too_many_lines, reason = "splitting would hurt readability")]
@@ -406,7 +507,6 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
         let chunk_min_x = pos.0.x * 16;
         let chunk_min_z = pos.0.y * 16;
         let default_block_id = self.default_block_id;
-        let noises = &*self.noises;
         let surface_rule_block_states = N::surface_rule_block_states();
         let surface_rule_uses_biome = N::surface_rule_uses_biome();
         let surface_rule_uses_preliminary_surface = N::surface_rule_uses_preliminary_surface();
@@ -424,30 +524,8 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
         chunk.prime_heightmaps(&[HeightmapType::WorldSurfaceWg]);
 
         // Pre-compute preliminary surface corners only for rules/extensions that read them.
-        let preliminary_surface_corners = surface_needs_min_surface_level.then(|| {
-            let mut psl_cache = N::ColumnCache::default();
-            let p00 =
-                preliminary_surface_level::<N>(noises, &mut psl_cache, chunk_min_x, chunk_min_z);
-            let p10 = preliminary_surface_level::<N>(
-                noises,
-                &mut psl_cache,
-                chunk_min_x + 16,
-                chunk_min_z,
-            );
-            let p01 = preliminary_surface_level::<N>(
-                noises,
-                &mut psl_cache,
-                chunk_min_x,
-                chunk_min_z + 16,
-            );
-            let p11 = preliminary_surface_level::<N>(
-                noises,
-                &mut psl_cache,
-                chunk_min_x + 16,
-                chunk_min_z + 16,
-            );
-            (p00, p10, p01, p11)
-        });
+        let preliminary_surface_corners = surface_needs_min_surface_level
+            .then(|| self.preliminary_surface_corners(chunk, chunk_min_x, chunk_min_z));
 
         let eroded_badlands_id = (*vanilla_biomes::ERODED_BADLANDS).id() as u16;
         let frozen_ocean_id = (*vanilla_biomes::FROZEN_OCEAN).id() as u16;
@@ -532,23 +610,22 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
                 };
                 condition_noise_cache.reset();
 
-                let min_surface_level =
-                    if let Some((p00, p10, p01, p11)) = preliminary_surface_corners {
-                        // Vanilla: (float)(blockX & 15) / 16.0F — exact for 0-15.
-                        let t_x = f64::from(local_x as u8) / 16.0;
-                        let t_z = f64::from(local_z as u8) / 16.0;
-                        let interp = lerp2(
-                            t_x,
-                            t_z,
-                            f64::from(p00),
-                            f64::from(p10),
-                            f64::from(p01),
-                            f64::from(p11),
-                        );
-                        interp.floor() as i32 + surface_depth - 8
-                    } else {
-                        0
-                    };
+                let min_surface_level = if let Some(corners) = preliminary_surface_corners {
+                    // Vanilla: (float)(blockX & 15) / 16.0F — exact for 0-15.
+                    let t_x = f64::from(local_x as u8) / 16.0;
+                    let t_z = f64::from(local_z as u8) / 16.0;
+                    let interp = lerp2(
+                        t_x,
+                        t_z,
+                        f64::from(corners.nw),
+                        f64::from(corners.ne),
+                        f64::from(corners.sw),
+                        f64::from(corners.se),
+                    );
+                    interp.floor() as i32 + surface_depth - 8
+                } else {
+                    0
+                };
 
                 // Steep condition: vanilla only checks south >= north + 4 and
                 // west >= east + 4 (asymmetric, not absolute difference).
@@ -730,129 +807,120 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
             .uniform_carver_biome
             .is_some_and(|biome| biome.carvers.is_empty())
         {
+            chunk.clear_transient_generation_state();
             return;
         }
 
-        chunk.prime_heightmaps(&[HeightmapType::WorldSurfaceWg]);
+        chunk.consume_transient_generation_state::<N::State, _>(|retained_state| {
+            chunk.prime_heightmaps(&[HeightmapType::WorldSurfaceWg]);
 
-        let pos = chunk.pos();
-        let chunk_min_x = pos.0.x * 16;
-        let chunk_min_z = pos.0.y * 16;
-        let min_y = N::Settings::MIN_Y;
-        let height = N::Settings::HEIGHT;
-        let noises = &*self.noises;
+            let pos = chunk.pos();
+            let chunk_min_x = pos.0.x * 16;
+            let chunk_min_z = pos.0.y * 16;
+            let min_y = N::Settings::MIN_Y;
+            let height = N::Settings::HEIGHT;
+            let noises = &*self.noises;
 
-        // Fresh aquifer (vanilla caches NoiseChunk across stages; see TODO on
-        // Chunk::carving_mask for why we rebuild instead).
-        let mut column_cache = N::ColumnCache::default();
-        if N::Settings::AQUIFERS_ENABLED {
-            column_cache.init_grid(chunk_min_x, chunk_min_z, noises);
-        }
-        let aquifer = Aquifer::<N>::new(
-            chunk_min_x,
-            chunk_min_z,
-            min_y,
-            height,
-            &self.splitter,
-            noises,
-            column_cache,
-        );
+            let mut rebuilt_aquifer = None;
+            let aquifer = if let Some(state) = retained_state {
+                N::post_noise_aquifer(state)
+            } else {
+                let mut column_cache = N::ColumnCache::default();
+                if N::Settings::AQUIFERS_ENABLED {
+                    column_cache.init_grid(chunk_min_x, chunk_min_z, noises);
+                }
+                rebuilt_aquifer.insert(Aquifer::<N>::new(
+                    chunk_min_x,
+                    chunk_min_z,
+                    min_y,
+                    height,
+                    &self.splitter,
+                    noises,
+                    column_cache,
+                ))
+            };
 
-        // Preliminary surface level at the chunk's 4 corners — used by
-        // top_material min_surface_level interpolation.
-        let mut psl_cache = N::ColumnCache::default();
-        let psl_corners = PreliminarySurfaceCorners {
-            nw: preliminary_surface_level::<N>(noises, &mut psl_cache, chunk_min_x, chunk_min_z),
-            ne: preliminary_surface_level::<N>(
-                noises,
-                &mut psl_cache,
-                chunk_min_x + 16,
-                chunk_min_z,
-            ),
-            sw: preliminary_surface_level::<N>(
-                noises,
-                &mut psl_cache,
+            // Preliminary surface level at the chunk's 4 corners — used by
+            // top_material min_surface_level interpolation.
+            let psl_corners = PreliminarySurfaceCorners {
+                nw: aquifer.preliminary_surface_level(noises, chunk_min_x, chunk_min_z),
+                ne: aquifer.preliminary_surface_level(noises, chunk_min_x + 16, chunk_min_z),
+                sw: aquifer.preliminary_surface_level(noises, chunk_min_x, chunk_min_z + 16),
+                se: aquifer.preliminary_surface_level(noises, chunk_min_x + 16, chunk_min_z + 16),
+            };
+
+            let mut ctx = CarvingContext {
+                min_y,
+                gen_depth: height,
+                surface_system: &self.surface_system,
+                aquifer,
+                default_block_id: self.default_block_id,
+                psl_corners,
                 chunk_min_x,
-                chunk_min_z + 16,
-            ),
-            se: preliminary_surface_level::<N>(
-                noises,
-                &mut psl_cache,
-                chunk_min_x + 16,
-                chunk_min_z + 16,
-            ),
-        };
+                chunk_min_z,
+            };
 
-        let mut ctx = CarvingContext {
-            min_y,
-            gen_depth: height,
-            surface_system: &self.surface_system,
-            aquifer,
-            default_block_id: self.default_block_id,
-            psl_corners,
-            chunk_min_x,
-            chunk_min_z,
-        };
+            let ids = CarverBlockIds::load();
 
-        let ids = CarverBlockIds::load();
-
-        // Pre-fetch the 17×17 source-chunk carver lists. Done up front so we
-        // can later close over `biome_sampler` mutably inside `biome_getter`.
-        // Vanilla samples every source biome here; when this generator's full
-        // possible-biome set has a uniform carver list, the representative
-        // biome gives the same carver keys without 289 climate lookups.
-        let mut biome_sampler = self.biome_source.chunk_sampler();
-        let mut source_biomes: SmallVec<[SourceChunk; CARVER_SOURCE_CHUNK_COUNT]> = SmallVec::new();
-        for dx in -8i32..=8 {
-            for dz in -8i32..=8 {
-                let sx = pos.0.x + dx;
-                let sz = pos.0.y + dz;
-                let biome = if let Some(biome) = self.uniform_carver_biome {
-                    biome
-                } else {
-                    let qx = (sx * 16) >> 2;
-                    let qz = (sz * 16) >> 2;
-                    biome_sampler.sample(qx, 0, qz)
-                };
-                source_biomes.push(SourceChunk {
-                    pos: ChunkPos::new(sx, sz),
-                    biome,
-                });
+            // Pre-fetch the 17×17 source-chunk carver lists. Done up front so we
+            // can later close over `biome_sampler` mutably inside `biome_getter`.
+            // Vanilla samples every source biome here; when this generator's full
+            // possible-biome set has a uniform carver list, the representative
+            // biome gives the same carver keys without 289 climate lookups.
+            let mut biome_sampler = self.biome_source.chunk_sampler();
+            let mut source_biomes: SmallVec<[SourceChunk; CARVER_SOURCE_CHUNK_COUNT]> =
+                SmallVec::new();
+            for dx in -8i32..=8 {
+                for dz in -8i32..=8 {
+                    let sx = pos.0.x + dx;
+                    let sz = pos.0.y + dz;
+                    let biome = if let Some(biome) = self.uniform_carver_biome {
+                        biome
+                    } else {
+                        let qx = (sx * 16) >> 2;
+                        let qz = (sz * 16) >> 2;
+                        biome_sampler.sample(qx, 0, qz)
+                    };
+                    source_biomes.push(SourceChunk {
+                        pos: ChunkPos::new(sx, sz),
+                        biome,
+                    });
+                }
             }
-        }
 
-        // Grab (and lazily create) the carving mask on the proto chunk.
-        let mut mask_guard = proto.get_or_create_carving_mask();
-        let mask = &mut *mask_guard;
+            // Grab (and lazily create) the carving mask on the proto chunk.
+            let mut mask_guard = proto.get_or_create_carving_mask();
+            let mask = &mut *mask_guard;
 
-        // `WorldgenRandom(LegacyRandomSource(generateUniqueSeed()))` — initial
-        // seed is irrelevant; every carver overwrites it via
-        // `set_large_feature_seed` before its probability check.
-        let mut random = LegacyRandom::from_seed(0);
-        let seed_i64 = self.seed;
+            // `WorldgenRandom(LegacyRandomSource(generateUniqueSeed()))` — initial
+            // seed is irrelevant; every carver overwrites it via
+            // `set_large_feature_seed` before its probability check.
+            let mut random = LegacyRandom::from_seed(0);
+            let seed_i64 = self.seed;
 
-        let biome_zoom_seed = self.biome_zoom_seed;
-        // BiomeManager-fuzzed lookup — matches vanilla's `BiomeManager.getBiome`
-        // used by the carver's top-material path. An unfuzzed quart lookup
-        // would mismatch vanilla at quart-cell boundaries.
-        let mut biome_getter = |pos: BlockPos| -> u16 {
-            fuzzed_biome_at_block(biome_zoom_seed, pos, |q_pos| {
-                biome_sampler.sample(q_pos.x, q_pos.y, q_pos.z).id() as u16
-            })
-        };
+            let biome_zoom_seed = self.biome_zoom_seed;
+            // BiomeManager-fuzzed lookup — matches vanilla's `BiomeManager.getBiome`
+            // used by the carver's top-material path. An unfuzzed quart lookup
+            // would mismatch vanilla at quart-cell boundaries.
+            let mut biome_getter = |pos: BlockPos| -> u16 {
+                fuzzed_biome_at_block(biome_zoom_seed, pos, |q_pos| {
+                    biome_sampler.sample(q_pos.x, q_pos.y, q_pos.z).id() as u16
+                })
+            };
 
-        let mut run = CarveRun {
-            ctx: &mut ctx,
-            noises,
-            chunk,
-            chunk_min_x,
-            chunk_min_z,
-            biome_getter: &mut biome_getter,
-            mask,
-            ids,
-        };
+            let mut run = CarveRun {
+                ctx: &mut ctx,
+                noises,
+                chunk,
+                chunk_min_x,
+                chunk_min_z,
+                biome_getter: &mut biome_getter,
+                mask,
+                ids,
+            };
 
-        run.run_all(&source_biomes, seed_i64, &mut random);
+            run.run_all(&source_biomes, seed_i64, &mut random);
+        });
     }
 
     fn create_worldgen_region_random(&self, _world_seed: i64, center: ChunkPos) -> RandomSource {
@@ -1202,5 +1270,126 @@ impl SurfaceBiomeProvider for FuzzedBiomeColumn<'_> {
     #[inline]
     fn biome_id(&mut self, block_y: i32) -> u16 {
         self.get(block_y)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Weak;
+
+    use glam::IVec3;
+    use steel_registry::{test_support::init_test_registry, vanilla_dimension_types};
+    use steel_worldgen::biomes::BiomeSourceKind;
+
+    use crate::behavior::init_behaviors;
+    use crate::chunk::{
+        Chunk,
+        heightmap::HeightmapType,
+        section::{ChunkSection, Sections},
+    };
+    use crate::worldgen::generator::{ChunkGenerator as _, context::OverworldGenerator};
+
+    fn make_overworld_chunk() -> Chunk {
+        let dimension = &vanilla_dimension_types::OVERWORLD;
+        let sections = (0..dimension.height / 16)
+            .map(|_| ChunkSection::new_empty())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Chunk::new(
+            Sections::from_owned(sections),
+            steel_utils::ChunkPos::new(0, 0),
+            dimension.min_y,
+            dimension.height,
+            Weak::new(),
+        )
+    }
+
+    fn self_neighbor_biome(chunk: &Chunk, quart: IVec3) -> u16 {
+        let sections = chunk.sections();
+        let min_quart_y = chunk.min_y() >> 2;
+        let quart_y =
+            (quart.y - min_quart_y).clamp(0, (sections.sections.len() * 4) as i32 - 1) as usize;
+        sections.sections[quart_y / 4].read().biomes.get(
+            (quart.x & 3) as usize,
+            quart_y % 4,
+            (quart.z & 3) as usize,
+        )
+    }
+
+    fn blocks(chunk: &Chunk) -> Vec<steel_utils::BlockStateId> {
+        let mut blocks = Vec::with_capacity((chunk.height() * 16 * 16) as usize);
+        for relative_y in 0..chunk.height() as usize {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let Some(state) = chunk.get_relative_block(x, relative_y, z) else {
+                        panic!("test coordinates must stay inside the chunk");
+                    };
+                    blocks.push(state);
+                }
+            }
+        }
+        blocks
+    }
+
+    fn has_overworld_post_noise_state(chunk: &Chunk) -> bool {
+        chunk
+            .with_transient_generation_state_mut::<
+                super::SteelPostNoiseState<super::OverworldNoises>,
+                _,
+            >(|_| ())
+            .is_some()
+    }
+
+    #[test]
+    fn retained_and_rebuilt_aquifers_produce_identical_carver_output() {
+        init_test_registry();
+        init_behaviors();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("test generation pool should build");
+        let generator = OverworldGenerator::new(None, BiomeSourceKind::overworld(0), 0, &pool);
+        let warm = make_overworld_chunk();
+        let cold = make_overworld_chunk();
+
+        for chunk in [&warm, &cold] {
+            generator.create_biomes(chunk);
+            generator.fill_from_noise(chunk, None);
+        }
+        assert!(has_overworld_post_noise_state(&warm));
+        assert!(has_overworld_post_noise_state(&cold));
+
+        cold.clear_transient_generation_state();
+        for chunk in [&warm, &cold] {
+            generator.build_surface(chunk, &|quart| self_neighbor_biome(chunk, quart));
+        }
+        assert!(has_overworld_post_noise_state(&warm));
+        assert!(!has_overworld_post_noise_state(&cold));
+
+        generator.apply_carvers(&warm);
+        generator.apply_carvers(&cold);
+        assert!(!has_overworld_post_noise_state(&warm));
+        assert!(!has_overworld_post_noise_state(&cold));
+
+        assert_eq!(blocks(&warm), blocks(&cold));
+        assert_eq!(
+            warm.carving_mask
+                .read()
+                .as_ref()
+                .map(|mask| mask.to_packed_u64s()),
+            cold.carving_mask
+                .read()
+                .as_ref()
+                .map(|mask| mask.to_packed_u64s())
+        );
+        assert_eq!(&*warm.postprocessing.lock(), &*cold.postprocessing.lock());
+        for x in 0..16 {
+            for z in 0..16 {
+                assert_eq!(
+                    warm.generation_height_at(HeightmapType::WorldSurfaceWg, x, z),
+                    cold.generation_height_at(HeightmapType::WorldSurfaceWg, x, z)
+                );
+            }
+        }
     }
 }
