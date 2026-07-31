@@ -14,7 +14,9 @@ use steel_registry::{
     vanilla_blocks,
 };
 use steel_utils::{
-    BlockPos, BlockStateId, ChunkPos, SectionPos, locks::SyncRwLock, types::UpdateFlags,
+    BlockPos, BlockStateId, ChunkPos, SectionPos,
+    locks::{SyncMutex, SyncRwLock},
+    types::UpdateFlags,
 };
 
 use crate::behavior::{BLOCK_BEHAVIORS, BlockEntityCreation};
@@ -36,7 +38,7 @@ use crate::world::tick_scheduler::{
 use crate::worldgen::carving_mask::CarvingMask;
 use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 
-fn empty_postprocessing(height: i32) -> Box<[Vec<u16>]> {
+pub(crate) fn empty_postprocessing(height: i32) -> Box<[Vec<u16>]> {
     let section_count = (height / 16) as usize;
     (0..section_count).map(|_| Vec::new()).collect()
 }
@@ -83,7 +85,7 @@ pub struct Chunk {
     /// Bitset of positions visited by carvers (lazily initialized).
     pub carving_mask: SyncRwLock<Option<CarvingMask>>,
     /// Section-indexed packed offsets that need vanilla postprocessing after promotion.
-    pub postprocessing: SyncRwLock<Box<[Vec<u16>]>>,
+    pub postprocessing: SyncMutex<Box<[Vec<u16>]>>,
     /// Stable block and fluid scheduled-tick storage retained through Full promotion.
     pub(crate) scheduled_ticks: Arc<ChunkTickContainer>,
     /// Vanilla skylight source edge cache for this chunk.
@@ -129,7 +131,7 @@ impl Chunk {
             structure_starts: SyncRwLock::new(FxHashMap::default()),
             structure_references: SyncRwLock::new(FxHashMap::default()),
             carving_mask: SyncRwLock::new(None),
-            postprocessing: SyncRwLock::new(empty_postprocessing(height)),
+            postprocessing: SyncMutex::new(empty_postprocessing(height)),
             scheduled_ticks: Arc::new(ChunkTickContainer::new_proto(ChunkTickLists::new(
                 BlockTickList::new_pending(),
                 FluidTickList::new_pending(),
@@ -141,7 +143,7 @@ impl Chunk {
         }
     }
 
-    /// Creates a proto chunk that was loaded from disk.
+    /// Creates a chunk that was loaded from disk.
     ///
     /// # Panics
     ///
@@ -181,15 +183,20 @@ impl Chunk {
             height,
             level,
             block_entities: BlockEntityStorage::new(),
-            entities: EntityStorage::new(),
+            entities: if status == ChunkStatus::Full {
+                EntityStorage::new_closed()
+            } else {
+                EntityStorage::new()
+            },
             structure_starts: SyncRwLock::new(structure_starts),
             structure_references: SyncRwLock::new(structure_references),
             carving_mask: SyncRwLock::new(carving_mask),
-            postprocessing: SyncRwLock::new(postprocessing_from_disk(height, postprocessing)),
-            scheduled_ticks: Arc::new(ChunkTickContainer::new_proto(ChunkTickLists::new(
-                block_ticks,
-                fluid_ticks,
-            ))),
+            postprocessing: SyncMutex::new(postprocessing_from_disk(height, postprocessing)),
+            scheduled_ticks: Arc::new(if status == ChunkStatus::Full {
+                ChunkTickContainer::new(ChunkTickLists::new(block_ticks, fluid_ticks))
+            } else {
+                ChunkTickContainer::new_proto(ChunkTickLists::new(block_ticks, fluid_ticks))
+            }),
             sky_light_sources: SyncRwLock::new(ChunkSkyLightSources::for_valid_world_height(
                 min_y, height,
             )),
@@ -273,7 +280,7 @@ impl Chunk {
 
         let section_index = self.get_section_index(y);
         let packed = Self::pack_postprocessing_offset(pos);
-        self.postprocessing.write()[section_index].push(packed);
+        self.postprocessing.lock()[section_index].push(packed);
         self.mark_unsaved();
     }
 
@@ -292,6 +299,24 @@ impl Chunk {
     #[must_use]
     pub fn level_weak(&self) -> Weak<World> {
         self.level.clone()
+    }
+
+    /// Returns a reference to the world if it is still alive.
+    #[must_use]
+    pub fn get_level(&self) -> Option<Arc<World>> {
+        self.level.upgrade()
+    }
+
+    /// Returns this chunk's block-entity storage.
+    #[must_use]
+    pub(crate) const fn block_entity_storage(&self) -> &BlockEntityStorage {
+        &self.block_entities
+    }
+
+    /// Returns this chunk's stable scheduled-tick container.
+    #[must_use]
+    pub(crate) const fn scheduled_tick_container(&self) -> &Arc<ChunkTickContainer> {
+        &self.scheduled_ticks
     }
 
     /// Fills the vanilla skylight-source cache from current section contents.

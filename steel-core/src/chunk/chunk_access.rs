@@ -50,7 +50,7 @@ impl ChunkAccess {
         relative_z: usize,
     ) -> Option<BlockStateId> {
         let sections = match self {
-            Self::Full(chunk) => &chunk.sections,
+            Self::Full(chunk) => &chunk.common().sections,
             Self::Proto(proto_chunk) => &proto_chunk.sections,
             Self::Unloaded => unreachable!(),
         };
@@ -70,10 +70,11 @@ impl ChunkAccess {
         match self {
             Self::Full(chunk) => {
                 chunk
+                    .common()
                     .sections
                     .set_relative_block(relative_x, relative_y, relative_z, value);
                 chunk.refresh_light_emptiness_maps();
-                chunk.dirty.store(true, Ordering::Release);
+                chunk.common().dirty.store(true, Ordering::Release);
             }
             Self::Proto(proto_chunk) => {
                 proto_chunk
@@ -102,10 +103,11 @@ impl ChunkAccess {
         match self {
             Self::Full(chunk) => {
                 chunk
+                    .common()
                     .sections
                     .set_relative_block(relative_x, relative_y, relative_z, value);
                 chunk.refresh_light_emptiness_maps();
-                chunk.dirty.store(true, Ordering::Release);
+                chunk.common().dirty.store(true, Ordering::Release);
             }
             Self::Proto(proto_chunk) => {
                 if proto_chunk.status() >= ChunkStatus::InitializeLight {
@@ -198,8 +200,8 @@ impl ChunkAccess {
         match self {
             Self::Full(chunk) => {
                 let min_y = chunk.min_y();
-                let sections = &chunk.sections;
-                chunk.heightmaps.write().update_final(
+                let sections = &chunk.common().sections;
+                chunk.common().heightmaps.write().update_final(
                     local_x,
                     y,
                     local_z,
@@ -236,7 +238,7 @@ impl ChunkAccess {
         match self {
             Self::Full(chunk) => {
                 let min_y = chunk.min_y();
-                let sections = &chunk.sections;
+                let sections = &chunk.common().sections;
                 let get_block = |lx: usize, scan_y: i32, lz: usize| {
                     let scan_section_index = ((scan_y - min_y) / 16) as usize;
                     let scan_local_y = ((scan_y - min_y) % 16) as usize;
@@ -245,7 +247,7 @@ impl ChunkAccess {
                         .states
                         .get(lx, scan_local_y, lz)
                 };
-                let mut heightmaps = chunk.heightmaps.write();
+                let mut heightmaps = chunk.common().heightmaps.write();
                 for &(relative_y, state) in relative_writes {
                     heightmaps.update_final(
                         local_x,
@@ -271,7 +273,7 @@ impl ChunkAccess {
     #[must_use]
     pub fn is_dirty(&self) -> bool {
         match self {
-            Self::Full(chunk) => chunk.dirty.load(Ordering::Acquire),
+            Self::Full(chunk) => chunk.common().dirty.load(Ordering::Acquire),
             Self::Proto(proto_chunk) => proto_chunk.dirty.load(Ordering::Acquire),
             Self::Unloaded => unreachable!(),
         }
@@ -280,7 +282,7 @@ impl ChunkAccess {
     /// Marks the chunk as dirty (modified).
     pub fn mark_dirty(&self) {
         match self {
-            Self::Full(chunk) => chunk.dirty.store(true, Ordering::Release),
+            Self::Full(chunk) => chunk.common().dirty.store(true, Ordering::Release),
             Self::Proto(proto_chunk) => proto_chunk.dirty.store(true, Ordering::Release),
             Self::Unloaded => unreachable!(),
         }
@@ -289,7 +291,7 @@ impl ChunkAccess {
     /// Clears the dirty flag and returns whether it was previously set.
     pub fn take_dirty(&self) -> bool {
         match self {
-            Self::Full(chunk) => chunk.dirty.swap(false, Ordering::AcqRel),
+            Self::Full(chunk) => chunk.common().dirty.swap(false, Ordering::AcqRel),
             Self::Proto(proto_chunk) => proto_chunk.dirty.swap(false, Ordering::AcqRel),
             Self::Unloaded => unreachable!(),
         }
@@ -298,7 +300,7 @@ impl ChunkAccess {
     /// Clears the dirty flag.
     pub fn clear_dirty(&self) {
         match self {
-            Self::Full(chunk) => chunk.dirty.store(false, Ordering::Release),
+            Self::Full(chunk) => chunk.common().dirty.store(false, Ordering::Release),
             Self::Proto(proto_chunk) => proto_chunk.dirty.store(false, Ordering::Release),
             Self::Unloaded => unreachable!(),
         }
@@ -308,7 +310,7 @@ impl ChunkAccess {
     #[must_use]
     pub const fn pos(&self) -> ChunkPos {
         match self {
-            Self::Full(chunk) => chunk.pos,
+            Self::Full(chunk) => chunk.common().pos,
             Self::Proto(proto_chunk) => proto_chunk.pos,
             Self::Unloaded => unreachable!(),
         }
@@ -406,7 +408,7 @@ impl ChunkAccess {
     /// Returns a read guard for this chunk's skylight-source cache.
     pub fn sky_light_sources(&self) -> RwLockReadGuard<'_, ChunkSkyLightSources> {
         match self {
-            Self::Full(chunk) => chunk.sky_light_sources.read(),
+            Self::Full(chunk) => chunk.common().sky_light_sources.read(),
             Self::Proto(proto) => proto.sky_light_sources.read(),
             Self::Unloaded => unreachable!(),
         }
@@ -416,7 +418,10 @@ impl ChunkAccess {
     #[must_use]
     pub fn block_light_sources(&self) -> Vec<BlockPos> {
         match self {
-            Self::Full(chunk) => chunk.sections.block_light_sources(chunk.pos, chunk.min_y()),
+            Self::Full(chunk) => chunk
+                .common()
+                .sections
+                .block_light_sources(chunk.common().pos, chunk.min_y()),
             Self::Proto(proto) => proto.sections.block_light_sources(proto.pos, proto.min_y()),
             Self::Unloaded => unreachable!(),
         }
@@ -425,7 +430,7 @@ impl ChunkAccess {
     /// Returns a read guard for this chunk's committed light data.
     pub fn light(&self) -> RwLockReadGuard<'_, ChunkLightData> {
         match self {
-            Self::Full(chunk) => chunk.light.read(),
+            Self::Full(chunk) => chunk.common().light.read(),
             Self::Proto(proto) => proto.light.read(),
             Self::Unloaded => unreachable!(),
         }
@@ -434,7 +439,7 @@ impl ChunkAccess {
     /// Returns a write guard for this chunk's committed light data.
     pub fn light_mut(&self) -> RwLockWriteGuard<'_, ChunkLightData> {
         match self {
-            Self::Full(chunk) => chunk.light.write(),
+            Self::Full(chunk) => chunk.common().light.write(),
             Self::Proto(proto) => proto.light.write(),
             Self::Unloaded => unreachable!(),
         }
@@ -508,7 +513,7 @@ impl ChunkAccess {
     #[must_use]
     pub const fn sections(&self) -> &Sections {
         match self {
-            Self::Full(chunk) => &chunk.sections,
+            Self::Full(chunk) => &chunk.common().sections,
             Self::Proto(proto_chunk) => &proto_chunk.sections,
             Self::Unloaded => unreachable!(),
         }
@@ -642,7 +647,7 @@ impl ChunkAccess {
                     log::warn!("Failed to register entity in full chunk: {error}");
                     return false;
                 }
-                chunk.dirty.store(true, Ordering::Release);
+                chunk.common().dirty.store(true, Ordering::Release);
                 true
             }
             Self::Proto(proto_chunk) => proto_chunk.add_entity(entity),
@@ -709,7 +714,7 @@ impl ChunkAccess {
     /// Returns a read guard to the structure starts map.
     pub fn structure_starts(&self) -> RwLockReadGuard<'_, StructureStartMap> {
         match self {
-            Self::Full(chunk) => chunk.structure_starts.read(),
+            Self::Full(chunk) => chunk.common().structure_starts.read(),
             Self::Proto(proto) => proto.structure_starts.read(),
             Self::Unloaded => unreachable!(),
         }
@@ -718,7 +723,7 @@ impl ChunkAccess {
     /// Returns a write guard to the structure starts map.
     pub fn structure_starts_mut(&self) -> RwLockWriteGuard<'_, StructureStartMap> {
         match self {
-            Self::Full(chunk) => chunk.structure_starts.write(),
+            Self::Full(chunk) => chunk.common().structure_starts.write(),
             Self::Proto(proto) => proto.structure_starts.write(),
             Self::Unloaded => unreachable!(),
         }
@@ -727,7 +732,7 @@ impl ChunkAccess {
     /// Returns a read guard to the structure references map.
     pub fn structure_references(&self) -> RwLockReadGuard<'_, StructureReferenceMap> {
         match self {
-            Self::Full(chunk) => chunk.structure_references.read(),
+            Self::Full(chunk) => chunk.common().structure_references.read(),
             Self::Proto(proto) => proto.structure_references.read(),
             Self::Unloaded => unreachable!(),
         }
@@ -736,7 +741,7 @@ impl ChunkAccess {
     /// Returns a write guard to the structure references map.
     pub fn structure_references_mut(&self) -> RwLockWriteGuard<'_, StructureReferenceMap> {
         match self {
-            Self::Full(chunk) => chunk.structure_references.write(),
+            Self::Full(chunk) => chunk.common().structure_references.write(),
             Self::Proto(proto) => proto.structure_references.write(),
             Self::Unloaded => unreachable!(),
         }
@@ -1022,20 +1027,20 @@ mod tests {
             panic!("test chunk should remain full");
         };
         {
-            let light = level_chunk.light.read();
+            let light = level_chunk.common().light.read();
             assert_eq!(light.block.emptiness_map(), Some(&[true][..]));
             assert_eq!(light.sky.emptiness_map(), Some(&[true][..]));
         }
 
         chunk.set_relative_block(3, 5, 7, stone);
         {
-            let light = level_chunk.light.read();
+            let light = level_chunk.common().light.read();
             assert_eq!(light.block.emptiness_map(), Some(&[false][..]));
             assert_eq!(light.sky.emptiness_map(), Some(&[false][..]));
         }
 
         chunk.set_relative_block(3, 5, 7, air);
-        let light = level_chunk.light.read();
+        let light = level_chunk.common().light.read();
         assert_eq!(light.block.emptiness_map(), Some(&[true][..]));
         assert_eq!(light.sky.emptiness_map(), Some(&[true][..]));
     }

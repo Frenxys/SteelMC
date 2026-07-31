@@ -1149,7 +1149,7 @@ impl ChunkHolder {
                         chunk: full,
                         pending_entities,
                     } = LevelChunk::from_proto(proto, min_y, height, level);
-                    let pos = full.pos;
+                    let pos = full.common().pos;
                     *chunk = ChunkAccess::Full(full);
                     Some((pos, pending_entities))
                 }
@@ -1178,7 +1178,7 @@ impl ChunkHolder {
                 .get_level()
                 .ok_or(PostProcessGenerationError::WorldUnavailable)?;
             full.take_postprocessing()
-                .map(|postprocessing| (world, full.pos, full.min_y(), postprocessing))
+                .map(|postprocessing| (world, full.common().pos, full.min_y(), postprocessing))
         };
 
         let post_process_position_count =

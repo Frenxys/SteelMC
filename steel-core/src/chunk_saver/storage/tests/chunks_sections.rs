@@ -203,7 +203,7 @@ fn proto_postprocessing_roundtrips_through_persistent_chunk() {
         panic!("noise status should load as proto chunk");
     };
 
-    assert_eq!(loaded_proto.postprocessing.read()[0], vec![packed]);
+    assert_eq!(loaded_proto.postprocessing.lock()[0], vec![packed]);
 }
 
 #[test]

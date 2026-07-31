@@ -56,6 +56,14 @@ impl EntityStorage {
         }
     }
 
+    /// Creates empty storage that has already crossed the Full promotion boundary.
+    #[must_use]
+    pub(crate) fn new_closed() -> Self {
+        Self {
+            state: SyncRwLock::new(EntityStorageState::Closed),
+        }
+    }
+
     /// Tries to add an entity to proto storage.
     ///
     /// This operation linearizes with [`Self::close_and_drain`]. If promotion

@@ -151,7 +151,7 @@ fn extract_light_data_uses_chunk_owned_light_and_skylight_flag() {
     let chunk = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
 
     {
-        let mut light = chunk.light.write();
+        let mut light = chunk.common().light.write();
         let Some(sky_section) = light.sky.section_mut(0) else {
             panic!("single-section light range should contain section 0");
         };
@@ -215,10 +215,10 @@ fn draining_postprocessing_marks_full_chunk_dirty() {
     );
     proto.mark_pos_for_postprocessing(BlockPos::new(1, 2, 3));
     let chunk = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
-    chunk.dirty.store(false, Ordering::Release);
+    chunk.common().dirty.store(false, Ordering::Release);
 
     assert!(chunk.take_postprocessing().is_some());
-    assert!(chunk.dirty.load(Ordering::Acquire));
+    assert!(chunk.common().dirty.load(Ordering::Acquire));
     assert!(chunk.postprocessing_for_serialization()[0].is_empty());
 }
 

@@ -146,19 +146,6 @@ impl BlockEntityStorage {
         )
     }
 
-    /// Consumes this proto storage and transfers its contents without removal transitions.
-    ///
-    /// Promotion is ownership transfer, not unload. Rejected entities are simply not adopted,
-    /// matching Vanilla's Proto-to-LevelChunk transfer.
-    #[must_use]
-    pub(crate) fn into_transfer_snapshot(self) -> (Vec<SharedBlockEntity>, Vec<BlockPos>) {
-        let entries = self.entries.into_inner();
-        (
-            entries.entities.into_values().collect(),
-            entries.pending.into_iter().collect(),
-        )
-    }
-
     /// Returns packed block-entity positions without changing them.
     #[must_use]
     pub(crate) fn pending_positions(&self) -> Vec<BlockPos> {
@@ -201,6 +188,57 @@ impl BlockEntityStorage {
             return false;
         }
         entries.entities.insert(pos, Arc::clone(block_entity));
+        true
+    }
+
+    /// Adopts an existing pre-Full entity in place and stages its Full lifecycle updates.
+    ///
+    /// Returns `None` if `expected` no longer owns the position.
+    #[must_use]
+    pub(crate) fn adopt_if_same_staged(
+        &self,
+        pos: BlockPos,
+        expected: &SharedBlockEntity,
+        block_state: BlockStateId,
+    ) -> Option<LifecycleDispatchers> {
+        let dispatch = {
+            let entries = self.entries.write();
+            if !entries
+                .entities
+                .get(&pos)
+                .is_some_and(|current| Arc::ptr_eq(current, expected))
+            {
+                return None;
+            }
+            let dispatch_state = expected.base().queue_block_state_change(block_state);
+            let dispatch_clear = expected.base().queue_clear_removed();
+            dispatch_state || dispatch_clear
+        };
+        let mut lifecycle_dispatchers = LifecycleDispatchers::new();
+        if dispatch {
+            lifecycle_dispatchers.push(Arc::clone(expected));
+        }
+        Some(lifecycle_dispatchers)
+    }
+
+    /// Discards an invalid pre-Full entity only while it still owns the position.
+    ///
+    /// Promotion is an ownership transfer, not an unload, so this deliberately
+    /// queues no removal lifecycle event.
+    pub(crate) fn discard_if_same_without_lifecycle(
+        &self,
+        pos: BlockPos,
+        expected: &SharedBlockEntity,
+    ) -> bool {
+        let mut entries = self.entries.write();
+        if !entries
+            .entities
+            .get(&pos)
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            return false;
+        }
+        entries.entities.remove(&pos);
         true
     }
 

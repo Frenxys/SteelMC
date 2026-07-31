@@ -294,7 +294,8 @@ impl ChunkMap {
             let Some(full) = chunk.as_full() else {
                 return true;
             };
-            let randomly_ticking_sections = Arc::clone(full.sections.random_tick_sections());
+            let randomly_ticking_sections =
+                Arc::clone(full.common().sections.random_tick_sections());
 
             let index = block.len();
             block.push(TickableChunk {

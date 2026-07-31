@@ -652,7 +652,7 @@ impl ChunkStorage {
         // Serialize the heightmaps required by the persisted generation status.
         let heightmaps = match chunk {
             ChunkAccess::Full(c) => {
-                let heightmaps = c.heightmaps.read();
+                let heightmaps = c.common().heightmaps.read();
                 for &heightmap_type in HeightmapType::final_types() {
                     let _ = heightmaps.get_final(heightmap_type);
                 }
@@ -663,7 +663,7 @@ impl ChunkStorage {
         };
 
         let light = match chunk {
-            ChunkAccess::Full(c) => Self::light_to_persistent(&c.light.read()),
+            ChunkAccess::Full(c) => Self::light_to_persistent(&c.common().light.read()),
             ChunkAccess::Proto(c) => Self::light_to_persistent(&c.light.read()),
             ChunkAccess::Unloaded => unreachable!(),
         };
@@ -691,7 +691,7 @@ impl ChunkStorage {
 
         let postprocessing = match chunk {
             ChunkAccess::Proto(proto) => {
-                proto.postprocessing.read().iter().map(Vec::clone).collect()
+                proto.postprocessing.lock().iter().map(Vec::clone).collect()
             }
             ChunkAccess::Full(full) => full.postprocessing_for_serialization(),
             ChunkAccess::Unloaded => unreachable!(),

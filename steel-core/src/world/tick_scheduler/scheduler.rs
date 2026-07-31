@@ -194,7 +194,7 @@ impl WorldTickScheduler {
         let container = chunk.scheduled_tick_container();
         let mut container_state = container.state.lock();
         if container_state.lifecycle != ChunkTickContainerLifecycle::PrePublication {
-            return Err(TickSchedulerError::AlreadyRegistered(chunk.pos));
+            return Err(TickSchedulerError::AlreadyRegistered(chunk.common().pos));
         }
         let block_head = container_state
             .lists
@@ -207,11 +207,11 @@ impl WorldTickScheduler {
             .peek()
             .map(|tick| tick.trigger_tick);
         let mut state = self.state.lock();
-        if state.chunks.contains_key(&chunk.pos) {
-            return Err(TickSchedulerError::AlreadyRegistered(chunk.pos));
+        if state.chunks.contains_key(&chunk.common().pos) {
+            return Err(TickSchedulerError::AlreadyRegistered(chunk.common().pos));
         }
         state.chunks.insert(
-            chunk.pos,
+            chunk.common().pos,
             RegisteredChunkTicks {
                 container: Arc::clone(container),
                 block_head,
@@ -383,7 +383,7 @@ impl WorldTickScheduler {
             ));
         }
         if container_state.lifecycle == ChunkTickContainerLifecycle::Finalized {
-            return Err(TickSchedulerError::MissingContainer(chunk.pos));
+            return Err(TickSchedulerError::MissingContainer(chunk.common().pos));
         }
         let previous_head = container_state
             .lists
@@ -409,13 +409,13 @@ impl WorldTickScheduler {
             return Ok(true);
         }
         let mut state = self.state.lock();
-        let Some(registered) = state.chunks.get(&chunk.pos) else {
-            return Err(TickSchedulerError::MissingContainer(chunk.pos));
+        let Some(registered) = state.chunks.get(&chunk.common().pos) else {
+            return Err(TickSchedulerError::MissingContainer(chunk.common().pos));
         };
         if !Arc::ptr_eq(&registered.container, container) {
-            return Err(TickSchedulerError::ContainerMismatch(chunk.pos));
+            return Err(TickSchedulerError::ContainerMismatch(chunk.common().pos));
         }
-        state.set_head(chunk.pos, TickKind::Block, head)?;
+        state.set_head(chunk.common().pos, TickKind::Block, head)?;
         Ok(true)
     }
 
@@ -441,7 +441,7 @@ impl WorldTickScheduler {
             ));
         }
         if container_state.lifecycle == ChunkTickContainerLifecycle::Finalized {
-            return Err(TickSchedulerError::MissingContainer(chunk.pos));
+            return Err(TickSchedulerError::MissingContainer(chunk.common().pos));
         }
         let previous_head = container_state
             .lists
@@ -467,13 +467,13 @@ impl WorldTickScheduler {
             return Ok(true);
         }
         let mut state = self.state.lock();
-        let Some(registered) = state.chunks.get(&chunk.pos) else {
-            return Err(TickSchedulerError::MissingContainer(chunk.pos));
+        let Some(registered) = state.chunks.get(&chunk.common().pos) else {
+            return Err(TickSchedulerError::MissingContainer(chunk.common().pos));
         };
         if !Arc::ptr_eq(&registered.container, container) {
-            return Err(TickSchedulerError::ContainerMismatch(chunk.pos));
+            return Err(TickSchedulerError::ContainerMismatch(chunk.common().pos));
         }
-        state.set_head(chunk.pos, TickKind::Fluid, head)?;
+        state.set_head(chunk.common().pos, TickKind::Fluid, head)?;
         Ok(true)
     }
 

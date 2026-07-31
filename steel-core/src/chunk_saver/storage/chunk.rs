@@ -221,7 +221,7 @@ impl ChunkStorage {
             }
 
             // Clear dirty flag since we just loaded (add_and_register marks dirty)
-            chunk.dirty.store(false, Ordering::Release);
+            chunk.common().dirty.store(false, Ordering::Release);
 
             LoadedChunk {
                 chunk: ChunkAccess::Full(chunk),

@@ -106,7 +106,7 @@ fn add_test_comparator(chunk: &ChunkAccess, pos: BlockPos) -> SharedBlockEntity 
         panic!("test comparator position must be inside the chunk height");
     };
     let state = vanilla_blocks::COMPARATOR.default_state();
-    full.sections.set_relative_block(
+    full.common().sections.set_relative_block(
         (pos.x() & 15) as usize,
         relative_y,
         (pos.z() & 15) as usize,
@@ -126,7 +126,7 @@ fn add_test_sign(chunk: &ChunkAccess, pos: BlockPos) -> SharedBlockEntity {
         panic!("test sign position must be inside the chunk height");
     };
     let state = vanilla_blocks::OAK_SIGN.default_state();
-    full.sections.set_relative_block(
+    full.common().sections.set_relative_block(
         (pos.x() & 15) as usize,
         relative_y,
         (pos.z() & 15) as usize,
