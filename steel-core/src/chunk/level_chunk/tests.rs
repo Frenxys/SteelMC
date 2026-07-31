@@ -18,10 +18,13 @@ use crate::chunk::{
     Chunk,
     chunk_access::ChunkAccess,
     chunk_ticket_manager::ChunkTicketLevel,
-    light::{LightSection, LightSectionData},
+    heightmap::{ChunkHeightmaps, HeightmapType},
+    light::{ChunkLightData, LightSection, LightSectionData},
     section::{ChunkSection, Sections},
     status::ChunkStatus,
 };
+use crate::world::tick_scheduler::{BlockTickList, FluidTickList};
+use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 
 fn test_chunk() -> Arc<LevelChunk> {
     let proto = Chunk::new(
@@ -32,6 +35,50 @@ fn test_chunk() -> Arc<LevelChunk> {
         Weak::new(),
     );
     Arc::new(LevelChunk::from_proto(proto).chunk)
+}
+
+#[test]
+fn promotion_installs_full_runtime_once() {
+    init_test_registry();
+    init_behaviors();
+    let proto = Chunk::new(
+        Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
+        ChunkPos::new(0, 0),
+        0,
+        16,
+        Weak::new(),
+    );
+    assert!(proto.full_runtime().is_none());
+
+    let full = LevelChunk::from_proto(proto).chunk;
+
+    assert!(full.common().full_runtime().is_some());
+    let replacement = FullChunkRuntime::new(GameEventListenerCount::shared());
+    assert!(full.common().initialize_full_runtime(replacement).is_err());
+}
+
+#[test]
+fn full_disk_construction_returns_initialized_runtime() {
+    init_test_registry();
+    init_behaviors();
+    let full = LevelChunk::from_disk(
+        Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
+        ChunkPos::new(0, 0),
+        0,
+        16,
+        Weak::new(),
+        BlockTickList::new(),
+        FluidTickList::new(),
+        ChunkHeightmaps::with_types(HeightmapType::final_types(), 0, 16),
+        Vec::new(),
+        StructureStartMap::default(),
+        StructureReferenceMap::default(),
+        ChunkLightData::for_valid_world_height(0, 16),
+    );
+
+    assert_eq!(full.common().status(), ChunkStatus::Full);
+    assert!(full.common().full_runtime().is_some());
+    let _ = full.game_event_listeners();
 }
 
 #[test]

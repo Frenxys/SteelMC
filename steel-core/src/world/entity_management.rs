@@ -656,7 +656,7 @@ impl World {
             .with_full_chunk(chunk_pos, |chunk| {
                 chunk
                     .as_full()
-                    .map(|chunk| Arc::clone(&chunk.game_event_listeners.registry))
+                    .map(|chunk| Arc::clone(&chunk.game_event_listeners().registry))
             })
             .flatten()
     }

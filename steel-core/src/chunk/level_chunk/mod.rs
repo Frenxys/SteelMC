@@ -1,5 +1,6 @@
 //! This module contains the `LevelChunk` struct, which is a chunk that is ready to be sent to the client.
 use std::{
+    fmt,
     io::Cursor,
     mem,
     sync::{Arc, Weak, atomic::Ordering},
@@ -58,10 +59,29 @@ use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 pub struct LevelChunk {
     /// Data retained from generation through the Full phase.
     chunk: Chunk,
+}
+
+/// State that only exists once a common chunk crosses the Full boundary.
+pub(crate) struct FullChunkRuntime {
     /// Section registries and exact listener selections owned by this retained chunk.
-    pub(crate) game_event_listeners: LevelChunkGameEventListeners,
+    game_event_listeners: LevelChunkGameEventListeners,
     /// Main-boundary activation state and callbacks staged by background loading.
     block_entity_activation: SyncMutex<BlockEntityActivation>,
+}
+
+impl FullChunkRuntime {
+    fn new(listener_count: Arc<GameEventListenerCount>) -> Self {
+        Self {
+            game_event_listeners: LevelChunkGameEventListeners::new(listener_count),
+            block_entity_activation: SyncMutex::new(BlockEntityActivation::default()),
+        }
+    }
+}
+
+impl fmt::Debug for FullChunkRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FullChunkRuntime").finish_non_exhaustive()
+    }
 }
 
 #[derive(Default)]
@@ -140,6 +160,24 @@ impl BlockRandomPositionGenerator {
 }
 
 impl LevelChunk {
+    fn initialize_runtime(chunk: &Chunk, listener_count: Arc<GameEventListenerCount>) {
+        let runtime = FullChunkRuntime::new(listener_count);
+        if chunk.initialize_full_runtime(runtime).is_err() {
+            panic!("Full chunk runtime was initialized more than once");
+        }
+    }
+
+    fn runtime(&self) -> &FullChunkRuntime {
+        let Some(runtime) = self.chunk.full_runtime() else {
+            panic!("LevelChunk was exposed without initialized Full runtime state");
+        };
+        runtime
+    }
+
+    pub(crate) fn game_event_listeners(&self) -> &LevelChunkGameEventListeners {
+        &self.runtime().game_event_listeners
+    }
+
     /// Returns the data retained across generation and Full runtime access.
     #[must_use]
     pub(crate) const fn common(&self) -> &Chunk {
@@ -260,11 +298,8 @@ impl LevelChunk {
                 world.game_event_listener_count()
             });
 
-        let chunk = Self {
-            chunk: proto_chunk,
-            game_event_listeners: LevelChunkGameEventListeners::new(game_event_listener_count),
-            block_entity_activation: SyncMutex::new(BlockEntityActivation::default()),
-        };
+        Self::initialize_runtime(&proto_chunk, game_event_listener_count);
+        let chunk = Self { chunk: proto_chunk };
         chunk.adopt_proto_block_entities();
         chunk.chunk.set_status(ChunkStatus::Full);
         LevelChunkPromotion {
@@ -335,11 +370,8 @@ impl LevelChunk {
                 world.game_event_listener_count()
             });
 
-        Self {
-            chunk,
-            game_event_listeners: LevelChunkGameEventListeners::new(game_event_listener_count),
-            block_entity_activation: SyncMutex::new(BlockEntityActivation::default()),
-        }
+        Self::initialize_runtime(&chunk, game_event_listener_count);
+        Self { chunk }
     }
 
     /// Revalidates proto block entities while retaining the same storage instance.
@@ -447,7 +479,7 @@ impl LevelChunk {
         holder: &Arc<ChunkHolder>,
     ) -> Option<BlockEntityActivationBatch> {
         let lifecycle_dispatchers = {
-            let mut activation = self.block_entity_activation.lock();
+            let mut activation = self.runtime().block_entity_activation.lock();
             if let Some(current) = activation.holder.upgrade() {
                 debug_assert!(Arc::ptr_eq(&current, holder));
                 if Arc::ptr_eq(&current, holder) {
@@ -470,7 +502,8 @@ impl LevelChunk {
             })
             .collect::<Vec<_>>();
         positions.extend(
-            self.game_event_listeners
+            self.runtime()
+                .game_event_listeners
                 .block_entity_positions()
                 .into_iter()
                 .filter(|pos| known_positions.insert(*pos)),
@@ -487,7 +520,7 @@ impl LevelChunk {
         &self,
         holder: &Arc<ChunkHolder>,
     ) -> Vec<SharedBlockEntity> {
-        let mut activation = self.block_entity_activation.lock();
+        let mut activation = self.runtime().block_entity_activation.lock();
         let belongs = activation
             .holder
             .upgrade()
@@ -500,7 +533,7 @@ impl LevelChunk {
 
     /// Makes an unloading holder dormant without discarding wrapper identity.
     pub(crate) fn suspend_block_entities(&self, holder: &Arc<ChunkHolder>) {
-        let mut activation = self.block_entity_activation.lock();
+        let mut activation = self.runtime().block_entity_activation.lock();
         let belongs = activation
             .holder
             .upgrade()
@@ -549,7 +582,7 @@ impl LevelChunk {
         lifecycle_dispatchers: LifecycleDispatchers,
     ) {
         {
-            let mut activation = self.block_entity_activation.lock();
+            let mut activation = self.runtime().block_entity_activation.lock();
             if activation.holder.upgrade().is_none() {
                 activation
                     .pending_lifecycle_dispatchers
@@ -562,7 +595,8 @@ impl LevelChunk {
             .block_entity_storage()
             .get(pos)
             .filter(|block_entity| !block_entity.is_removed());
-        self.game_event_listeners
+        self.runtime()
+            .game_event_listeners
             .remove_obsolete(pos, current.as_ref());
         for block_entity in lifecycle_dispatchers {
             block_entity.dispatch_lifecycle_events();
@@ -580,12 +614,17 @@ impl LevelChunk {
                 .block_entity_storage()
                 .get(pos)
                 .filter(|block_entity| !block_entity.is_removed());
-            self.game_event_listeners
+            self.runtime()
+                .game_event_listeners
                 .remove_obsolete(pos, current.as_ref());
             let Some(block_entity) = current else {
                 return;
             };
-            if self.game_event_listeners.is_selected(&block_entity) {
+            if self
+                .runtime()
+                .game_event_listeners
+                .is_selected(&block_entity)
+            {
                 return;
             }
 
@@ -613,6 +652,7 @@ impl LevelChunk {
                 continue;
             }
             if self
+                .runtime()
                 .block_entity_activation
                 .lock()
                 .holder
@@ -623,6 +663,7 @@ impl LevelChunk {
             }
 
             match self
+                .runtime()
                 .game_event_listeners
                 .commit_selection(live_entity, listener)
             {
@@ -636,7 +677,7 @@ impl LevelChunk {
 
     fn refresh_block_entity_ticker(&self, pos: BlockPos) {
         let holder = {
-            let activation = self.block_entity_activation.lock();
+            let activation = self.runtime().block_entity_activation.lock();
             activation.holder.upgrade()
         };
         let Some(holder) = holder else {

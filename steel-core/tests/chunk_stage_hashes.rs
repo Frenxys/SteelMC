@@ -298,9 +298,6 @@ fn build_feature_holders(
         } else {
             ChunkStatus::StructureStarts
         };
-        if let ChunkAccess::Proto(proto) = &chunk {
-            proto.set_status(status);
-        }
         holder.insert_chunk(chunk, status);
         holders.insert(pos, holder);
     }

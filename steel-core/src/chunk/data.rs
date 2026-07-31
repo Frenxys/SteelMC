@@ -1,6 +1,6 @@
-//! Shared chunk data used while a chunk is being generated.
+//! Chunk data retained from generation through Full runtime use.
 use std::sync::{
-    Arc, Weak,
+    Arc, OnceLock, Weak,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -23,6 +23,7 @@ use crate::behavior::{BLOCK_BEHAVIORS, BlockEntityCreation};
 use crate::block_entity::{BlockEntityLookup, BlockEntityStorage, SharedBlockEntity};
 use crate::chunk::{
     heightmap::{ChunkHeightmaps, HeightmapType},
+    level_chunk::FullChunkRuntime,
     light::{
         ChunkLightData, ChunkSkyLightSources, LightSectionEmptinessChange,
         has_different_light_properties,
@@ -53,7 +54,7 @@ pub(crate) fn postprocessing_from_disk(
     postprocessing.into_boxed_slice()
 }
 
-/// A chunk that is still being generated.
+/// Canonical chunk storage retained across generation and Full runtime phases.
 #[derive(Debug)]
 pub struct Chunk {
     /// The sections of the chunk.
@@ -61,7 +62,7 @@ pub struct Chunk {
     /// The position of the chunk.
     pub pos: ChunkPos,
     /// Whether the chunk has been modified since last save.
-    /// Chunks start dirty since they're being generated.
+    /// Newly generated chunks start dirty.
     pub dirty: AtomicBool,
     /// Current generation status of this chunk. Every time a chunk is loaded it goes thru all stages.
     /// If you want the real status use the chunkholder status
@@ -72,11 +73,11 @@ pub struct Chunk {
     min_y: i32,
     /// The total height of the world.
     height: i32,
-    /// Weak reference to the world for block entity dirty callbacks while the chunk is proto.
+    /// Weak reference to the owning world.
     level: Weak<World>,
-    /// Block entities created during generation before promotion to a full chunk.
+    /// Stable block-entity storage retained through Full promotion.
     pub(crate) block_entities: BlockEntityStorage,
-    /// Entities created during generation before promotion to a full chunk.
+    /// Entity staging storage closed and drained at Full promotion.
     pub(crate) entities: EntityStorage,
     /// Structure starts originating in this chunk.
     pub structure_starts: SyncRwLock<StructureStartMap>,
@@ -92,6 +93,8 @@ pub struct Chunk {
     pub sky_light_sources: SyncRwLock<ChunkSkyLightSources>,
     /// Chunk-owned light sections and section emptiness maps.
     pub light: SyncRwLock<ChunkLightData>,
+    /// Full-only runtime state, installed once before Full publication.
+    full_runtime: OnceLock<Box<FullChunkRuntime>>,
     // TODO: research persisting NoiseChunk/Aquifer across stages like vanilla
     // does. Vanilla caches `NoiseChunk` on `ChunkAccess` so noise, surface,
     // and carvers share one instance; we currently rebuild per stage. Blocked
@@ -140,6 +143,7 @@ impl Chunk {
                 min_y, height,
             )),
             light: SyncRwLock::new(ChunkLightData::for_valid_world_height(min_y, height)),
+            full_runtime: OnceLock::new(),
         }
     }
 
@@ -153,7 +157,7 @@ impl Chunk {
         reason = "disk rehydration mirrors the persisted proto chunk fields"
     )]
     #[must_use]
-    pub fn from_disk(
+    pub(crate) fn from_disk(
         sections: Sections,
         pos: ChunkPos,
         status: ChunkStatus,
@@ -201,6 +205,7 @@ impl Chunk {
                 min_y, height,
             )),
             light: SyncRwLock::new(light),
+            full_runtime: OnceLock::new(),
         };
 
         if status >= ChunkStatus::InitializeLight {
@@ -229,8 +234,24 @@ impl Chunk {
     }
 
     /// Sets the generation status of this chunk.
-    pub fn set_status(&self, status: ChunkStatus) {
+    pub(crate) fn set_status(&self, status: ChunkStatus) {
         self.status.store(status);
+    }
+
+    /// Installs Full-only runtime state before this chunk is published as Full.
+    pub(crate) fn initialize_full_runtime(
+        &self,
+        runtime: FullChunkRuntime,
+    ) -> Result<(), FullChunkRuntime> {
+        self.full_runtime
+            .set(Box::new(runtime))
+            .map_err(|runtime| *runtime)
+    }
+
+    /// Returns the Full-only runtime state after promotion or Full disk construction.
+    #[must_use]
+    pub(crate) fn full_runtime(&self) -> Option<&FullChunkRuntime> {
+        self.full_runtime.get().map(Box::as_ref)
     }
 
     /// Returns a write guard to this chunk's carving mask, initializing it on
