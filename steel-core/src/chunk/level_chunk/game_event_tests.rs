@@ -190,7 +190,7 @@ fn full_activation_registers_listener_without_block_ticking_readiness() {
         height,
         Arc::downgrade(&world),
     );
-    let chunk = LevelChunk::from_proto(proto, min_y, height, Arc::downgrade(&world)).chunk;
+    let chunk = LevelChunk::from_proto(proto).chunk;
     let state = vanilla_blocks::CHEST.default_state();
     let events = Arc::new(SyncMutex::new(Vec::new()));
     let selections = Arc::new(AtomicUsize::new(0));

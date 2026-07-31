@@ -31,7 +31,7 @@ fn test_chunk() -> Arc<LevelChunk> {
         16,
         Weak::new(),
     );
-    Arc::new(LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk)
+    Arc::new(LevelChunk::from_proto(proto).chunk)
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn inactive_chunk_stages_lifecycle_callbacks_until_activation() {
         16,
         Weak::new(),
     );
-    let chunk = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
+    let chunk = LevelChunk::from_proto(proto).chunk;
     let pos = BlockPos::new(1, 2, 3);
     let state = vanilla_blocks::OAK_SIGN.default_state();
     assert!(
@@ -148,7 +148,7 @@ fn extract_light_data_uses_chunk_owned_light_and_skylight_flag() {
         16,
         Weak::new(),
     );
-    let chunk = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
+    let chunk = LevelChunk::from_proto(proto).chunk;
 
     {
         let mut light = chunk.common().light.write();
@@ -190,7 +190,7 @@ fn empty_and_out_of_range_sections_return_air() {
         16,
         Weak::new(),
     );
-    let chunk = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
+    let chunk = LevelChunk::from_proto(proto).chunk;
 
     assert_eq!(
         chunk.get_block_state(BlockPos::new(0, 0, 0)),
@@ -214,7 +214,7 @@ fn draining_postprocessing_marks_full_chunk_dirty() {
         Weak::new(),
     );
     proto.mark_pos_for_postprocessing(BlockPos::new(1, 2, 3));
-    let chunk = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
+    let chunk = LevelChunk::from_proto(proto).chunk;
     chunk.common().dirty.store(false, Ordering::Release);
 
     assert!(chunk.take_postprocessing().is_some());

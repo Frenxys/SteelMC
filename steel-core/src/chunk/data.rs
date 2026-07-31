@@ -905,7 +905,7 @@ mod tests {
         let pos = BlockPos::new(3, 4, 5);
         proto.schedule_block_tick(pos, &vanilla_blocks::DIRT, TickPriority::Normal);
 
-        let full = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
+        let full = LevelChunk::from_proto(proto).chunk;
 
         assert_eq!(
             scheduled_ticks.schedule_pending_block(
@@ -1010,7 +1010,7 @@ mod tests {
         );
         assert!(proto.get_block_entity(pos).is_some());
 
-        let full = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
+        let full = LevelChunk::from_proto(proto).chunk;
         assert!(!entity.is_removed());
         assert!(full.get_block_entity(pos).is_none());
     }
@@ -1047,7 +1047,7 @@ mod tests {
             1
         );
 
-        let promotion = LevelChunk::from_proto(proto, 0, 16, Weak::new());
+        let promotion = LevelChunk::from_proto(proto);
         assert!(!entity.is_removed());
         assert!(promotion.chunk.get_block_entity(pos).is_some());
     }
@@ -1152,7 +1152,7 @@ mod tests {
         assert!(pending.contains(&moving_pos));
         assert!(pending.contains(&chest_pos));
 
-        let full = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
+        let full = LevelChunk::from_proto(proto).chunk;
         assert!(full.get_block_entity(moving_pos).is_none());
         assert!(!full.pending_block_entity_positions().contains(&moving_pos));
         assert!(full.get_block_entity(chest_pos).is_none());

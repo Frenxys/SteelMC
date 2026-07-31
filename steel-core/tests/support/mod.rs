@@ -63,7 +63,7 @@ pub(crate) fn insert_ready_full_chunk(world: &Arc<World>, pos: ChunkPos) -> Arc<
         height,
         Arc::downgrade(world),
     );
-    let chunk = LevelChunk::from_proto(proto, min_y, height, Arc::downgrade(world)).chunk;
+    let chunk = LevelChunk::from_proto(proto).chunk;
     let holder = Arc::new(ChunkHolder::new(
         pos,
         ChunkTicketLevel::BLOCK_TICKING_CHUNK,

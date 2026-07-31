@@ -30,7 +30,6 @@ use crate::chunk::light::{
 };
 use crate::chunk_saver::ChunkStorage;
 use crate::entity::EntityVisibility;
-use crate::world::World;
 use crate::worldgen::WorldGenContext;
 use crate::{
     ChunkMap,
@@ -1130,28 +1129,23 @@ impl ChunkHolder {
     ///
     /// If the chunk is already a `LevelChunk` (e.g., loaded from disk), this is a no-op.
     ///
-    /// # Arguments
-    /// * `level` - Weak reference to the world for the `LevelChunk`
-    ///
     /// # Panics
     /// Panics if the chunk is not at the `ChunkAccess::Proto` stage or already full.
-    pub fn upgrade_to_full(&self, level: Weak<World>) {
-        let world = level.upgrade();
+    pub fn upgrade_to_full(&self) {
         let promoted_entities = self.data.with_write(|chunk| {
             use std::mem::replace;
             let owned = replace(chunk, ChunkAccess::Unloaded);
 
             match owned {
                 ChunkAccess::Proto(proto) => {
-                    let min_y = proto.min_y();
-                    let height = proto.height();
                     let LevelChunkPromotion {
                         chunk: full,
                         pending_entities,
-                    } = LevelChunk::from_proto(proto, min_y, height, level);
+                    } = LevelChunk::from_proto(proto);
                     let pos = full.common().pos;
+                    let world = full.get_level();
                     *chunk = ChunkAccess::Full(full);
-                    Some((pos, pending_entities))
+                    Some((world, pos, pending_entities))
                 }
                 ChunkAccess::Full(full) => {
                     *chunk = ChunkAccess::Full(full);
@@ -1160,7 +1154,7 @@ impl ChunkHolder {
                 ChunkAccess::Unloaded => panic!("Chunk is unloaded, cannot upgrade to full"),
             }
         });
-        if let Some((pos, pending_entities)) = promoted_entities
+        if let Some((world, pos, pending_entities)) = promoted_entities
             && let Some(world) = world
         {
             world.register_loaded_chunk_entities(pos, ChunkStatus::Full, pending_entities);
@@ -1419,8 +1413,7 @@ mod tests {
             16,
             Arc::downgrade(&publications),
         ));
-        let full =
-            LevelChunk::from_proto(test_proto_chunk(ChunkStatus::Light), 0, 16, Weak::new()).chunk;
+        let full = LevelChunk::from_proto(test_proto_chunk(ChunkStatus::Light)).chunk;
 
         holder.store_and_publish_chunk_status(ChunkAccess::Full(full), ChunkStatus::Full);
 
@@ -1442,7 +1435,7 @@ mod tests {
             ChunkAccess::Proto(test_proto_chunk(ChunkStatus::Light)),
             ChunkStatus::Light,
         );
-        holder.upgrade_to_full(Weak::new());
+        holder.upgrade_to_full();
 
         assert_eq!(holder.entity_visibility(), EntityVisibility::Hidden);
         assert!(!holder.is_full_status_initialized());
@@ -1549,7 +1542,7 @@ mod tests {
             .chunks
             .insert_sync(chunk_pos, Arc::clone(&holder));
         holder.insert_chunk(ChunkAccess::Proto(proto), ChunkStatus::Light);
-        holder.upgrade_to_full(Arc::downgrade(&world));
+        holder.upgrade_to_full();
 
         assert!(!world.has_registered_full_chunk_ticks(chunk_pos));
         holder.finish_generation_status(ChunkStatus::Full);
@@ -1563,8 +1556,7 @@ mod tests {
     fn client_deltas_require_confirmed_block_readiness() {
         init_chunk_test_registry();
         let holder = test_holder();
-        let full =
-            LevelChunk::from_proto(test_proto_chunk(ChunkStatus::Light), 0, 16, Weak::new()).chunk;
+        let full = LevelChunk::from_proto(test_proto_chunk(ChunkStatus::Light)).chunk;
         holder.insert_chunk(ChunkAccess::Full(full), ChunkStatus::Full);
         let pos = BlockPos::new(1, 1, 1);
         let section_pos = SectionPos::new(0, 0, 0);

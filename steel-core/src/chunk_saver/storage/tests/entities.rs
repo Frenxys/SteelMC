@@ -107,7 +107,7 @@ fn proto_block_entities_roundtrip_and_promote_to_full_chunk() {
     assert!(loaded_proto.get_block_entity(block_pos).is_none());
     assert_eq!(loaded_proto.pending_block_entity_positions(), [block_pos]);
 
-    let full = LevelChunk::from_proto(loaded_proto, 0, 16, Weak::new()).chunk;
+    let full = LevelChunk::from_proto(loaded_proto).chunk;
     assert!(full.get_block_entities().is_empty());
     assert_eq!(full.pending_block_entity_positions(), [block_pos]);
 
@@ -255,7 +255,7 @@ fn proto_entities_roundtrip_and_promote_to_full_chunk() {
     };
     assert_eq!(loaded_proto.get_entities().len(), 1);
 
-    let promoted = LevelChunk::from_proto(loaded_proto, 0, 16, Weak::new());
+    let promoted = LevelChunk::from_proto(loaded_proto);
     assert_eq!(promoted.pending_entities.len(), 1);
     assert!(promoted.pending_entities[0].is_no_gravity());
     assert!(promoted.pending_entities[0].is_invulnerable());

@@ -142,7 +142,7 @@ impl BlockRandomPositionGenerator {
 impl LevelChunk {
     /// Returns the data retained across generation and Full runtime access.
     #[must_use]
-    pub const fn common(&self) -> &Chunk {
+    pub(crate) const fn common(&self) -> &Chunk {
         &self.chunk
     }
 
@@ -209,22 +209,14 @@ impl LevelChunk {
     ///
     /// # Arguments
     /// * `proto_chunk` - The proto chunk to convert
-    /// * `min_y` - The minimum Y coordinate of the world
-    /// * `height` - The total height of the world
-    /// * `level` - Weak reference to the world (mirrors Java's `LevelChunk.level`)
-    ///
     /// # Panics
     /// Panics if the proto chunk's light-section count does not match its world height.
     ///
     #[must_use]
-    pub fn from_proto(
-        proto_chunk: Chunk,
-        min_y: i32,
-        height: i32,
-        level: Weak<World>,
-    ) -> LevelChunkPromotion {
-        debug_assert_eq!(proto_chunk.min_y(), min_y);
-        debug_assert_eq!(proto_chunk.height(), height);
+    pub fn from_proto(proto_chunk: Chunk) -> LevelChunkPromotion {
+        let min_y = proto_chunk.min_y();
+        let height = proto_chunk.height();
+        let level = proto_chunk.level_weak();
         // Ensure full chunks always have populated final heightmaps. Some stages
         // may not touch blocks (carvers are currently empty), so lazy final
         // heightmaps are not guaranteed to exist before promotion.
