@@ -457,6 +457,17 @@ impl ChunkMap {
         holder.try_full_chunk().map(f)
     }
 
+    /// Returns the active holder for a fully loaded chunk.
+    pub(crate) fn active_full_chunk_holder(&self, pos: ChunkPos) -> Option<Arc<ChunkHolder>> {
+        let holder = self.lookup_active_holder(pos)?;
+        if holder.is_status_disallowed(ChunkStatus::Full)
+            || holder.try_chunk(ChunkStatus::Full).is_none()
+        {
+            return None;
+        }
+        Some(holder)
+    }
+
     /// Inserts a non-simulated holder into an empty gameplay view for worldgen benchmarks.
     ///
     /// Runtime lifecycle code must use ticket-driven insertion. Benchmark holders

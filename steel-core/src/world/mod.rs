@@ -104,6 +104,7 @@ use crate::{
 
 mod block_entity_ticker;
 mod block_event;
+mod block_region;
 mod block_updates;
 mod border;
 mod broadcasts;
@@ -134,6 +135,7 @@ pub use crate::config::WorldStorageConfig;
 use crate::worldgen::generators::vanilla::fuzzed_biome_at_block;
 use crate::worldgen::{ChunkGenerator, ChunkGeneratorType};
 use block_event::BlockEventQueue;
+pub(crate) use block_region::BlockRegionBounds;
 use block_updates::CollectingNeighborUpdater;
 pub use border::WorldBorderError;
 use border::{WorldBorder, WorldBorderSnapshot};

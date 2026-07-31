@@ -86,17 +86,25 @@ impl World {
         let max_y = aabb.max_y().floor() as i32;
         let max_z = aabb.max_z().floor() as i32;
 
-        for y in min_y..=max_y {
-            for z in min_z..=max_z {
-                for x in min_x..=max_x {
-                    if !self.get_block_state(BlockPos::new(x, y, z)).is_air() {
-                        return false;
+        let bounds = BlockRegionBounds::from_corners(
+            BlockPos::new(min_x, min_y, min_z),
+            BlockPos::new(max_x, max_y, max_z),
+        );
+        self.with_block_region(bounds, |region| {
+            for y in min_y..=max_y {
+                for z in min_z..=max_z {
+                    for x in min_x..=max_x {
+                        let Some(state) = region.get_block_state(BlockPos::new(x, y, z)) else {
+                            return false;
+                        };
+                        if !state.is_air() {
+                            return false;
+                        }
                     }
                 }
             }
-        }
-
-        true
+            true
+        })
     }
 
     /// Sets a block at the given position.
