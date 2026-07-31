@@ -1,4 +1,4 @@
-//! A proto chunk is a chunk that is still being generated.
+//! Shared chunk data used while a chunk is being generated.
 use std::sync::{
     Arc, Weak,
     atomic::{AtomicBool, Ordering},
@@ -53,13 +53,13 @@ pub(crate) fn postprocessing_from_disk(
 
 /// A chunk that is still being generated.
 #[derive(Debug)]
-pub struct ProtoChunk {
+pub struct Chunk {
     /// The sections of the chunk.
     pub sections: Sections,
     /// The position of the chunk.
     pub pos: ChunkPos,
     /// Whether the chunk has been modified since last save.
-    /// Proto chunks start dirty since they're being generated.
+    /// Chunks start dirty since they're being generated.
     pub dirty: AtomicBool,
     /// Current generation status of this chunk. Every time a chunk is loaded it goes thru all stages.
     /// If you want the real status use the chunkholder status
@@ -94,9 +94,9 @@ pub struct ProtoChunk {
     // does. Vanilla caches `NoiseChunk` on `ChunkAccess` so noise, surface,
     // and carvers share one instance; we currently rebuild per stage. Blocked
     // by the storage boundary: `NoiseChunk<N: DimensionNoises>` is generic,
-    // while `ProtoChunk` is not.
+    // while `Chunk` is not.
     // Options to evaluate: (1) object-safe trait returning carver-needed
-    // values, (2) generic `ProtoChunk<N>` (big ripple), (3) stay as-is if
+    // values, (2) generic `Chunk<N>` (big ripple), (3) stay as-is if
     // rebuild cost stays negligible.
 }
 
@@ -105,7 +105,7 @@ enum PendingPromotionCommit {
     Complete(Option<SharedBlockEntity>),
 }
 
-impl ProtoChunk {
+impl Chunk {
     /// Creates a new proto chunk at the given position with empty sections.
     #[must_use]
     pub fn new(
@@ -483,7 +483,7 @@ impl ProtoChunk {
         removed
     }
 
-    /// Drops every `ProtoChunk` block entity without `LevelChunk` lifecycle callbacks or dirtying.
+    /// Drops every `Chunk` block entity without `LevelChunk` lifecycle callbacks or dirtying.
     pub(crate) fn clear_all_block_entities(&self) {
         self.block_entities.clear_without_lifecycle();
     }
@@ -807,7 +807,7 @@ impl ProtoChunk {
 mod tests {
     use std::sync::{Arc, Weak};
 
-    use super::{PendingPromotionCommit, ProtoChunk};
+    use super::{Chunk, PendingPromotionCommit};
     use crate::behavior::{BlockEntityCreation, init_behaviors};
     use crate::block_entity::{
         BlockEntityLifecycleExt as _, SharedBlockEntity,
@@ -828,11 +828,11 @@ mod tests {
         let section_y = -4;
         let pos = BlockPos::new(-17, -63, 31);
 
-        let packed = ProtoChunk::pack_postprocessing_offset(pos);
+        let packed = Chunk::pack_postprocessing_offset(pos);
 
         assert_eq!(packed, 15 | (1 << 4) | (15 << 8));
         assert_eq!(
-            ProtoChunk::unpack_postprocessing_offset(packed, section_y, chunk_pos),
+            Chunk::unpack_postprocessing_offset(packed, section_y, chunk_pos),
             pos
         );
     }
@@ -840,7 +840,7 @@ mod tests {
     #[test]
     fn proto_scheduled_block_ticks_use_vanilla_zero_delay() {
         init_test_registry();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -867,7 +867,7 @@ mod tests {
     #[test]
     fn full_promotion_retains_and_closes_proto_scheduled_tick_container() {
         init_test_registry();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -901,7 +901,7 @@ mod tests {
     fn proto_chunk_preserves_distinct_air_states_in_empty_sections() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -920,7 +920,7 @@ mod tests {
     fn pre_light_block_writes_defer_counts_until_light_initialization() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -956,7 +956,7 @@ mod tests {
     fn proto_mutation_defers_lifecycle_and_promotion_revalidates_concrete_entities() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -992,7 +992,7 @@ mod tests {
     fn proto_storage_preserves_removed_entries_until_full_promotion() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -1030,7 +1030,7 @@ mod tests {
         init_test_registry();
         init_behaviors();
         init_block_entities();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -1054,7 +1054,7 @@ mod tests {
     fn conditional_proto_marker_mutation_rejects_stale_worldgen_state() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -1089,7 +1089,7 @@ mod tests {
     fn dummy_factory_outcomes_keep_proto_and_full_stage_semantics() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -1136,7 +1136,7 @@ mod tests {
     fn stale_proto_factory_cannot_consume_a_replacement_marker() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,

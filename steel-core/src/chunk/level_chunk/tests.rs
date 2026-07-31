@@ -15,16 +15,16 @@ use crate::behavior::init_behaviors;
 use crate::block_entity::entities::ComparatorBlockEntity;
 use crate::block_entity::{BlockEntityBase, SharedBlockEntity, entities::RawBlockEntity};
 use crate::chunk::{
+    Chunk,
     chunk_access::ChunkAccess,
     chunk_ticket_manager::ChunkTicketLevel,
     light::{LightSection, LightSectionData},
-    proto_chunk::ProtoChunk,
     section::{ChunkSection, Sections},
     status::ChunkStatus,
 };
 
 fn test_chunk() -> Arc<LevelChunk> {
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         ChunkPos::new(0, 0),
         0,
@@ -88,7 +88,7 @@ impl BlockEntity for ActivationRecordingBlockEntity {
 fn inactive_chunk_stages_lifecycle_callbacks_until_activation() {
     init_test_registry();
     init_behaviors();
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         ChunkPos::new(0, 0),
         0,
@@ -141,7 +141,7 @@ fn inactive_chunk_stages_lifecycle_callbacks_until_activation() {
 fn extract_light_data_uses_chunk_owned_light_and_skylight_flag() {
     init_test_registry();
     init_behaviors();
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         ChunkPos::new(0, 0),
         0,
@@ -183,7 +183,7 @@ fn extract_light_data_uses_chunk_owned_light_and_skylight_flag() {
 fn empty_and_out_of_range_sections_return_air() {
     init_test_registry();
     init_behaviors();
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         ChunkPos::new(0, 0),
         0,
@@ -206,7 +206,7 @@ fn empty_and_out_of_range_sections_return_air() {
 fn draining_postprocessing_marks_full_chunk_dirty() {
     init_test_registry();
     init_behaviors();
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         ChunkPos::new(0, 0),
         0,

@@ -122,7 +122,7 @@ fn persisted_tick_priorities_clamp_to_vanilla_extremes() {
 #[test]
 fn forced_prepare_preserves_dirty_set_after_save_decision() {
     init_test_registry();
-    let chunk = ChunkAccess::Proto(ProtoChunk::new(
+    let chunk = ChunkAccess::Proto(Chunk::new(
         single_empty_section(),
         ChunkPos::new(0, 0),
         0,

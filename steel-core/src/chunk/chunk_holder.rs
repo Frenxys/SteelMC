@@ -1134,7 +1134,7 @@ impl ChunkHolder {
     /// * `level` - Weak reference to the world for the `LevelChunk`
     ///
     /// # Panics
-    /// Panics if the chunk is not at `ProtoChunk` stage or already full.
+    /// Panics if the chunk is not at the `ChunkAccess::Proto` stage or already full.
     pub fn upgrade_to_full(&self, level: Weak<World>) {
         let world = level.upgrade();
         let promoted_entities = self.data.with_write(|chunk| {
@@ -1351,7 +1351,7 @@ mod tests {
     use tokio::time::sleep as test_sleep;
 
     use crate::behavior::init_behaviors;
-    use crate::chunk::proto_chunk::ProtoChunk;
+    use crate::chunk::Chunk;
     use crate::chunk::section::{ChunkSection, Sections};
     use crate::test_support::fresh_test_world;
     use crate::world::tick_scheduler::TickPriority;
@@ -1372,8 +1372,8 @@ mod tests {
         ))
     }
 
-    fn test_proto_chunk(status: ChunkStatus) -> ProtoChunk {
-        let proto = ProtoChunk::new(
+    fn test_proto_chunk(status: ChunkStatus) -> Chunk {
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -1388,7 +1388,7 @@ mod tests {
     fn insert_chunk_synchronizes_proto_status_with_published_status() {
         init_chunk_test_registry();
         let holder = test_holder();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -1524,7 +1524,7 @@ mod tests {
             .map(|_| ChunkSection::new_empty())
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(sections),
             chunk_pos,
             min_y,

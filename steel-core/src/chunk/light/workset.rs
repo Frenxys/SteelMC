@@ -968,9 +968,9 @@ mod tests {
     use super::*;
     use crate::behavior::init_behaviors;
     use crate::chunk::{
+        Chunk,
         chunk_access::ChunkAccess,
         chunk_ticket_manager::ChunkTicketLevel,
-        proto_chunk::ProtoChunk,
         section::{ChunkSection, Sections},
     };
 
@@ -988,7 +988,7 @@ mod tests {
 
     fn holder_with_section(pos: ChunkPos, section: ChunkSection) -> Arc<ChunkHolder> {
         let sections = Sections::from_owned(vec![section].into_boxed_slice());
-        let proto = ProtoChunk::new(sections, pos, 0, 16, Weak::new());
+        let proto = Chunk::new(sections, pos, 0, 16, Weak::new());
         let holder = Arc::new(ChunkHolder::new(
             pos,
             ChunkTicketLevel::FULL_CHUNK,

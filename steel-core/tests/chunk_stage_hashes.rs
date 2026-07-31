@@ -18,6 +18,7 @@ use flate2::read::GzDecoder;
 use glam::IVec3;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::Deserialize;
+use steel_core::chunk::Chunk;
 use steel_core::chunk::chunk_access::ChunkAccess;
 use steel_core::chunk::chunk_generation_task::StaticCache2D;
 use steel_core::chunk::chunk_holder::ChunkHolder;
@@ -28,7 +29,6 @@ use steel_core::chunk::light::{
     LightLayer, LightSection, LightSectionRange, LightWorkset, SkyLightChunkEdgeChecks,
     propagate_block_light_chunk, propagate_sky_light_chunk,
 };
-use steel_core::chunk::proto_chunk::ProtoChunk;
 use steel_core::chunk::section::{ChunkSection, Sections};
 use steel_core::chunk::status::ChunkStatus;
 use steel_core::level_data::WorldGenerationSettings;
@@ -213,7 +213,7 @@ fn empty_proto_chunk(
         .map(|_| ChunkSection::new_empty())
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(sections),
         ChunkPos::new(pos.0, pos.1),
         min_y,

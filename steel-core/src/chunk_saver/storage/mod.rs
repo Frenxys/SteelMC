@@ -1,11 +1,11 @@
 use crate::block_entity::{BLOCK_ENTITIES, SharedBlockEntity};
+use crate::chunk::Chunk;
 use crate::chunk::heightmap::{ChunkHeightmaps, Heightmap, HeightmapType};
 use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::light::{
     ChunkLightData, ChunkLightLayerStorage, DATA_LAYER_SIZE, LightSection, LightSectionData,
 };
 use crate::chunk::paletted_container::PalettedContainer;
-use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::section::{ChunkSection, SectionHolder, Sections};
 use crate::chunk::{chunk_access::ChunkAccess, status::ChunkStatus};
 use crate::chunk_saver::bit_pack::{bits_for_palette_len, pack_indices, unpack_indices};

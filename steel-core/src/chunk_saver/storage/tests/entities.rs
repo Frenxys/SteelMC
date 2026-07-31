@@ -74,7 +74,7 @@ fn proto_block_entities_roundtrip_and_promote_to_full_chunk() {
 
     let pos = ChunkPos::new(0, 0);
     let block_pos = BlockPos::new(3, 4, 5);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     let barrel = REGISTRY
         .blocks
         .get_default_state_id(&vanilla_blocks::BARREL);
@@ -185,7 +185,7 @@ fn proto_entities_roundtrip_and_promote_to_full_chunk() {
 
     let pos = ChunkPos::new(0, 0);
     let entity_pos = DVec3::new(5.5, 6.0, 7.5);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     let crystal = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
         next_entity_id(),
@@ -286,7 +286,7 @@ fn prepared_save_reports_handled_runtime_entity_ids() {
     init_runtime_registries();
 
     let pos = ChunkPos::new(0, 0);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     let chunk = ChunkAccess::Proto(proto);
     let entity: SharedEntity = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
@@ -313,7 +313,7 @@ fn full_chunk_load_defers_entities_to_world_registration() {
     init_runtime_registries();
 
     let pos = ChunkPos::new(0, 0);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     let chunk = ChunkAccess::Proto(proto);
     let entity: SharedEntity = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
@@ -351,7 +351,7 @@ fn runtime_entity_passengers_save_nested_and_load_flattened_for_registration() {
     init_runtime_registries();
 
     let pos = ChunkPos::new(0, 0);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     let chunk = ChunkAccess::Proto(proto);
     let vehicle: SharedEntity = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
@@ -417,7 +417,7 @@ fn runtime_entity_passengers_skip_non_serializable_entities_like_vanilla() {
     init_runtime_registries();
 
     let pos = ChunkPos::new(0, 0);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     let chunk = ChunkAccess::Proto(proto);
     let vehicle: SharedEntity = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
@@ -470,7 +470,7 @@ fn unimplemented_block_entities_preserve_nbt_through_proto_save_load() {
 
     let pos = ChunkPos::new(0, 0);
     let block_pos = BlockPos::new(4, 4, 6);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     let spawner = REGISTRY
         .blocks
         .get_default_state_id(&vanilla_blocks::SPAWNER);

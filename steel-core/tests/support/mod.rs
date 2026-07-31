@@ -14,11 +14,11 @@ use steel_utils::{BlockPos, BlockStateId, Identifier};
 use tokio::runtime::{Builder, Runtime};
 use toml::map::Map;
 
+use crate::chunk::Chunk;
 use crate::chunk::chunk_access::ChunkAccess;
 use crate::chunk::chunk_holder::{ChunkHolder, TickingReadiness};
 use crate::chunk::chunk_ticket_manager::ChunkTicketLevel;
 use crate::chunk::level_chunk::LevelChunk;
-use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::section::{ChunkSection, Sections};
 use crate::chunk::status::ChunkStatus;
 use crate::entity::Entity;
@@ -56,7 +56,7 @@ pub(crate) fn insert_ready_full_chunk(world: &Arc<World>, pos: ChunkPos) -> Arc<
         .map(|_| ChunkSection::new_empty())
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(sections),
         pos,
         min_y,

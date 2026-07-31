@@ -14,6 +14,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 use steel_core::behavior::init_behaviors;
 use steel_core::block_entity::init_block_entities;
+use steel_core::chunk::Chunk;
 use steel_core::chunk::chunk_access::ChunkAccess;
 use steel_core::chunk::chunk_generation_task::StaticCache2D;
 use steel_core::chunk::chunk_holder::ChunkHolder;
@@ -21,7 +22,6 @@ use steel_core::chunk::chunk_map::ChunkMap;
 use steel_core::chunk::chunk_pyramid::{ChunkDependencies, ChunkStep, GENERATION_PYRAMID};
 use steel_core::chunk::chunk_status_tasks::ChunkStatusTasks;
 use steel_core::chunk::chunk_ticket_manager::ChunkTicketLevel;
-use steel_core::chunk::proto_chunk::ProtoChunk;
 use steel_core::chunk::section::{ChunkSection, Sections};
 use steel_core::chunk::status::ChunkStatus;
 use steel_core::entity::init_entities;
@@ -107,7 +107,7 @@ fn make_proto_chunk(chunk_x: i32, chunk_z: i32, dim: &DimensionType) -> ChunkAcc
         .collect();
     let sections = Sections::from_owned(sections);
     let pos = ChunkPos::new(chunk_x, chunk_z);
-    ChunkAccess::Proto(ProtoChunk::new(
+    ChunkAccess::Proto(Chunk::new(
         sections,
         pos,
         dim.min_y,

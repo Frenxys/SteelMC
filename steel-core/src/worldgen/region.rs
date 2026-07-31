@@ -1388,8 +1388,8 @@ mod tests {
 
     use crate::behavior::init_behaviors;
     use crate::chunk::{
+        Chunk,
         chunk_access::ChunkAccess,
-        proto_chunk::ProtoChunk,
         section::{ChunkSection, Sections},
         status::ChunkStatus,
     };
@@ -1460,7 +1460,7 @@ mod tests {
         let stone = vanilla_blocks::STONE.default_state();
         let air = vanilla_blocks::AIR.default_state();
 
-        let pre_light_proto = ProtoChunk::new(
+        let pre_light_proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -1481,7 +1481,7 @@ mod tests {
 
         assert_eq!(pre_light_section.non_empty_block_count(), 0);
 
-        let initialized_proto = ProtoChunk::new(
+        let initialized_proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,

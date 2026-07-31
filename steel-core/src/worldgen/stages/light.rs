@@ -205,10 +205,10 @@ mod tests {
     use super::*;
     use crate::behavior::init_behaviors;
     use crate::chunk::{
+        Chunk,
         chunk_access::ChunkAccess,
         chunk_ticket_manager::ChunkTicketLevel,
         light::{LightSection, LightSectionData},
-        proto_chunk::ProtoChunk,
         section::{ChunkSection, Sections},
         status::ChunkStatus,
     };
@@ -225,7 +225,7 @@ mod tests {
         section: ChunkSection,
     ) -> Arc<ChunkHolder> {
         let sections = Sections::from_owned(vec![section].into_boxed_slice());
-        let proto = ProtoChunk::new(sections, pos, 0, 16, Weak::new());
+        let proto = Chunk::new(sections, pos, 0, 16, Weak::new());
         proto.initialize_light_sources();
         let holder = Arc::new(ChunkHolder::new(
             pos,

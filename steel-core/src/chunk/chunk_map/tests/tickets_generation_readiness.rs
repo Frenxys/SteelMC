@@ -169,7 +169,7 @@ fn cached_holder_rechecks_publication_and_generation_permission() {
         .collect::<Vec<_>>()
         .into_boxed_slice();
     holder.insert_chunk(
-        ChunkAccess::Proto(ProtoChunk::new(
+        ChunkAccess::Proto(Chunk::new(
             Sections::from_owned(sections),
             pos,
             min_y,
@@ -229,7 +229,7 @@ fn full_publications_drive_block_and_entity_readiness_incrementally() {
         world.chunk_map.world_gen_context.min_y(),
         center_pos.0.y * 16,
     );
-    let packed = ProtoChunk::pack_postprocessing_offset(marked_pos);
+    let packed = Chunk::pack_postprocessing_offset(marked_pos);
     let mut center = None;
 
     for z in -1..=1 {

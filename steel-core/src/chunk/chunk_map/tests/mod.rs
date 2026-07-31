@@ -4,10 +4,10 @@ use crate::block_entity::{
     SharedBlockEntity,
     entities::{ComparatorBlockEntity, SignBlockEntity},
 };
+use crate::chunk::Chunk;
 use crate::chunk::heightmap::ChunkHeightmaps;
 use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::light::ChunkLightData;
-use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::section::{ChunkSection, Sections};
 use crate::chunk_saver::RamOnlyStorage;
 use crate::player::connection::NetworkConnection;
@@ -230,7 +230,7 @@ fn test_chunk_map() -> Arc<ChunkMap> {
 }
 
 fn unloaded_light_holder(pos: ChunkPos) -> Arc<ChunkHolder> {
-    let proto = ProtoChunk::from_disk(
+    let proto = Chunk::from_disk(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         pos,
         ChunkStatus::Light,

@@ -64,7 +64,7 @@ pub struct SourceChunk {
 ///
 /// Mirrors vanilla's `CarvingContext`. Owns the freshly-built [`Aquifer`] for
 /// this chunk; the aquifer is regenerated per carver invocation rather than
-/// cached on the [`ProtoChunk`] — see the TODO on `ProtoChunk::carving_mask`
+/// cached on the [`Chunk`](crate::chunk::Chunk) — see the TODO on `Chunk::carving_mask`
 /// for discussion.
 pub struct CarvingContext<'a, N: DimensionNoises> {
     /// Dimension minimum Y (inclusive).

@@ -5,7 +5,7 @@ fn proto_carving_mask_presence_roundtrips_when_empty() {
     init_test_registry();
 
     let pos = ChunkPos::new(3, -4);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     proto.set_status(ChunkStatus::Carvers);
     drop(proto.get_or_create_carving_mask());
     let chunk = ChunkAccess::Proto(proto);
@@ -36,7 +36,7 @@ async fn ram_only_storage_restores_the_status_bundled_with_the_prepared_save() {
     init_test_registry();
 
     let pos = ChunkPos::new(3, -4);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     proto.set_status(ChunkStatus::Carvers);
     let chunk = ChunkAccess::Proto(proto);
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
@@ -61,7 +61,7 @@ fn proto_carving_mask_bits_roundtrip_through_persistent_chunk() {
     init_test_registry();
 
     let pos = ChunkPos::new(3, -4);
-    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
     proto.set_status(ChunkStatus::Carvers);
     {
         let mut mask = proto.get_or_create_carving_mask();
@@ -107,10 +107,10 @@ fn proto_postprocessing_roundtrips_through_persistent_chunk() {
 
     let pos = ChunkPos::new(-2, 1);
     let marked = BlockPos::new(-17, -63, 31);
-    let proto = ProtoChunk::new(single_empty_section(), pos, -64, 16, Weak::new());
+    let proto = Chunk::new(single_empty_section(), pos, -64, 16, Weak::new());
     proto.set_status(ChunkStatus::Noise);
     proto.mark_pos_for_postprocessing(marked);
-    let packed = ProtoChunk::pack_postprocessing_offset(marked);
+    let packed = Chunk::pack_postprocessing_offset(marked);
     let chunk = ChunkAccess::Proto(proto);
 
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Noise, &[], false)
@@ -142,7 +142,7 @@ fn full_chunk_postprocessing_roundtrips_through_persistent_chunk() {
 
     let pos = ChunkPos::new(-2, 1);
     let marked = BlockPos::new(-17, -63, 31);
-    let packed = ProtoChunk::pack_postprocessing_offset(marked);
+    let packed = Chunk::pack_postprocessing_offset(marked);
     let persistent = ChunkStorage::to_persistent(
         &single_empty_section(),
         &[],

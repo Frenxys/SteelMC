@@ -8,11 +8,11 @@ use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 
 use crate::block_entity::{ClearedBlockEntities, SharedBlockEntity};
 use crate::chunk::{
+    Chunk,
     heightmap::HeightmapType,
     level_chunk::{BlockRandomPositionGenerator, LevelChunk, LevelChunkBlockSetResult},
     light::ChunkLightData,
     light::ChunkSkyLightSources,
-    proto_chunk::ProtoChunk,
     section::Sections,
     status::ChunkStatus,
 };
@@ -24,7 +24,7 @@ use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 /// An enum that allows access to a chunk in different states.
 ///
 /// Variants stay inline to avoid a heap allocation and indirection on every chunk access.
-/// This accepts padding to `ProtoChunk`'s size inside the holder lock.
+/// This accepts padding to `Chunk`'s size inside the holder lock.
 #[expect(
     clippy::large_enum_variant,
     reason = "boxing a chunk variant would add allocation and indirection to the common access path"
@@ -33,7 +33,7 @@ pub enum ChunkAccess {
     /// A fully generated chunk.
     Full(LevelChunk),
     /// A chunk that is still being generated.
-    Proto(ProtoChunk),
+    Proto(Chunk),
     /// External chunk access must use the methods on `ChunkHolder`, which prevent access to
     /// unloaded chunks.
     // This is therefore a placeholder that will panic if it is somehow accessed.
@@ -464,7 +464,7 @@ impl ChunkAccess {
     }
 
     fn proto_height_at(
-        proto: &ProtoChunk,
+        proto: &Chunk,
         heightmap_type: HeightmapType,
         local_x: usize,
         local_z: usize,
@@ -768,7 +768,7 @@ mod tests {
     #[test]
     fn take_dirty_consumes_current_dirty_state_without_blocking_later_dirty() {
         init_test_registry();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -792,7 +792,7 @@ mod tests {
     fn proto_height_at_primes_missing_heightmap() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -820,7 +820,7 @@ mod tests {
     #[test]
     fn generation_relative_write_updates_proto_heightmaps() {
         init_test_registry();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -846,7 +846,7 @@ mod tests {
     fn initialized_proto_generation_relative_write_keeps_counts_ready() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -868,7 +868,7 @@ mod tests {
     #[test]
     fn batched_generation_column_writes_update_proto_heightmaps() {
         init_test_registry();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -910,7 +910,7 @@ mod tests {
     fn initialized_proto_generation_batch_writes_keep_counts_ready() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -934,7 +934,7 @@ mod tests {
     fn initialize_light_sources_reads_direct_generation_writes() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::new(
+        let proto = Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
@@ -1041,7 +1041,7 @@ mod tests {
     fn loaded_proto_light_emptiness_map_tracks_set_block_state_after_initialize_light() {
         init_test_registry();
         init_behaviors();
-        let proto = ProtoChunk::from_disk(
+        let proto = Chunk::from_disk(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             ChunkStatus::InitializeLight,

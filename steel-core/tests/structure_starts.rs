@@ -18,8 +18,8 @@ use glam::IVec3;
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use steel_core::chunk::Chunk;
 use steel_core::chunk::chunk_access::ChunkAccess;
-use steel_core::chunk::proto_chunk::ProtoChunk;
 use steel_core::chunk::section::{ChunkSection, Sections};
 use steel_registry::structure::LiquidSettingsData;
 use steel_registry::template_pool::{PoolElement, ProcessorList, Projection};
@@ -187,7 +187,7 @@ fn make_proto_chunk(pos: (i32, i32), section_count: usize, min_y: i32, height: i
         .map(|_| ChunkSection::new_empty())
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(sections),
         ChunkPos::new(pos.0, pos.1),
         min_y,

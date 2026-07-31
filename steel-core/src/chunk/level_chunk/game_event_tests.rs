@@ -21,10 +21,10 @@ use super::*;
 use crate::behavior::init_behaviors;
 use crate::block_entity::{BlockEntity, BlockEntityBase, SharedBlockEntity};
 use crate::chunk::{
+    Chunk,
     chunk_access::ChunkAccess,
     chunk_holder::ChunkHolder,
     chunk_ticket_manager::ChunkTicketLevel,
-    proto_chunk::ProtoChunk,
     section::{ChunkSection, Sections},
     status::ChunkStatus,
 };
@@ -183,7 +183,7 @@ fn full_activation_registers_listener_without_block_ticking_readiness() {
         .map(|_| ChunkSection::new_empty())
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(sections),
         chunk_pos,
         min_y,

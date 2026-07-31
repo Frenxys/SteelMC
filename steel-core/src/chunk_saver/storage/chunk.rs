@@ -1,10 +1,10 @@
 use super::{
-    BlockPos, BlockStateId, BlockTickList, CarvingMask, ChunkAccess, ChunkBuilder, ChunkHeightmaps,
-    ChunkPos, ChunkSection, ChunkStatus, ChunkStorage, FluidTickList, Heightmap, HeightmapType,
-    LevelChunk, LoadedChunk, Ordering, PalettedContainer, PersistentBiomeData, PersistentChunk,
-    PersistentHeightmap, PersistentPoi, PersistentSection, ProtoChunk, REGISTRY, RegistryEntry,
-    RegistryExt, SectionHolder, Sections, Weak, World, bits_for_palette_len, pack_indices,
-    unpack_indices, vanilla_biomes,
+    BlockPos, BlockStateId, BlockTickList, CarvingMask, Chunk, ChunkAccess, ChunkBuilder,
+    ChunkHeightmaps, ChunkPos, ChunkSection, ChunkStatus, ChunkStorage, FluidTickList, Heightmap,
+    HeightmapType, LevelChunk, LoadedChunk, Ordering, PalettedContainer, PersistentBiomeData,
+    PersistentChunk, PersistentHeightmap, PersistentPoi, PersistentSection, REGISTRY,
+    RegistryEntry, RegistryExt, SectionHolder, Sections, Weak, World, bits_for_palette_len,
+    pack_indices, unpack_indices, vanilla_biomes,
 };
 
 impl ChunkStorage {
@@ -234,7 +234,7 @@ impl ChunkStorage {
                 .as_deref()
                 .map(|packed| CarvingMask::from_packed_u64s(height, min_y, packed));
 
-            let chunk = ProtoChunk::from_disk(
+            let chunk = Chunk::from_disk(
                 Sections::from_owned(sections.into_boxed_slice()),
                 pos,
                 status,

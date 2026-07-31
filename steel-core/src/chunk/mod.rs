@@ -12,6 +12,7 @@ mod chunk_scheduler;
 pub mod chunk_status_tasks;
 /// Tracks chunk levels based on ticket propagation.
 pub mod chunk_ticket_manager;
+mod data;
 /// Tracks Full-neighborhood readiness for ticking chunk lifecycles.
 pub(crate) mod full_chunk_readiness;
 pub(crate) mod gameplay_chunk_lookup_cache;
@@ -22,6 +23,7 @@ pub mod player_chunk_view;
 
 pub mod level_chunk;
 pub mod paletted_container;
-pub mod proto_chunk;
 pub mod section;
 pub mod status;
+
+pub use data::Chunk;

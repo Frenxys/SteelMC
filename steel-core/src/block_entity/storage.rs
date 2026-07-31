@@ -131,7 +131,7 @@ impl BlockEntityStorage {
         )
     }
 
-    /// Atomically snapshots `ProtoChunk` entries without applying Full lifecycle filtering.
+    /// Atomically snapshots `Chunk` entries without applying Full lifecycle filtering.
     ///
     /// Vanilla `ProtoChunk` storage is a raw map: removed flags are neither changed nor consulted
     /// until transfer into a `LevelChunk`.
@@ -185,7 +185,7 @@ impl BlockEntityStorage {
         self.entries.read().entities.len()
     }
 
-    /// Sets a `ProtoChunk` block entity without invoking `LevelChunk` lifecycle callbacks.
+    /// Sets a `Chunk` block entity without invoking `LevelChunk` lifecycle callbacks.
     ///
     /// Vanilla `ProtoChunk` map replacement neither clears nor sets the removed flag.
     #[must_use]
@@ -254,7 +254,7 @@ impl BlockEntityStorage {
         }
     }
 
-    /// Removes `ProtoChunk` entity data without invoking `LevelChunk` lifecycle callbacks.
+    /// Removes `Chunk` entity data without invoking `LevelChunk` lifecycle callbacks.
     pub(crate) fn remove_without_lifecycle(&self, pos: BlockPos) -> bool {
         let mut entries = self.entries.write();
         let removed = entries.entities.remove(&pos).is_some();
@@ -500,7 +500,7 @@ impl BlockEntityStorage {
         }
     }
 
-    /// Clears `ProtoChunk` entity data without invoking `LevelChunk` lifecycle callbacks.
+    /// Clears `Chunk` entity data without invoking `LevelChunk` lifecycle callbacks.
     pub(crate) fn clear_without_lifecycle(&self) {
         let mut entries = self.entries.write();
         entries.entities.clear();

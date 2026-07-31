@@ -33,14 +33,15 @@ use crate::block_entity::{
     SharedBlockEntity,
 };
 use crate::chunk::{
+    Chunk,
     block_entity_listener::{LevelChunkGameEventListeners, ListenerSelectionCommit},
     chunk_holder::ChunkHolder,
+    data::postprocessing_from_disk,
     heightmap::{ChunkHeightmaps, HeightmapType},
     light::{
         ChunkLightData, ChunkSkyLightSources, LightSectionEmptinessChange,
         build_chunk_light_update_packet, has_different_light_properties,
     },
-    proto_chunk::{ProtoChunk, postprocessing_from_disk},
     section::Sections,
 };
 use crate::entity::SharedEntity;
@@ -223,7 +224,7 @@ impl LevelChunk {
         }
     }
 
-    /// Creates a new `LevelChunk` from a `ProtoChunk`.
+    /// Creates a new `LevelChunk` from a `Chunk`.
     ///
     /// Transfers final heightmaps from the proto chunk if available.
     /// Recalculates section block counts for random tick optimization.
@@ -239,7 +240,7 @@ impl LevelChunk {
     ///
     #[must_use]
     pub fn from_proto(
-        proto_chunk: ProtoChunk,
+        proto_chunk: Chunk,
         min_y: i32,
         height: i32,
         level: Weak<World>,
@@ -822,7 +823,7 @@ impl LevelChunk {
 
             let section_y = Self::section_y_from_section_index(min_y, section_index);
             for packed in packed_offsets {
-                let pos = ProtoChunk::unpack_postprocessing_offset(packed, section_y, chunk_pos);
+                let pos = Chunk::unpack_postprocessing_offset(packed, section_y, chunk_pos);
                 let state = world.get_block_state(pos);
                 let fluid_state = state.get_fluid_state();
 

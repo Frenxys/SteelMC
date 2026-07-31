@@ -6,11 +6,11 @@ use steel_utils::types::UpdateFlags;
 use super::*;
 use crate::behavior::init_behaviors;
 use crate::chunk::{
+    Chunk,
     chunk_access::ChunkAccess,
     chunk_holder::ChunkHolder,
     chunk_ticket_manager::ChunkTicketLevel,
     light::{LightCacheSetupRadius, LightSection, LightSectionData, LightSectionRange},
-    proto_chunk::ProtoChunk,
     section::{ChunkSection, Sections},
     status::ChunkStatus,
 };
@@ -33,7 +33,7 @@ fn holder_with_section(pos: ChunkPos, section: ChunkSection) -> Arc<ChunkHolder>
 
 fn holder_with_sections(pos: ChunkPos, sections: Vec<ChunkSection>) -> Arc<ChunkHolder> {
     let height = (sections.len() * 16) as i32;
-    let proto = ProtoChunk::new(
+    let proto = Chunk::new(
         Sections::from_owned(sections.into_boxed_slice()),
         pos,
         0,
