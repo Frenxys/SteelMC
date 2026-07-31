@@ -18,7 +18,7 @@ use tokio::{
     sync::oneshot,
 };
 
-use crate::chunk::chunk_access::ChunkStatus;
+use crate::chunk::status::ChunkStatus;
 use crate::world::World;
 
 use super::{
@@ -45,6 +45,8 @@ pub struct RegionManager {
 pub struct PreparedChunkSave {
     /// The chunk position.
     pub pos: ChunkPos,
+    /// The highest persisted status captured with the chunk data.
+    pub status: ChunkStatus,
     /// The serialized chunk data.
     pub persistent: PersistentChunk<'static>,
     /// Runtime manager entity IDs that were either serialized or explicitly skipped.
@@ -235,10 +237,10 @@ impl RegionManager {
     pub async fn save_chunk_data(
         &self,
         prepared: PreparedChunkSave,
-        status: ChunkStatus,
         thread_pool: &rayon::ThreadPool,
     ) -> io::Result<bool> {
         let pos = prepared.pos;
+        let status = prepared.status;
         let region_pos = RegionPos::from_chunk(pos.0.x, pos.0.y);
         let (local_x, local_z) = RegionPos::local_chunk_pos(pos.0.x, pos.0.y);
         let index = RegionHeader::chunk_index(local_x, local_z);

@@ -1056,12 +1056,13 @@ mod tests {
     use super::*;
     use crate::behavior::init_behaviors;
     use crate::chunk::{
-        chunk_access::{ChunkAccess, ChunkStatus},
+        chunk_access::ChunkAccess,
         chunk_holder::ChunkHolder,
         chunk_ticket_manager::ChunkTicketLevel,
         light::{LightCacheSetupRadius, LightSection, LightSectionData, LightSectionRange},
         proto_chunk::ProtoChunk,
         section::{ChunkSection, Sections},
+        status::ChunkStatus,
     };
 
     fn init_tests() {

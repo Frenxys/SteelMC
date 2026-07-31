@@ -15,11 +15,12 @@ use crate::behavior::init_behaviors;
 use crate::block_entity::entities::ComparatorBlockEntity;
 use crate::block_entity::{BlockEntityBase, SharedBlockEntity, entities::RawBlockEntity};
 use crate::chunk::{
-    chunk_access::{ChunkAccess, ChunkStatus},
+    chunk_access::ChunkAccess,
     chunk_ticket_manager::ChunkTicketLevel,
     light::{LightSection, LightSectionData},
     proto_chunk::ProtoChunk,
     section::{ChunkSection, Sections},
+    status::ChunkStatus,
 };
 
 fn test_chunk() -> Arc<LevelChunk> {

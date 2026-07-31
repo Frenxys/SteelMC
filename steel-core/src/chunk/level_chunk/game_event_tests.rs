@@ -21,11 +21,12 @@ use super::*;
 use crate::behavior::init_behaviors;
 use crate::block_entity::{BlockEntity, BlockEntityBase, SharedBlockEntity};
 use crate::chunk::{
-    chunk_access::{ChunkAccess, ChunkStatus},
+    chunk_access::ChunkAccess,
     chunk_holder::ChunkHolder,
     chunk_ticket_manager::ChunkTicketLevel,
     proto_chunk::ProtoChunk,
     section::{ChunkSection, Sections},
+    status::ChunkStatus,
 };
 use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
 use crate::world::World;

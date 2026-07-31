@@ -9,7 +9,7 @@ impl ChunkMap {
     async fn prepare_chunk_save_on_pool(
         self: &Arc<Self>,
         chunk_holder: &Arc<ChunkHolder>,
-    ) -> Option<(PreparedChunkSave, ChunkStatus)> {
+    ) -> Option<PreparedChunkSave> {
         let (sender, receiver) = oneshot::channel();
         let map = Arc::clone(self);
         let holder = Arc::clone(chunk_holder);
@@ -25,7 +25,7 @@ impl ChunkMap {
                 };
 
                 let status = holder
-                    .persisted_status()
+                    .published_status()
                     .expect("The check above confirmed it exists");
 
                 let world = map.world_gen_context.world();
@@ -35,7 +35,7 @@ impl ChunkMap {
                 let force = world.entity_manager().has_save_pending_for_chunk(chunk_pos);
                 let dirty = chunk_guard.take_dirty();
                 let prepared = if dirty || force {
-                    ChunkStorage::prepare_chunk_save(&chunk_guard, &runtime_entities, true)
+                    ChunkStorage::prepare_chunk_save(&chunk_guard, status, &runtime_entities, true)
                 } else {
                     None
                 };
@@ -44,7 +44,7 @@ impl ChunkMap {
                     chunk_guard.mark_dirty();
                 }
 
-                prepared.map(|prepared| (prepared, status))
+                prepared
             };
 
             if let Err(unsent) = sender.send(prepared) {
@@ -83,12 +83,12 @@ impl ChunkMap {
 
         // Save chunk data if dirty. Preparation runs on the shared chunk encoding
         // pool so chunk locks and persistence conversion never block Tokio workers.
-        if let Some((mut prepared, status)) = self.prepare_chunk_save_on_pool(chunk_holder).await {
+        if let Some(mut prepared) = self.prepare_chunk_save_on_pool(chunk_holder).await {
             let handled_runtime_entity_ids = mem::take(&mut prepared.handled_runtime_entity_ids);
             let world = self.world_gen_context.world();
             match self
                 .storage
-                .save_chunk_data(prepared, status, self.chunk_encoding_pool.as_ref())
+                .save_chunk_data(prepared, self.chunk_encoding_pool.as_ref())
                 .await
             {
                 Ok(true) => world
@@ -240,7 +240,7 @@ impl ChunkMap {
                     // runtime entity data.
                     continue;
                 };
-                let Some(status) = holder.persisted_status() else {
+                let Some(status) = holder.published_status() else {
                     continue;
                 };
                 let world = self.world_gen_context.world();
@@ -250,7 +250,7 @@ impl ChunkMap {
                 let force = world.entity_manager().has_save_pending_for_chunk(chunk_pos);
                 let dirty = chunk.take_dirty();
                 let prepared = if dirty || force {
-                    ChunkStorage::prepare_chunk_save(&chunk, &runtime_entities, true)
+                    ChunkStorage::prepare_chunk_save(&chunk, status, &runtime_entities, true)
                 } else {
                     None
                 };
@@ -262,16 +262,16 @@ impl ChunkMap {
                     }
                     continue;
                 };
-                (prepared, status)
+                prepared
             };
 
-            let (mut prepared, status) = prepared;
+            let mut prepared = prepared;
             let handled_runtime_entity_ids = mem::take(&mut prepared.handled_runtime_entity_ids);
             let world = self.world_gen_context.world();
             let _save_dependency = holder.add_save_dependency();
             match self
                 .storage
-                .save_chunk_data(prepared, status, self.chunk_encoding_pool.as_ref())
+                .save_chunk_data(prepared, self.chunk_encoding_pool.as_ref())
                 .await
             {
                 Ok(true) => {

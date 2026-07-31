@@ -1,6 +1,6 @@
 //! A proto chunk is a chunk that is still being generated.
 use std::sync::{
-    Weak,
+    Arc, Weak,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -14,25 +14,25 @@ use steel_registry::{
     vanilla_blocks,
 };
 use steel_utils::{
-    BlockPos, BlockStateId, ChunkPos, SectionPos,
-    locks::{SyncMutex, SyncRwLock},
-    types::UpdateFlags,
+    BlockPos, BlockStateId, ChunkPos, SectionPos, locks::SyncRwLock, types::UpdateFlags,
 };
 
 use crate::behavior::{BLOCK_BEHAVIORS, BlockEntityCreation};
 use crate::block_entity::{BlockEntityLookup, BlockEntityStorage, SharedBlockEntity};
 use crate::chunk::{
-    chunk_access::ChunkStatus,
     heightmap::{HeightmapType, ProtoHeightmaps},
     light::{
         ChunkLightData, ChunkSkyLightSources, LightSectionEmptinessChange,
         has_different_light_properties,
     },
     section::Sections,
+    status::ChunkStatus,
 };
-use crate::entity::{EntityStorage, SharedEntity};
+use crate::entity::{EntityStorage, EntityStorageAddResult, SharedEntity};
 use crate::world::World;
-use crate::world::tick_scheduler::{BlockTickList, FluidTickList, TickPriority};
+use crate::world::tick_scheduler::{
+    BlockTickList, ChunkTickContainer, ChunkTickLists, FluidTickList, TickPriority,
+};
 use crate::worldgen::carving_mask::CarvingMask;
 use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 
@@ -84,10 +84,8 @@ pub struct ProtoChunk {
     pub carving_mask: SyncRwLock<Option<CarvingMask>>,
     /// Section-indexed packed offsets that need vanilla postprocessing after promotion.
     pub postprocessing: SyncRwLock<Box<[Vec<u16>]>>,
-    /// Scheduled block ticks queued while this chunk is still a proto chunk.
-    pub block_ticks: SyncMutex<BlockTickList>,
-    /// Scheduled fluid ticks queued while this chunk is still a proto chunk.
-    pub fluid_ticks: SyncMutex<FluidTickList>,
+    /// Stable block and fluid scheduled-tick storage retained through Full promotion.
+    pub(crate) scheduled_ticks: Arc<ChunkTickContainer>,
     /// Vanilla skylight source edge cache for this chunk.
     pub sky_light_sources: SyncRwLock<ChunkSkyLightSources>,
     /// Chunk-owned light sections and section emptiness maps.
@@ -132,8 +130,10 @@ impl ProtoChunk {
             structure_references: SyncRwLock::new(FxHashMap::default()),
             carving_mask: SyncRwLock::new(None),
             postprocessing: SyncRwLock::new(empty_postprocessing(height)),
-            block_ticks: SyncMutex::new(BlockTickList::new_pending()),
-            fluid_ticks: SyncMutex::new(FluidTickList::new_pending()),
+            scheduled_ticks: Arc::new(ChunkTickContainer::new_proto(ChunkTickLists::new(
+                BlockTickList::new_pending(),
+                FluidTickList::new_pending(),
+            ))),
             sky_light_sources: SyncRwLock::new(ChunkSkyLightSources::for_valid_world_height(
                 min_y, height,
             )),
@@ -186,8 +186,10 @@ impl ProtoChunk {
             structure_references: SyncRwLock::new(structure_references),
             carving_mask: SyncRwLock::new(carving_mask),
             postprocessing: SyncRwLock::new(postprocessing_from_disk(height, postprocessing)),
-            block_ticks: SyncMutex::new(block_ticks),
-            fluid_ticks: SyncMutex::new(fluid_ticks),
+            scheduled_ticks: Arc::new(ChunkTickContainer::new_proto(ChunkTickLists::new(
+                block_ticks,
+                fluid_ticks,
+            ))),
             sky_light_sources: SyncRwLock::new(ChunkSkyLightSources::for_valid_world_height(
                 min_y, height,
             )),
@@ -493,9 +495,21 @@ impl ProtoChunk {
     }
 
     /// Adds an entity to proto storage.
-    pub fn add_entity(&self, entity: SharedEntity) {
-        self.entities.add(entity);
-        self.mark_unsaved();
+    pub fn add_entity(&self, entity: SharedEntity) -> bool {
+        match self.entities.add(entity) {
+            EntityStorageAddResult::Staged => {
+                self.mark_unsaved();
+                true
+            }
+            EntityStorageAddResult::Closed(entity) => {
+                // A retained worldgen reference becomes Vanilla's false-write
+                // ImposterProtoChunk after promotion. Its addEntity call drops
+                // the entity, while WorldGenRegion.addFreshEntity still reports
+                // success.
+                drop(entity);
+                true
+            }
+        }
     }
 
     /// Returns all entities in this proto chunk.
@@ -517,9 +531,9 @@ impl ProtoChunk {
     /// requested delay from generation time.
     pub fn schedule_block_tick(&self, pos: BlockPos, block: BlockRef, priority: TickPriority) {
         if self
-            .block_ticks
-            .lock()
-            .schedule_pending(block, pos, priority)
+            .scheduled_ticks
+            .schedule_pending_block(block, pos, priority)
+            == Some(true)
         {
             self.mark_unsaved();
         }
@@ -530,9 +544,9 @@ impl ProtoChunk {
     /// See [`Self::schedule_block_tick`] for why proto ticks use delay `0`.
     pub fn schedule_fluid_tick(&self, pos: BlockPos, fluid: FluidRef, priority: TickPriority) {
         if self
-            .fluid_ticks
-            .lock()
-            .schedule_pending(fluid, pos, priority)
+            .scheduled_ticks
+            .schedule_pending_fluid(fluid, pos, priority)
+            == Some(true)
         {
             self.mark_unsaved();
         }
@@ -837,8 +851,10 @@ mod tests {
 
         proto.schedule_block_tick(pos, &vanilla_blocks::DIRT, TickPriority::Normal);
 
-        let ticks = proto.block_ticks.lock().pack(0);
-        let Some(tick) = ticks.first() else {
+        let Some(snapshot) = proto.scheduled_ticks.snapshot(0) else {
+            panic!("proto chunk scheduled ticks should remain available");
+        };
+        let Some(tick) = snapshot.block.first() else {
             panic!("proto chunk should store scheduled block tick");
         };
 
@@ -846,6 +862,39 @@ mod tests {
         assert_eq!(tick.tick_type, &vanilla_blocks::DIRT);
         assert_eq!(tick.delay, 0);
         assert_eq!(tick.priority, TickPriority::Normal);
+    }
+
+    #[test]
+    fn full_promotion_retains_and_closes_proto_scheduled_tick_container() {
+        init_test_registry();
+        let proto = ProtoChunk::new(
+            Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
+            ChunkPos::new(0, 0),
+            0,
+            16,
+            Weak::new(),
+        );
+        let scheduled_ticks = Arc::clone(&proto.scheduled_ticks);
+        let pos = BlockPos::new(3, 4, 5);
+        proto.schedule_block_tick(pos, &vanilla_blocks::DIRT, TickPriority::Normal);
+
+        let full = LevelChunk::from_proto(proto, 0, 16, Weak::new()).chunk;
+
+        assert_eq!(
+            scheduled_ticks.schedule_pending_block(
+                &vanilla_blocks::DIRT,
+                BlockPos::new(6, 7, 8),
+                TickPriority::Normal,
+            ),
+            None
+        );
+        assert!(Arc::ptr_eq(
+            &scheduled_ticks,
+            full.scheduled_tick_container()
+        ));
+        let snapshot = full.scheduled_tick_snapshot();
+        assert_eq!(snapshot.block.len(), 1);
+        assert_eq!(snapshot.block[0].pos, pos);
     }
 
     #[test]

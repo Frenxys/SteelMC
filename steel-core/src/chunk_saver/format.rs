@@ -32,7 +32,7 @@ use glam::IVec3;
 use steel_utils::{BoundingBox, Identifier, PackedChunkPos};
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::chunk::chunk_access::ChunkStatus;
+use crate::chunk::status::ChunkStatus;
 
 /// Magic bytes for region file identification: "STLR" (Steel Region)
 pub const REGION_MAGIC: [u8; 4] = *b"STLR";

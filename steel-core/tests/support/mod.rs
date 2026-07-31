@@ -14,12 +14,13 @@ use steel_utils::{BlockPos, BlockStateId, Identifier};
 use tokio::runtime::{Builder, Runtime};
 use toml::map::Map;
 
-use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
+use crate::chunk::chunk_access::ChunkAccess;
 use crate::chunk::chunk_holder::{ChunkHolder, TickingReadiness};
 use crate::chunk::chunk_ticket_manager::ChunkTicketLevel;
 use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::section::{ChunkSection, Sections};
+use crate::chunk::status::ChunkStatus;
 use crate::entity::Entity;
 use crate::level_data::WorldGenerationSettings;
 use crate::world::game_event::GameEventContext;

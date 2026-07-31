@@ -5,8 +5,8 @@ use steel_registry::structure::TerrainAdjustment;
 use steel_utils::{ChunkPos, Identifier};
 
 use crate::chunk::{
-    chunk_access::ChunkStatus, chunk_generation_task::StaticCache2D, chunk_holder::ChunkHolder,
-    chunk_pyramid::ChunkStep,
+    chunk_generation_task::StaticCache2D, chunk_holder::ChunkHolder, chunk_pyramid::ChunkStep,
+    status::ChunkStatus,
 };
 use crate::worldgen::generator::ChunkGenerator;
 use crate::worldgen::generator::context::WorldGenContext;

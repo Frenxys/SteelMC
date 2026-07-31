@@ -28,12 +28,13 @@ use steel_utils::{
 use crate::behavior::{BLOCK_BEHAVIORS, BlockEntityCreation, FLUID_BEHAVIORS};
 use crate::block_entity::{BLOCK_ENTITIES, SharedBlockEntity};
 use crate::chunk::{
-    chunk_access::{ChunkAccess, ChunkStatus},
+    chunk_access::ChunkAccess,
     chunk_generation_task::StaticCache2D,
     chunk_holder::ChunkHolder,
     chunk_pyramid::ChunkStep,
     heightmap::{Heightmap, HeightmapType},
     section::{ChunkSection, SectionHolder, SectionWriteGuard},
+    status::ChunkStatus,
 };
 use crate::entity::SharedEntity;
 use crate::world::tick_scheduler::TickPriority;
@@ -1387,9 +1388,10 @@ mod tests {
 
     use crate::behavior::init_behaviors;
     use crate::chunk::{
-        chunk_access::{ChunkAccess, ChunkStatus},
+        chunk_access::ChunkAccess,
         proto_chunk::ProtoChunk,
         section::{ChunkSection, Sections},
+        status::ChunkStatus,
     };
 
     use super::{WorldGenBulkSectionAccess, WorldGenRegion};

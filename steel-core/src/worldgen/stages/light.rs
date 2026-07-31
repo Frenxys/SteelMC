@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use crate::chunk::{
-    chunk_access::ChunkStatus,
     chunk_generation_task::StaticCache2D,
     chunk_holder::ChunkHolder,
     chunk_pyramid::ChunkStep,
@@ -11,6 +10,7 @@ use crate::chunk::{
         check_sky_light_chunk_edges, force_load_block_light_chunk, force_load_sky_light_chunk,
         propagate_block_light_chunk, propagate_sky_light_chunk,
     },
+    status::ChunkStatus,
 };
 use crate::worldgen::generator::context::WorldGenContext;
 use steel_utils::SectionPos;
@@ -88,7 +88,7 @@ fn run_light_stage(
                 .then(|| Arc::clone(holder))
         },
         |cached_chunk, holder, _chunk| {
-            let status = holder.persisted_status();
+            let status = holder.published_status();
             let center_chunk = cached_chunk.chunk_pos == center;
             let initialized = status.is_some_and(|status| status >= ChunkStatus::InitializeLight);
             let lit = status.is_some_and(|status| status >= ChunkStatus::Light);
@@ -205,11 +205,12 @@ mod tests {
     use super::*;
     use crate::behavior::init_behaviors;
     use crate::chunk::{
-        chunk_access::{ChunkAccess, ChunkStatus},
+        chunk_access::ChunkAccess,
         chunk_ticket_manager::ChunkTicketLevel,
         light::{LightSection, LightSectionData},
         proto_chunk::ProtoChunk,
         section::{ChunkSection, Sections},
+        status::ChunkStatus,
     };
     use crate::world::tick_scheduler::TickPriority;
 
@@ -408,11 +409,15 @@ mod tests {
         let ChunkAccess::Proto(proto) = &*chunk else {
             panic!("test chunk should remain proto");
         };
-        let block_ticks = proto.block_ticks.lock();
-        assert_eq!(block_ticks.pending_entries().len(), 1);
-        assert_eq!(block_ticks.pending_entries()[0].pos, other_tick_pos);
-        drop(block_ticks);
-        assert_eq!(proto.fluid_ticks.lock().pending_entries().len(), 1);
+        let Some(block_ticks) = proto.scheduled_ticks.pending_block_snapshot() else {
+            panic!("proto chunk scheduled ticks should remain pending");
+        };
+        assert_eq!(block_ticks.len(), 1);
+        assert_eq!(block_ticks[0].pos, other_tick_pos);
+        let Some(fluid_ticks) = proto.scheduled_ticks.pending_fluid_snapshot() else {
+            panic!("proto chunk scheduled ticks should remain pending");
+        };
+        assert_eq!(fluid_ticks.len(), 1);
         assert!(!proto.sections.sections[0].read().is_randomly_ticking());
     }
 
@@ -459,7 +464,10 @@ mod tests {
         let ChunkAccess::Proto(proto) = &*chunk else {
             panic!("test chunk should remain proto");
         };
-        assert_eq!(proto.block_ticks.lock().pending_entries().len(), 1);
+        let Some(block_ticks) = proto.scheduled_ticks.pending_block_snapshot() else {
+            panic!("proto chunk scheduled ticks should remain pending");
+        };
+        assert_eq!(block_ticks.len(), 1);
     }
 
     #[test]

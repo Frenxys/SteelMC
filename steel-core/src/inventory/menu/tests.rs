@@ -14,7 +14,7 @@ use super::{MenuBuilder, kinds::BasicKind};
 use crate::{
     behavior::init_behaviors,
     block_entity::init_block_entities,
-    chunk::chunk_access::ChunkStatus,
+    chunk::status::ChunkStatus,
     entity::{Entity as _, entities::ItemEntity},
     inventory::{
         click::{Click, DragKind, QuickCraft, SwapTarget},

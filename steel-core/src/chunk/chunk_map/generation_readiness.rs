@@ -144,7 +144,7 @@ impl ChunkMap {
             if is_full(level)
                 && !old.is_some_and(is_full)
                 && chunk_holder.is_full_status_initialized()
-                && chunk_holder.persisted_status() == Some(ChunkStatus::Full)
+                && chunk_holder.published_status() == Some(ChunkStatus::Full)
                 && chunk_holder.try_chunk(ChunkStatus::Full).is_some()
             {
                 self.full_publications.publish(&chunk_holder);
@@ -361,7 +361,7 @@ impl ChunkMap {
             .read_sync(&pos, |_, holder| Arc::clone(holder))?;
         if !holder.load_level().is_some_and(is_full)
             || !holder.is_full_status_initialized()
-            || holder.persisted_status() != Some(ChunkStatus::Full)
+            || holder.published_status() != Some(ChunkStatus::Full)
             || holder.try_chunk(ChunkStatus::Full).is_none()
         {
             return None;
@@ -380,7 +380,7 @@ impl ChunkMap {
         if !Arc::ptr_eq(&published_holder, &active_holder)
             || !active_holder.load_level().is_some_and(is_full)
             || !active_holder.is_full_status_initialized()
-            || active_holder.persisted_status() != Some(ChunkStatus::Full)
+            || active_holder.published_status() != Some(ChunkStatus::Full)
             || active_holder.try_chunk(ChunkStatus::Full).is_none()
         {
             return None;
@@ -429,7 +429,7 @@ impl ChunkMap {
         counts: FullNeighborhoodCounts,
     ) -> TickingReadiness {
         if !holder.is_full_status_initialized()
-            || holder.persisted_status() != Some(ChunkStatus::Full)
+            || holder.published_status() != Some(ChunkStatus::Full)
             || holder.try_chunk(ChunkStatus::Full).is_none()
         {
             return TickingReadiness::Unready;
@@ -591,7 +591,7 @@ impl ChunkMap {
             rebuilt.mark_dirty(*pos);
             let contributor = if holder.load_level().is_some_and(is_full)
                 && holder.is_full_status_initialized()
-                && holder.persisted_status() == Some(ChunkStatus::Full)
+                && holder.published_status() == Some(ChunkStatus::Full)
                 && holder.try_chunk(ChunkStatus::Full).is_some()
             {
                 Some(holder)

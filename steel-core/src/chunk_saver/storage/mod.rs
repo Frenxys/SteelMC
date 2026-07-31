@@ -1,5 +1,4 @@
 use crate::block_entity::{BLOCK_ENTITIES, SharedBlockEntity};
-use crate::chunk::chunk_access::{ChunkAccess, ChunkStatus};
 use crate::chunk::heightmap::{ChunkHeightmaps, Heightmap, HeightmapType};
 use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::light::{
@@ -8,6 +7,7 @@ use crate::chunk::light::{
 use crate::chunk::paletted_container::PalettedContainer;
 use crate::chunk::proto_chunk::ProtoChunk;
 use crate::chunk::section::{ChunkSection, SectionHolder, Sections};
+use crate::chunk::{chunk_access::ChunkAccess, status::ChunkStatus};
 use crate::chunk_saver::bit_pack::{bits_for_palette_len, pack_indices, unpack_indices};
 use crate::entity::{
     ENTITIES, Entity, EntityBase, EntityBaseSaveData, EntityFireFreezeState, EntityLoadRequest,
@@ -495,12 +495,11 @@ impl ChunkStorage {
     pub async fn save_chunk_data(
         &self,
         prepared: PreparedChunkSave,
-        status: ChunkStatus,
         thread_pool: &rayon::ThreadPool,
     ) -> io::Result<bool> {
         match self {
-            Self::Disk(rm) => rm.save_chunk_data(prepared, status, thread_pool).await,
-            Self::RamOnly(ram) => ram.save_chunk_data(prepared, status).await,
+            Self::Disk(rm) => rm.save_chunk_data(prepared, thread_pool).await,
+            Self::RamOnly(ram) => ram.save_chunk_data(prepared).await,
         }
     }
 
@@ -555,8 +554,9 @@ impl ChunkStorage {
     ///
     /// If the chunk is not dirty and `force` is false, this is a no-op.
     /// Returns `Ok(true)` if the chunk was saved.
-    /// Prepares chunk data for saving. Call this while holding the chunk lock,
-    /// then pass the result to `save_chunk_data` after releasing the lock.
+    /// Prepares chunk data and its authoritative persisted status for saving.
+    /// Call this while holding the chunk lock, then pass the result to
+    /// `save_chunk_data` after releasing the lock.
     #[must_use]
     #[expect(
         clippy::similar_names,
@@ -568,6 +568,7 @@ impl ChunkStorage {
     )]
     pub fn prepare_chunk_save(
         chunk: &ChunkAccess,
+        status: ChunkStatus,
         runtime_entities: &[SharedEntity],
         force: bool,
     ) -> Option<PreparedChunkSave> {
@@ -638,8 +639,11 @@ impl ChunkStorage {
             ChunkAccess::Proto(c) => {
                 // Proto ticks are pending, so Vanilla ignores the current game
                 // time when serializing their already-relative delays.
-                let bt = Self::block_ticks_to_persistent(c.block_ticks.lock().pack(0), pos);
-                let ft = Self::fluid_ticks_to_persistent(c.fluid_ticks.lock().pack(0), pos);
+                let Some(snapshot) = c.scheduled_ticks.snapshot(0) else {
+                    panic!("Proto chunk scheduled-tick container was finalized before saving");
+                };
+                let bt = Self::block_ticks_to_persistent(snapshot.block, pos);
+                let ft = Self::fluid_ticks_to_persistent(snapshot.fluid, pos);
                 (bt, ft)
             }
             ChunkAccess::Unloaded => unreachable!(),
@@ -705,6 +709,7 @@ impl ChunkStorage {
 
         Some(PreparedChunkSave {
             pos,
+            status,
             persistent,
             handled_runtime_entity_ids,
         })

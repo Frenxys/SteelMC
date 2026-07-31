@@ -10,7 +10,8 @@ fn proto_carving_mask_presence_roundtrips_when_empty() {
     drop(proto.get_or_create_carving_mask());
     let chunk = ChunkAccess::Proto(proto);
 
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], false) else {
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
+    else {
         panic!("dirty proto chunk should prepare for saving");
     };
     assert_eq!(prepared.persistent.carving_mask, Some(Vec::new()));
@@ -30,6 +31,31 @@ fn proto_carving_mask_presence_roundtrips_when_empty() {
     assert!(loaded_proto.carving_mask.read().is_some());
 }
 
+#[tokio::test]
+async fn ram_only_storage_restores_the_status_bundled_with_the_prepared_save() {
+    init_test_registry();
+
+    let pos = ChunkPos::new(3, -4);
+    let proto = ProtoChunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    proto.set_status(ChunkStatus::Carvers);
+    let chunk = ChunkAccess::Proto(proto);
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
+    else {
+        panic!("dirty proto chunk should prepare for saving");
+    };
+
+    let storage = RamOnlyStorage::empty_world();
+    let Ok(true) = storage.save_chunk_data(prepared).await else {
+        panic!("prepared chunk should save to RAM storage");
+    };
+    let Ok(Some(loaded)) = storage.load_chunk(pos, 0, 16, Weak::new()).await else {
+        panic!("saved chunk should load from RAM storage");
+    };
+
+    assert_eq!(loaded.status, ChunkStatus::Carvers);
+    assert!(matches!(loaded.chunk, ChunkAccess::Proto(_)));
+}
+
 #[test]
 fn proto_carving_mask_bits_roundtrip_through_persistent_chunk() {
     init_test_registry();
@@ -43,7 +69,8 @@ fn proto_carving_mask_bits_roundtrip_through_persistent_chunk() {
     }
     let chunk = ChunkAccess::Proto(proto);
 
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], false) else {
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
+    else {
         panic!("dirty proto chunk should prepare for saving");
     };
     assert!(
@@ -86,7 +113,8 @@ fn proto_postprocessing_roundtrips_through_persistent_chunk() {
     let packed = ProtoChunk::pack_postprocessing_offset(marked);
     let chunk = ChunkAccess::Proto(proto);
 
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], false) else {
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Noise, &[], false)
+    else {
         panic!("dirty proto chunk should prepare for saving");
     };
 
@@ -150,7 +178,8 @@ fn full_chunk_postprocessing_roundtrips_through_persistent_chunk() {
 
     let chunk = ChunkAccess::Full(loaded_full);
     chunk.mark_dirty();
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], false) else {
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Full, &[], false)
+    else {
         panic!("dirty full chunk should prepare for saving");
     };
 

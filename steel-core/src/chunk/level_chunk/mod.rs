@@ -266,11 +266,14 @@ impl LevelChunk {
         let structure_starts = proto_chunk.structure_starts.into_inner();
         let structure_references = proto_chunk.structure_references.into_inner();
         let postprocessing = proto_chunk.postprocessing.into_inner();
-        // Vanilla keeps proto ticks pending through Full promotion. Their delays
-        // are anchored only when this chunk first becomes block-ticking.
-        let block_ticks = proto_chunk.block_ticks.into_inner();
-        let fluid_ticks = proto_chunk.fluid_ticks.into_inner();
-        let pending_entities = proto_chunk.entities.get_all();
+        // Vanilla keeps proto ticks pending through Full promotion. Retaining
+        // the same container also makes the promotion linearizable with any
+        // concurrent scheduling against the chunk.
+        let scheduled_ticks = proto_chunk.scheduled_ticks;
+        if !scheduled_ticks.promote_to_full() {
+            panic!("Proto chunk scheduled-tick container was already promoted");
+        }
+        let pending_entities = proto_chunk.entities.close_and_drain();
         let sky_light_sources = proto_chunk.sky_light_sources.into_inner();
         let mut light = proto_chunk.light.into_inner();
         if let Err(error) = light.refresh_emptiness_maps_from_sections(&proto_chunk.sections) {
@@ -295,10 +298,7 @@ impl LevelChunk {
             block_entities: BlockEntityStorage::new(),
             game_event_listeners: LevelChunkGameEventListeners::new(game_event_listener_count),
             block_entity_activation: SyncMutex::new(BlockEntityActivation::default()),
-            scheduled_ticks: Arc::new(ChunkTickContainer::new(ChunkTickLists::new(
-                block_ticks,
-                fluid_ticks,
-            ))),
+            scheduled_ticks,
             structure_starts: SyncRwLock::new(structure_starts),
             structure_references: SyncRwLock::new(structure_references),
             postprocessing: SyncMutex::new(postprocessing),

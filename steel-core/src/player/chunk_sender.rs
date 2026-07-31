@@ -18,8 +18,9 @@ use steel_utils::{ChunkPos, PackedChunkPos};
 
 use crate::{
     chunk::{
-        chunk_access::{ChunkAccess, ChunkStatus},
+        chunk_access::ChunkAccess,
         chunk_holder::{ChunkHolder, TickingReadinessSnapshot},
+        status::ChunkStatus,
     },
     player::PlayerConnection,
     player::connection::NetworkConnection,
@@ -321,7 +322,7 @@ impl ChunkSender {
                 .chunk_map
                 .chunks
                 .read_sync(&pos, |_, chunk| chunk.clone())
-                && holder.persisted_status() == Some(ChunkStatus::Full)
+                && holder.published_status() == Some(ChunkStatus::Full)
             {
                 let readiness = holder.ticking_readiness_snapshot();
                 if readiness.is_block_ticking() {

@@ -24,9 +24,7 @@ use steel_registry::{
 use steel_utils::{BlockPos, BlockStateId, ChunkPos, Direction};
 
 use crate::chunk::{
-    chunk_access::{ChunkAccess, ChunkStatus},
-    chunk_holder::ChunkHolder,
-    light::LightWorkset,
+    chunk_access::ChunkAccess, chunk_holder::ChunkHolder, light::LightWorkset, status::ChunkStatus,
 };
 
 const LEAF_DISTANCE_LIMIT: u8 = 7;
@@ -147,10 +145,12 @@ pub(super) fn resolve_generated_leaf_distances(workset: &LightWorkset, holder: &
     // while intentionally omitting neighbor-shape and observer callbacks so the
     // converged generation wave is not scheduled again.
     chunk.write_block_batch_for_generation(&writes);
-    let removed_ticks = proto
-        .block_ticks
-        .lock()
-        .remove_pending_matching(|tick| is_leaf_distance_block(tick.tick_type));
+    let Some(removed_ticks) = proto
+        .scheduled_ticks
+        .remove_pending_blocks_matching(|tick| is_leaf_distance_block(tick.tick_type))
+    else {
+        panic!("generated leaf-distance resolution requires pending chunk ticks");
+    };
     if !writes.is_empty() || removed_ticks != 0 {
         chunk.mark_dirty();
     }
@@ -163,9 +163,10 @@ fn pending_leaf_tick_positions(holder: &ChunkHolder) -> Vec<BlockPos> {
     let ChunkAccess::Proto(proto) = &*chunk else {
         panic!("generated leaf-distance resolution requires a proto chunk");
     };
-    let ticks = proto.block_ticks.lock();
+    let Some(ticks) = proto.scheduled_ticks.pending_block_snapshot() else {
+        panic!("generated leaf-distance resolution requires pending chunk ticks");
+    };
     ticks
-        .pending_entries()
         .iter()
         .filter(|tick| is_leaf_distance_block(tick.tick_type))
         .map(|tick| tick.pos)

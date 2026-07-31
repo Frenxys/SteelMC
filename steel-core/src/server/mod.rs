@@ -15,8 +15,8 @@ pub mod worlds;
 use crate::behavior::init_behaviors;
 use crate::block_entity::init_block_entities;
 use crate::chunk::{
-    chunk_access::ChunkStatus,
     chunk_request::{ChunkRequest, ChunkRequestHandle, ChunkRequestState, ChunkTicketKind},
+    status::ChunkStatus,
 };
 use crate::command::brigadier::{StringReader, SuggestionError, Suggestions};
 use crate::command::execution::{

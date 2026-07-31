@@ -59,10 +59,8 @@ use crate::chunk::light::{
 };
 use crate::chunk::player_chunk_view::PlayerChunkView;
 use crate::chunk::{
-    chunk_access::{ChunkAccess, ChunkStatus},
-    chunk_generation_task::ChunkGenerationTask,
-    level_chunk::BlockRandomPositionGenerator,
-    section::RandomTickSectionBits,
+    chunk_access::ChunkAccess, chunk_generation_task::ChunkGenerationTask,
+    level_chunk::BlockRandomPositionGenerator, section::RandomTickSectionBits, status::ChunkStatus,
 };
 use crate::chunk_saver::ChunkStorage;
 use crate::player::connection::NetworkConnection;
@@ -1255,7 +1253,7 @@ impl ChunkMap {
                     .read_sync(&holder.get_pos(), |_, active| Arc::ptr_eq(active, holder))
                     .unwrap_or(false)
                 || !holder.is_full_status_initialized()
-                || holder.persisted_status() != Some(ChunkStatus::Full)
+                || holder.published_status() != Some(ChunkStatus::Full)
             {
                 continue;
             }

@@ -85,7 +85,9 @@ fn proto_block_entities_roundtrip_and_promote_to_full_chunk() {
     assert_eq!(proto.pending_block_entity_positions(), [block_pos]);
 
     let chunk = ChunkAccess::Proto(proto);
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], false) else {
+    let Some(prepared) =
+        ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Features, &[], false)
+    else {
         panic!("dirty proto chunk should prepare for saving");
     };
     assert_eq!(prepared.persistent.block_entities.len(), 1);
@@ -110,7 +112,8 @@ fn proto_block_entities_roundtrip_and_promote_to_full_chunk() {
     assert_eq!(full.pending_block_entity_positions(), [block_pos]);
 
     let full = ChunkAccess::Full(full);
-    let Some(full_save) = ChunkStorage::prepare_chunk_save(&full, &[], true) else {
+    let Some(full_save) = ChunkStorage::prepare_chunk_save(&full, ChunkStatus::Full, &[], true)
+    else {
         panic!("forced full-chunk save should retain the pending marker");
     };
     assert_eq!(full_save.persistent.block_entities.len(), 1);
@@ -206,7 +209,9 @@ fn proto_entities_roundtrip_and_promote_to_full_chunk() {
     proto.add_entity(crystal);
 
     let chunk = ChunkAccess::Proto(proto);
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], false) else {
+    let Some(prepared) =
+        ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Features, &[], false)
+    else {
         panic!("dirty proto chunk should prepare for saving");
     };
     assert_eq!(prepared.persistent.entities.len(), 1);
@@ -290,8 +295,12 @@ fn prepared_save_reports_handled_runtime_entity_ids() {
         Weak::new(),
     ));
 
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, slice::from_ref(&entity), true)
-    else {
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(
+        &chunk,
+        ChunkStatus::Features,
+        slice::from_ref(&entity),
+        true,
+    ) else {
         panic!("forced runtime entity save should prepare a chunk save");
     };
 
@@ -313,8 +322,12 @@ fn full_chunk_load_defers_entities_to_world_registration() {
         Weak::new(),
     ));
 
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, slice::from_ref(&entity), true)
-    else {
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(
+        &chunk,
+        ChunkStatus::Features,
+        slice::from_ref(&entity),
+        true,
+    ) else {
         panic!("forced runtime entity save should prepare a chunk save");
     };
 
@@ -357,7 +370,9 @@ fn runtime_entity_passengers_save_nested_and_load_flattened_for_registration() {
     let passenger_uuid = passenger.uuid();
     let entities = [Arc::clone(&vehicle), Arc::clone(&passenger)];
 
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &entities, true) else {
+    let Some(prepared) =
+        ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Features, &entities, true)
+    else {
         panic!("forced runtime entity save should prepare a chunk save");
     };
 
@@ -419,8 +434,12 @@ fn runtime_entity_passengers_skip_non_serializable_entities_like_vanilla() {
     EntityBase::restore_passenger_relationship(&vehicle, &passenger);
     let vehicle_uuid = vehicle.uuid();
 
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, slice::from_ref(&vehicle), true)
-    else {
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(
+        &chunk,
+        ChunkStatus::Features,
+        slice::from_ref(&vehicle),
+        true,
+    ) else {
         panic!("forced runtime entity save should prepare a chunk save");
     };
 
@@ -470,7 +489,9 @@ fn unimplemented_block_entities_preserve_nbt_through_proto_save_load() {
     assert!(proto.set_block_entity(entity));
 
     let chunk = ChunkAccess::Proto(proto);
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], false) else {
+    let Some(prepared) =
+        ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Features, &[], false)
+    else {
         panic!("dirty proto chunk should prepare for saving");
     };
     assert_eq!(prepared.persistent.block_entities.len(), 1);

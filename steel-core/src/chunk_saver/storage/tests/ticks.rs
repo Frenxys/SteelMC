@@ -51,7 +51,9 @@ fn persisted_proto_ticks_deduplicate_while_full_ticks_retain_saved_entries() {
     let ChunkAccess::Proto(proto) = proto_loaded.chunk else {
         panic!("non-Full status should load a proto chunk");
     };
-    let proto_ticks = proto.block_ticks.lock().pack(0);
+    let Some(proto_ticks) = proto.scheduled_ticks.pending_block_snapshot() else {
+        panic!("loaded proto ticks should remain pending");
+    };
     assert_eq!(proto_ticks.len(), 1);
     assert_eq!(proto_ticks[0].delay, 7);
     assert_eq!(proto_ticks[0].priority, TickPriority::High);
@@ -131,7 +133,8 @@ fn forced_prepare_preserves_dirty_set_after_save_decision() {
     assert!(chunk.take_dirty());
     chunk.mark_dirty();
 
-    let Some(_prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], true) else {
+    let Some(_prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Empty, &[], true)
+    else {
         panic!("forced save prep should serialize the chunk");
     };
     assert!(chunk.is_dirty());
@@ -152,7 +155,8 @@ fn full_chunk_save_snapshots_chunk_owned_scheduled_ticks() {
     let Some(chunk) = holder.try_chunk(ChunkStatus::Full) else {
         panic!("inserted test chunk must remain Full");
     };
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, &[], true) else {
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Full, &[], true)
+    else {
         panic!("forced Full-chunk save must produce a snapshot");
     };
 

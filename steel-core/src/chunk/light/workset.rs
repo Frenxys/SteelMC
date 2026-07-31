@@ -5,9 +5,8 @@ use steel_registry::{REGISTRY, vanilla_blocks};
 use steel_utils::{BlockStateId, ChunkPos, SectionPos};
 
 use crate::chunk::{
-    chunk_access::{ChunkAccess, ChunkStatus},
-    chunk_holder::ChunkHolder,
-    section::ChunkSection,
+    chunk_access::ChunkAccess, chunk_holder::ChunkHolder, section::ChunkSection,
+    status::ChunkStatus,
 };
 
 use super::{

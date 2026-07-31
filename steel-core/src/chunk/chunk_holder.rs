@@ -35,10 +35,11 @@ use crate::worldgen::WorldGenContext;
 use crate::{
     ChunkMap,
     chunk::{
-        chunk_access::{ChunkAccess, ChunkStatus},
+        chunk_access::ChunkAccess,
         chunk_generation_task::ChunkGenerationTask,
         chunk_pyramid::ChunkStep,
         level_chunk::{LevelChunk, LevelChunkPromotion},
+        status::ChunkStatus,
     },
 };
 
@@ -635,7 +636,7 @@ impl ChunkHolder {
     pub async fn await_chunk_status(&self, status: ChunkStatus) -> Option<ChunkStatus> {
         loop {
             let notified = self.status_changed.notified();
-            let published = self.persisted_status();
+            let published = self.published_status();
             if published.is_some_and(|current| status <= current) {
                 return published;
             }
@@ -651,7 +652,7 @@ impl ChunkHolder {
     async fn await_claimed_chunk_status(&self, status: ChunkStatus) -> Option<ChunkStatus> {
         loop {
             let notified = self.status_changed.notified();
-            let published = self.persisted_status();
+            let published = self.published_status();
             if published.is_some_and(|current| status <= current) {
                 return published;
             }
@@ -664,8 +665,8 @@ impl ChunkHolder {
         }
     }
 
-    /// Gets the persisted status of the chunk.
-    pub fn persisted_status(&self) -> Option<ChunkStatus> {
+    /// Gets the published status of the chunk.
+    pub fn published_status(&self) -> Option<ChunkStatus> {
         decoded_published_status(self.published_status.load(Ordering::Acquire))
     }
 
@@ -861,13 +862,13 @@ impl ChunkHolder {
                 ?target_status,
                 load_level = ?holder.load_level(),
                 simulation_level = ?holder.simulation_level(),
-                current_status = ?holder.persisted_status(),
+                current_status = ?holder.published_status(),
                 "Dropping storage load after chunk holder target became disallowed before load/generation: chunk={:?}, target_status={:?}, load_level={:?}, simulation_level={:?}, current_status={:?}",
                 holder.pos,
                 target_status,
                 holder.load_level(),
                 holder.simulation_level(),
-                holder.persisted_status(),
+                holder.published_status(),
             );
             if let Err(error) = storage.release_chunk(holder.pos).await {
                 tracing::error!(
@@ -895,13 +896,13 @@ impl ChunkHolder {
                 ?target_status,
                 load_level = ?holder.load_level(),
                 simulation_level = ?holder.simulation_level(),
-                current_status = ?holder.persisted_status(),
+                current_status = ?holder.published_status(),
                 "Dropping storage load after chunk holder target became disallowed after load attempt: chunk={:?}, target_status={:?}, load_level={:?}, simulation_level={:?}, current_status={:?}",
                 holder.pos,
                 target_status,
                 holder.load_level(),
                 holder.simulation_level(),
-                holder.persisted_status(),
+                holder.published_status(),
             );
             if let Err(error) = storage.release_chunk(holder.pos).await {
                 tracing::error!(
@@ -976,14 +977,14 @@ impl ChunkHolder {
                 ?loaded_status,
                 load_level = ?holder.load_level(),
                 simulation_level = ?holder.simulation_level(),
-                current_status = ?holder.persisted_status(),
+                current_status = ?holder.published_status(),
                 "Dropping storage load that completed after chunk holder target became disallowed: chunk={:?}, target_status={:?}, loaded_status={:?}, load_level={:?}, simulation_level={:?}, current_status={:?}",
                 holder.pos,
                 target_status,
                 loaded_status,
                 holder.load_level(),
                 holder.simulation_level(),
-                holder.persisted_status(),
+                holder.published_status(),
             );
             if let Err(error) = storage.release_chunk(holder.pos).await {
                 tracing::error!(
@@ -1024,7 +1025,7 @@ impl ChunkHolder {
             panic!("Target status must have parent if not Empty");
         };
         let has_parent = holder
-            .persisted_status()
+            .published_status()
             .is_some_and(|status| parent_status <= status);
         let holder_for_notify = holder.clone();
 
@@ -1052,9 +1053,7 @@ impl ChunkHolder {
 
     fn claim_status_work(self: &Arc<Self>, status: ChunkStatus) -> Option<StatusWorkClaim> {
         let status_index = status.get_index();
-        let parent_index = status
-            .parent()
-            .map_or(usize::MAX, super::chunk_access::ChunkStatus::get_index);
+        let parent_index = status.parent().map_or(usize::MAX, ChunkStatus::get_index);
 
         let previous_started = self.started_work.compare_exchange(
             parent_index,
@@ -1080,8 +1079,8 @@ impl ChunkHolder {
     fn release_status_work_claim(&self, status: ChunkStatus) {
         let status_index = status.get_index();
         let rollback_index = self
-            .persisted_status()
-            .map_or(usize::MAX, super::chunk_access::ChunkStatus::get_index);
+            .published_status()
+            .map_or(usize::MAX, ChunkStatus::get_index);
 
         if rollback_index != usize::MAX && rollback_index >= status_index {
             return;
@@ -1425,7 +1424,7 @@ mod tests {
 
         holder.store_and_publish_chunk_status(ChunkAccess::Full(full), ChunkStatus::Full);
 
-        assert_eq!(holder.persisted_status(), Some(ChunkStatus::Full));
+        assert_eq!(holder.published_status(), Some(ChunkStatus::Full));
         assert!(!holder.is_full_status_initialized());
         assert!(publications.drain().is_empty());
 
@@ -1466,7 +1465,7 @@ mod tests {
         holder.finish_generation_status(ChunkStatus::Spawn);
         holder.finish_generation_status(ChunkStatus::Features);
 
-        assert_eq!(holder.persisted_status(), Some(ChunkStatus::Spawn));
+        assert_eq!(holder.published_status(), Some(ChunkStatus::Spawn));
         assert!(holder.try_chunk(ChunkStatus::Spawn).is_some());
     }
 
