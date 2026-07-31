@@ -236,6 +236,7 @@ fn unloaded_light_holder(pos: ChunkPos) -> Arc<ChunkHolder> {
         ChunkStatus::Light,
         0,
         16,
+        ChunkHeightmaps::new(0, 16),
         StructureStartMap::default(),
         StructureReferenceMap::default(),
         None,

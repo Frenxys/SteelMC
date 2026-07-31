@@ -199,10 +199,12 @@ impl ChunkAccess {
             Self::Full(chunk) => {
                 let min_y = chunk.min_y();
                 let sections = &chunk.sections;
-                chunk
-                    .heightmaps
-                    .write()
-                    .update(local_x, y, local_z, state, |lx, scan_y, lz| {
+                chunk.heightmaps.write().update_final(
+                    local_x,
+                    y,
+                    local_z,
+                    state,
+                    |lx, scan_y, lz| {
                         let scan_section_index = ((scan_y - min_y) / 16) as usize;
                         let scan_local_y = ((scan_y - min_y) % 16) as usize;
                         sections.sections[scan_section_index].read().states.get(
@@ -210,7 +212,8 @@ impl ChunkAccess {
                             scan_local_y,
                             lz,
                         )
-                    });
+                    },
+                );
             }
             Self::Proto(proto) => {
                 proto.update_status_heightmaps_after_block_change(local_x, y, local_z, state);
@@ -244,7 +247,7 @@ impl ChunkAccess {
                 };
                 let mut heightmaps = chunk.heightmaps.write();
                 for &(relative_y, state) in relative_writes {
-                    heightmaps.update(
+                    heightmaps.update_final(
                         local_x,
                         min_y + relative_y as i32,
                         local_z,
@@ -327,7 +330,7 @@ impl ChunkAccess {
     /// Panics if the chunk is not a proto chunk.
     pub fn proto_heightmaps(
         &self,
-    ) -> parking_lot::RwLockReadGuard<'_, super::heightmap::ProtoHeightmaps> {
+    ) -> parking_lot::RwLockReadGuard<'_, super::heightmap::ChunkHeightmaps> {
         match self {
             Self::Proto(proto) => proto.heightmaps.read(),
             Self::Full(_) => panic!("proto_heightmaps not available on full chunks"),
@@ -1047,6 +1050,7 @@ mod tests {
             ChunkStatus::InitializeLight,
             0,
             16,
+            ChunkHeightmaps::new(0, 16),
             StructureStartMap::default(),
             StructureReferenceMap::default(),
             None,

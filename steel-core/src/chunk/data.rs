@@ -20,7 +20,7 @@ use steel_utils::{
 use crate::behavior::{BLOCK_BEHAVIORS, BlockEntityCreation};
 use crate::block_entity::{BlockEntityLookup, BlockEntityStorage, SharedBlockEntity};
 use crate::chunk::{
-    heightmap::{HeightmapType, ProtoHeightmaps},
+    heightmap::{ChunkHeightmaps, HeightmapType},
     light::{
         ChunkLightData, ChunkSkyLightSources, LightSectionEmptinessChange,
         has_different_light_properties,
@@ -64,8 +64,8 @@ pub struct Chunk {
     /// Current generation status of this chunk. Every time a chunk is loaded it goes thru all stages.
     /// If you want the real status use the chunkholder status
     status: AtomicCell<ChunkStatus>,
-    /// Heightmaps (lazily initialized based on generation status).
-    pub heightmaps: SyncRwLock<ProtoHeightmaps>,
+    /// Heightmaps retained across every generation phase.
+    pub heightmaps: SyncRwLock<ChunkHeightmaps>,
     /// The minimum Y coordinate of the world this chunk belongs to.
     min_y: i32,
     /// The total height of the world.
@@ -120,7 +120,7 @@ impl Chunk {
             pos,
             dirty: AtomicBool::new(true), // New chunks are always dirty
             status: AtomicCell::new(ChunkStatus::Empty),
-            heightmaps: SyncRwLock::new(ProtoHeightmaps::new()),
+            heightmaps: SyncRwLock::new(ChunkHeightmaps::empty()),
             min_y,
             height,
             level,
@@ -157,6 +157,7 @@ impl Chunk {
         status: ChunkStatus,
         min_y: i32,
         height: i32,
+        heightmaps: ChunkHeightmaps,
         structure_starts: StructureStartMap,
         structure_references: StructureReferenceMap,
         carving_mask: Option<CarvingMask>,
@@ -175,8 +176,7 @@ impl Chunk {
             pos,
             dirty: AtomicBool::new(false),
             status: AtomicCell::new(status),
-            // Proto heightmaps will be re-primed during generation on the first set_block_state call
-            heightmaps: SyncRwLock::new(ProtoHeightmaps::new()),
+            heightmaps: SyncRwLock::new(heightmaps),
             min_y,
             height,
             level,
@@ -722,9 +722,10 @@ impl Chunk {
         heightmaps.prime_from_sections(heightmap_types, min_y, height, &sections.sections);
 
         for &hm_type in heightmap_types {
-            if let Some(heightmap) = heightmaps.get_mut(hm_type) {
-                heightmap.update(local_x, y, local_z, state, get_block);
-            }
+            let Some(heightmap) = heightmaps.get_mut(hm_type) else {
+                panic!("heightmap {hm_type:?} missing after priming");
+            };
+            heightmap.update(local_x, y, local_z, state, get_block);
         }
     }
 
@@ -758,9 +759,10 @@ impl Chunk {
         for &(relative_y, state) in relative_writes {
             let y = min_y + relative_y as i32;
             for &hm_type in heightmap_types {
-                if let Some(heightmap) = heightmaps.get_mut(hm_type) {
-                    heightmap.update(local_x, y, local_z, state, get_block);
-                }
+                let Some(heightmap) = heightmaps.get_mut(hm_type) else {
+                    panic!("heightmap {hm_type:?} missing after priming");
+                };
+                heightmap.update(local_x, y, local_z, state, get_block);
             }
         }
     }

@@ -139,12 +139,21 @@ impl ChunkStorage {
             .iter()
             .map(|section| Self::persistent_to_section(section, persistent))
             .collect();
+        let sections = Sections::from_owned(sections.into_boxed_slice());
 
         // Reconstruct structure data
         let structure_starts = Self::persistent_to_structure_starts(&persistent.structure_starts);
         let structure_references =
             Self::persistent_to_structure_references(&persistent.structure_references);
         let light = Self::persistent_to_light(&persistent.light, min_y, height, status);
+        let mut heightmaps =
+            Self::persistent_to_heightmaps(&persistent.heightmaps, status, min_y, height);
+        heightmaps.prime_from_sections(
+            status.heightmaps_after(),
+            min_y,
+            height,
+            &sections.sections,
+        );
 
         if status == ChunkStatus::Full {
             // Reconstruct scheduled ticks from persistent data
@@ -155,11 +164,8 @@ impl ChunkStorage {
                 Self::persistent_to_fluid_saved_ticks(&persistent.fluid_ticks, pos),
             );
 
-            // Reconstruct heightmaps from persistent data
-            let heightmaps = Self::persistent_to_heightmaps(&persistent.heightmaps, min_y, height);
-
             let chunk = LevelChunk::from_disk(
-                Sections::from_owned(sections.into_boxed_slice()),
+                sections,
                 pos,
                 min_y,
                 height,
@@ -235,11 +241,12 @@ impl ChunkStorage {
                 .map(|packed| CarvingMask::from_packed_u64s(height, min_y, packed));
 
             let chunk = Chunk::from_disk(
-                Sections::from_owned(sections.into_boxed_slice()),
+                sections,
                 pos,
                 status,
                 min_y,
                 height,
+                heightmaps,
                 structure_starts,
                 structure_references,
                 carving_mask,
@@ -288,16 +295,17 @@ impl ChunkStorage {
     /// Converts chunk heightmaps to persistent format for saving.
     pub(super) fn heightmaps_to_persistent(
         heightmaps: &ChunkHeightmaps,
+        status: ChunkStatus,
     ) -> Vec<PersistentHeightmap> {
-        HeightmapType::final_types()
+        status
+            .heightmaps_after()
             .iter()
-            .enumerate()
-            .map(|(i, &hm_type)| {
-                let hm = heightmaps.get(hm_type);
-                PersistentHeightmap {
-                    heightmap_type: i as u8,
+            .filter_map(|&hm_type| {
+                let hm = heightmaps.get(hm_type)?;
+                Some(PersistentHeightmap {
+                    heightmap_type: hm_type.persistence_id(),
                     data: hm.raw_data().to_vec(),
-                }
+                })
             })
             .collect()
     }
@@ -305,16 +313,19 @@ impl ChunkStorage {
     /// Reconstructs chunk heightmaps from persistent data.
     pub(super) fn persistent_to_heightmaps(
         persistent: &[PersistentHeightmap],
+        status: ChunkStatus,
         min_y: i32,
         height: i32,
     ) -> ChunkHeightmaps {
-        let final_types = HeightmapType::final_types();
-        let mut heightmaps = ChunkHeightmaps::new(min_y, height);
+        let mut heightmaps = ChunkHeightmaps::empty();
 
         for ph in persistent {
-            let Some(&hm_type) = final_types.get(ph.heightmap_type as usize) else {
+            let Some(hm_type) = HeightmapType::from_persistence_id(ph.heightmap_type) else {
                 continue;
             };
+            if !status.heightmaps_after().contains(&hm_type) {
+                continue;
+            }
             if ph.data.len() != 256 {
                 tracing::warn!(
                     "Heightmap data length mismatch: expected 256, got {}. Skipping.",
@@ -324,7 +335,7 @@ impl ChunkStorage {
             }
             let mut data = Box::new([0u16; 256]);
             data.copy_from_slice(&ph.data);
-            *heightmaps.get_mut(hm_type) = Heightmap::from_raw_data(hm_type, min_y, height, data);
+            heightmaps.replace(Heightmap::from_raw_data(hm_type, min_y, height, data));
         }
 
         heightmaps

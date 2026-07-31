@@ -649,11 +649,18 @@ impl ChunkStorage {
             ChunkAccess::Unloaded => unreachable!(),
         };
 
-        // Serialize heightmaps
-        let heightmaps = chunk
-            .as_full()
-            .map(|c| Self::heightmaps_to_persistent(&c.heightmaps.read()))
-            .unwrap_or_default();
+        // Serialize the heightmaps required by the persisted generation status.
+        let heightmaps = match chunk {
+            ChunkAccess::Full(c) => {
+                let heightmaps = c.heightmaps.read();
+                for &heightmap_type in HeightmapType::final_types() {
+                    let _ = heightmaps.get_final(heightmap_type);
+                }
+                Self::heightmaps_to_persistent(&heightmaps, status)
+            }
+            ChunkAccess::Proto(c) => Self::heightmaps_to_persistent(&c.heightmaps.read(), status),
+            ChunkAccess::Unloaded => unreachable!(),
+        };
 
         let light = match chunk {
             ChunkAccess::Full(c) => Self::light_to_persistent(&c.light.read()),

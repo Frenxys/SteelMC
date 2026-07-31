@@ -1,6 +1,77 @@
 use super::*;
 
 #[test]
+fn proto_heightmap_save_preserves_existing_maps_and_load_primes_missing_maps() {
+    init_test_registry();
+
+    let pos = ChunkPos::new(3, -4);
+    let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    proto.set_status(ChunkStatus::Noise);
+    proto.heightmaps.write().prime_from_sections(
+        &[HeightmapType::WorldSurfaceWg],
+        0,
+        16,
+        &proto.sections.sections,
+    );
+    let chunk = ChunkAccess::Proto(proto);
+
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Noise, &[], false)
+    else {
+        panic!("dirty proto chunk should prepare for saving");
+    };
+    assert_eq!(prepared.persistent.heightmaps.len(), 1);
+    assert_eq!(
+        prepared.persistent.heightmaps[0].heightmap_type,
+        HeightmapType::WorldSurfaceWg.persistence_id()
+    );
+
+    let loaded = ChunkStorage::persistent_to_chunk(
+        &prepared.persistent,
+        pos,
+        ChunkStatus::Noise,
+        0,
+        16,
+        Weak::new(),
+    );
+    let ChunkAccess::Proto(loaded) = loaded.chunk else {
+        panic!("noise status should load as a proto chunk");
+    };
+    let heightmaps = loaded.heightmaps.read();
+    assert!(heightmaps.get(HeightmapType::WorldSurfaceWg).is_some());
+    assert!(heightmaps.get(HeightmapType::OceanFloorWg).is_some());
+}
+
+#[test]
+fn carvers_heightmap_save_excludes_stale_worldgen_maps() {
+    init_test_registry();
+
+    let proto = Chunk::new(
+        single_empty_section(),
+        ChunkPos::new(3, -4),
+        0,
+        16,
+        Weak::new(),
+    );
+    proto.set_status(ChunkStatus::Carvers);
+    {
+        let mut heightmaps = proto.heightmaps.write();
+        heightmaps.replace(Heightmap::new(HeightmapType::WorldSurfaceWg, 0, 16));
+        heightmaps.replace(Heightmap::new(HeightmapType::WorldSurface, 0, 16));
+    }
+    let chunk = ChunkAccess::Proto(proto);
+
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
+    else {
+        panic!("dirty proto chunk should prepare for saving");
+    };
+    assert_eq!(prepared.persistent.heightmaps.len(), 1);
+    assert_eq!(
+        prepared.persistent.heightmaps[0].heightmap_type,
+        HeightmapType::WorldSurface.persistence_id()
+    );
+}
+
+#[test]
 fn proto_carving_mask_presence_roundtrips_when_empty() {
     init_test_registry();
 

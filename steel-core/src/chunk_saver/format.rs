@@ -294,7 +294,8 @@ pub struct PersistentBlockState<'a> {
 /// A heightmap stored with a chunk.
 ///
 /// Height values are stored relative to `min_y` (same as the runtime `Heightmap`).
-/// Type discriminants: 0=WorldSurface, 1=MotionBlocking, 2=MotionBlockingNoLeaves, 3=OceanFloor.
+/// Type discriminants: 0=WorldSurface, 1=MotionBlocking, 2=MotionBlockingNoLeaves, 3=OceanFloor,
+/// 4=WorldSurfaceWg, 5=OceanFloorWg.
 #[derive(SchemaWrite, SchemaRead)]
 pub struct PersistentHeightmap {
     /// Heightmap type discriminant.
@@ -370,7 +371,7 @@ pub struct PersistentChunk<'a> {
     pub block_ticks: Vec<PersistentTick>,
     /// Scheduled fluid ticks pending in this chunk.
     pub fluid_ticks: Vec<PersistentTick>,
-    /// Final heightmaps for full chunks (empty for proto chunks).
+    /// Materialized heightmaps allowed by the chunk's persisted status.
     pub heightmaps: Vec<PersistentHeightmap>,
     /// Chunk-owned light sections.
     pub light: PersistentLightData,

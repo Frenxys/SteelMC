@@ -226,7 +226,7 @@ impl LevelChunk {
 
     /// Creates a new `LevelChunk` from a `Chunk`.
     ///
-    /// Transfers final heightmaps from the proto chunk if available.
+    /// Transfers the chunk's heightmaps after ensuring every final map is primed.
     /// Recalculates section block counts for random tick optimization.
     ///
     /// # Arguments
@@ -250,14 +250,16 @@ impl LevelChunk {
         // Ensure full chunks always have populated final heightmaps. Some stages
         // may not touch blocks (carvers are currently empty), so lazy final
         // heightmaps are not guaranteed to exist before promotion.
-        let mut proto_heightmaps = proto_chunk.heightmaps.into_inner();
-        proto_heightmaps.prime_from_sections(
+        let mut heightmaps = proto_chunk.heightmaps.into_inner();
+        heightmaps.prime_from_sections(
             HeightmapType::final_types(),
             min_y,
             height,
             &proto_chunk.sections.sections,
         );
-        let chunk_heightmaps = ChunkHeightmaps::from_proto(&mut proto_heightmaps, min_y, height);
+        for &heightmap_type in HeightmapType::final_types() {
+            let _ = heightmaps.get_final(heightmap_type);
+        }
 
         // Recalculate section counts for random tick optimization
         for section in &proto_chunk.sections.sections {
@@ -292,7 +294,7 @@ impl LevelChunk {
             sections: proto_chunk.sections,
             pos: proto_chunk.pos,
             dirty: AtomicBool::new(proto_chunk.dirty.load(Ordering::Acquire)),
-            heightmaps: SyncRwLock::new(chunk_heightmaps),
+            heightmaps: SyncRwLock::new(heightmaps),
             min_y,
             height,
             level,
@@ -916,7 +918,7 @@ impl LevelChunk {
     pub fn get_height(&self, heightmap_type: HeightmapType, local_x: usize, local_z: usize) -> i32 {
         self.heightmaps
             .read()
-            .get(heightmap_type)
+            .get_final(heightmap_type)
             .get_first_available(local_x, local_z)
     }
 
@@ -1606,7 +1608,7 @@ impl LevelChunk {
         let sections = &self.sections;
         self.heightmaps
             .write()
-            .update(local_x, y, local_z, state, |lx, scan_y, lz| {
+            .update_final(local_x, y, local_z, state, |lx, scan_y, lz| {
                 let scan_section_index = ((scan_y - min_y) / 16) as usize;
                 let scan_local_y = ((scan_y - min_y) % 16) as usize;
                 sections.sections[scan_section_index]
@@ -1796,16 +1798,20 @@ impl LevelChunk {
             vec![
                 (
                     ProtocolHeightmapType::WorldSurface,
-                    heightmaps.get(HeightmapType::WorldSurface).get_raw_data(),
+                    heightmaps
+                        .get_final(HeightmapType::WorldSurface)
+                        .get_raw_data(),
                 ),
                 (
                     ProtocolHeightmapType::MotionBlocking,
-                    heightmaps.get(HeightmapType::MotionBlocking).get_raw_data(),
+                    heightmaps
+                        .get_final(HeightmapType::MotionBlocking)
+                        .get_raw_data(),
                 ),
                 (
                     ProtocolHeightmapType::MotionBlockingNoLeaves,
                     heightmaps
-                        .get(HeightmapType::MotionBlockingNoLeaves)
+                        .get_final(HeightmapType::MotionBlockingNoLeaves)
                         .get_raw_data(),
                 ),
             ]
