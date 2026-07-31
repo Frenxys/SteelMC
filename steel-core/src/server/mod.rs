@@ -9,6 +9,7 @@ pub mod registry_cache;
 mod run_loop;
 /// The tick rate manager for the server.
 pub mod tick_rate_manager;
+mod world_tick_workers;
 /// Domain-aware loaded world map.
 pub mod worlds;
 
@@ -66,7 +67,7 @@ use crate::server::packet_processor::PacketProcessor;
 use crate::server::registry_cache::RegistryCache;
 use crate::server::worlds::WorldMap;
 use crate::world::player_spawn_finder::{PlayerSpawnSearch, PlayerSpawnSearchPoll};
-use crate::world::{PlayerMap, World, WorldConfig, WorldGameTickTimings};
+use crate::world::{PlayerMap, World, WorldConfig};
 use crate::worldgen::WorldGeneratorRegistry;
 use crate::worldgen::registry::GeneratorOutput;
 use crossbeam::queue::SegQueue;
