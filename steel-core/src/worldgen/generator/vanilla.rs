@@ -22,13 +22,16 @@ use steel_worldgen::surface::{
     SurfaceBiomeProvider, SurfaceConditionNoiseCache, SurfaceRuleContext,
 };
 
+use crate::chunk::Chunk;
 use crate::chunk::heightmap::{Heightmap, HeightmapType};
-use crate::chunk::{Chunk, status::ChunkStatus};
 use crate::worldgen::carver::{
     CarveRun, CarverBlockIds, CarvingContext, PreliminarySurfaceCorners, SourceChunk, cave,
 };
 use crate::worldgen::feature::FeatureDecorationRunner;
-use crate::worldgen::generator::{ChunkGenerator, worldgen_region_random_from_splitter};
+use crate::worldgen::generator::{
+    CarversPhase, ChunkGenerator, GenerationChunk, NoisePhase, SurfacePhase,
+    worldgen_region_random_from_splitter,
+};
 use crate::worldgen::region::WorldGenRegion;
 use crate::worldgen::structure::{StructureGenerator, create_structures};
 use crate::worldgen::surface::SurfaceSystem;
@@ -249,12 +252,12 @@ impl<N: DimensionNoises> VanillaGenerator<N> {
 impl<N: VanillaPostNoiseStateType> VanillaGenerator<N> {
     fn preliminary_surface_corners(
         &self,
-        chunk: &Chunk,
+        chunk: GenerationChunk<'_, SurfacePhase>,
         chunk_min_x: i32,
         chunk_min_z: i32,
     ) -> PreliminarySurfaceCorners {
         let noises = &*self.noises;
-        if let Some(corners) = chunk.with_transient_generation_state_mut::<N::State, _>(|state| {
+        if let Some(corners) = chunk.with_post_noise_state_mut::<N::State, _>(|state| {
             let aquifer = N::post_noise_aquifer(state);
             PreliminarySurfaceCorners {
                 nw: aquifer.preliminary_surface_level(noises, chunk_min_x, chunk_min_z),
@@ -393,7 +396,11 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
         chunk.mark_dirty();
     }
 
-    fn fill_from_noise(&self, chunk: &Chunk, beardifier: Option<&Beardifier>) {
+    fn fill_from_noise(
+        &self,
+        chunk: GenerationChunk<'_, NoisePhase>,
+        beardifier: Option<&Beardifier>,
+    ) {
         let pos = chunk.pos();
         let chunk_min_x = pos.0.x * 16;
         let chunk_min_z = pos.0.y * 16;
@@ -438,8 +445,7 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
                 // Flush when we move to a new column
                 if local_x != prev_x || local_z != prev_z {
                     if !pending_writes.is_empty() {
-                        chunk
-                            .write_block_batch_for_generation(ChunkStatus::Biomes, &pending_writes);
+                        chunk.write_block_batch(&pending_writes);
                         pending_writes.clear();
                     }
                     prev_x = local_x;
@@ -486,22 +492,22 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
 
         // Flush remaining writes
         if !pending_writes.is_empty() {
-            chunk.write_block_batch_for_generation(ChunkStatus::Biomes, &pending_writes);
+            chunk.write_block_batch(&pending_writes);
         }
 
-        {
-            let mut heightmaps = chunk.heightmaps.write();
-            heightmaps.replace(ocean_floor_wg);
-            heightmaps.replace(world_surface_wg);
-        }
+        chunk.replace_noise_heightmaps(ocean_floor_wg, world_surface_wg);
 
         if N::Settings::AQUIFERS_ENABLED {
-            chunk.install_transient_generation_state(N::wrap_post_noise_aquifer(aquifer));
+            chunk.install_post_noise_state(N::wrap_post_noise_aquifer(aquifer));
         }
     }
 
     #[expect(clippy::too_many_lines, reason = "splitting would hurt readability")]
-    fn build_surface(&self, chunk: &Chunk, neighbor_biomes: &dyn Fn(IVec3) -> u16) {
+    fn build_surface(
+        &self,
+        chunk: GenerationChunk<'_, SurfacePhase>,
+        neighbor_biomes: &dyn Fn(IVec3) -> u16,
+    ) {
         let min_y = N::Settings::MIN_Y;
         let pos = chunk.pos();
         let chunk_min_x = pos.0.x * 16;
@@ -521,7 +527,7 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
         let chunk_quart_x = pos.0.x * 4;
         let chunk_quart_z = pos.0.y * 4;
 
-        chunk.prime_heightmaps(&[HeightmapType::WorldSurfaceWg]);
+        chunk.prime_world_surface_heightmap();
 
         // Pre-compute preliminary surface corners only for rules/extensions that read them.
         let preliminary_surface_corners = surface_needs_min_surface_level
@@ -532,8 +538,8 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
         let deep_frozen_ocean_id = (*vanilla_biomes::DEEP_FROZEN_OCEAN).id() as u16;
 
         // Pre-extract biome palette values only if surface rules/extensions need them.
-        let biome_data = surface_needs_biomes.then(|| chunk.sections().read_all_biomes());
-        let section_count = chunk.sections().sections.len();
+        let biome_data = surface_needs_biomes.then(|| chunk.read_all_biomes());
+        let section_count = chunk.section_count();
 
         let mut pending_writes: Vec<(usize, BlockStateId)> = Vec::new();
         let mut column_buf: Vec<BlockStateId> = Vec::new();
@@ -554,8 +560,7 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
                 let block_z = chunk_min_z + local_z as i32;
 
                 // Start scanning from one above the highest non-air block
-                let mut start_height =
-                    chunk.generation_height_at(HeightmapType::WorldSurfaceWg, local_x, local_z);
+                let mut start_height = chunk.world_surface_height_at(local_x, local_z);
 
                 // Column-local Voronoi cache for fuzzed biome lookups.
                 let mut biome_col = biome_data.as_deref().map(|biome_data| {
@@ -596,9 +601,7 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
 
                 // Snapshot the column once — avoids per-block section locking in the Y scan.
                 // Taken after eroded_badlands_extension which may write blocks above the surface.
-                chunk
-                    .sections()
-                    .read_column_into(local_x, local_z, &mut column_buf);
+                chunk.read_column_into(local_x, local_z, &mut column_buf);
 
                 // Surface depth for this column
                 let surface_depth = self.surface_system.get_surface_depth(block_x, block_z);
@@ -632,27 +635,15 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
                 let steep = surface_rule_uses_steep && {
                     let z_north = local_z.saturating_sub(1);
                     let z_south = (local_z + 1).min(15);
-                    let h_north =
-                        chunk.generation_height_at(HeightmapType::WorldSurfaceWg, local_x, z_north)
-                            - 1;
-                    let h_south =
-                        chunk.generation_height_at(HeightmapType::WorldSurfaceWg, local_x, z_south)
-                            - 1;
+                    let h_north = chunk.world_surface_height_at(local_x, z_north) - 1;
+                    let h_south = chunk.world_surface_height_at(local_x, z_south) - 1;
                     if h_south >= h_north + 4 {
                         true
                     } else {
                         let x_west = local_x.saturating_sub(1);
                         let x_east = (local_x + 1).min(15);
-                        let h_west = chunk.generation_height_at(
-                            HeightmapType::WorldSurfaceWg,
-                            x_west,
-                            local_z,
-                        ) - 1;
-                        let h_east = chunk.generation_height_at(
-                            HeightmapType::WorldSurfaceWg,
-                            x_east,
-                            local_z,
-                        ) - 1;
+                        let h_west = chunk.world_surface_height_at(x_west, local_z) - 1;
+                        let h_east = chunk.world_surface_height_at(x_east, local_z) - 1;
                         h_west >= h_east + 4
                     }
                 };
@@ -744,22 +735,10 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
 
                 // Flush batched writes — holds each section's write guard once
                 if !pending_writes.is_empty() {
-                    chunk.write_column_blocks_for_generation(
-                        ChunkStatus::Noise,
-                        local_x,
-                        local_z,
-                        &pending_writes,
-                    );
+                    chunk.write_column(local_x, local_z, &pending_writes);
                     for &(relative_y, state) in &pending_writes {
                         column_buf[relative_y] = state;
                     }
-                    chunk.update_heightmaps_after_direct_column_writes(
-                        ChunkStatus::Noise,
-                        local_x,
-                        local_z,
-                        &pending_writes,
-                    );
-                    chunk.mark_dirty();
                 }
 
                 // Frozen ocean iceberg extension: add packed ice and snow
@@ -779,19 +758,7 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
                         &mut pending_writes,
                     );
                     if !pending_writes.is_empty() {
-                        chunk.write_column_blocks_for_generation(
-                            ChunkStatus::Noise,
-                            local_x,
-                            local_z,
-                            &pending_writes,
-                        );
-                        chunk.update_heightmaps_after_direct_column_writes(
-                            ChunkStatus::Noise,
-                            local_x,
-                            local_z,
-                            &pending_writes,
-                        );
-                        chunk.mark_dirty();
+                        chunk.write_column(local_x, local_z, &pending_writes);
                     }
                 }
             }
@@ -799,20 +766,17 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
     }
 
     #[expect(clippy::too_many_lines, reason = "matches vanilla carver setup flow")]
-    fn apply_carvers(&self, chunk: &Chunk) {
-        // Carvers only run on proto chunks.
-        let proto = chunk;
-
+    fn apply_carvers(&self, chunk: GenerationChunk<'_, CarversPhase>) {
         if self
             .uniform_carver_biome
             .is_some_and(|biome| biome.carvers.is_empty())
         {
-            chunk.clear_transient_generation_state();
+            chunk.clear_post_noise_state();
             return;
         }
 
-        chunk.consume_transient_generation_state::<N::State, _>(|retained_state| {
-            chunk.prime_heightmaps(&[HeightmapType::WorldSurfaceWg]);
+        chunk.consume_post_noise_state::<N::State, _>(|retained_state| {
+            chunk.prime_world_surface_heightmap();
 
             let pos = chunk.pos();
             let chunk_min_x = pos.0.x * 16;
@@ -888,10 +852,6 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
                 }
             }
 
-            // Grab (and lazily create) the carving mask on the proto chunk.
-            let mut mask_guard = proto.get_or_create_carving_mask();
-            let mask = &mut *mask_guard;
-
             // `WorldgenRandom(LegacyRandomSource(generateUniqueSeed()))` — initial
             // seed is irrelevant; every carver overwrites it via
             // `set_large_feature_seed` before its probability check.
@@ -908,18 +868,20 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
                 })
             };
 
-            let mut run = CarveRun {
-                ctx: &mut ctx,
-                noises,
-                chunk,
-                chunk_min_x,
-                chunk_min_z,
-                biome_getter: &mut biome_getter,
-                mask,
-                ids,
-            };
+            chunk.with_carving_mask(|mask| {
+                let mut run = CarveRun {
+                    ctx: &mut ctx,
+                    noises,
+                    chunk,
+                    chunk_min_x,
+                    chunk_min_z,
+                    biome_getter: &mut biome_getter,
+                    mask,
+                    ids,
+                };
 
-            run.run_all(&source_biomes, seed_i64, &mut random);
+                run.run_all(&source_biomes, seed_i64, &mut random);
+            });
         });
     }
 
@@ -1287,7 +1249,10 @@ mod tests {
         heightmap::HeightmapType,
         section::{ChunkSection, Sections},
     };
-    use crate::worldgen::generator::{ChunkGenerator as _, context::OverworldGenerator};
+    use crate::worldgen::generator::{
+        CarversPhase, ChunkGenerator as _, GenerationChunk, NoisePhase, SurfacePhase,
+        context::OverworldGenerator,
+    };
 
     fn make_overworld_chunk() -> Chunk {
         let dimension = &vanilla_dimension_types::OVERWORLD;
@@ -1354,20 +1319,22 @@ mod tests {
 
         for chunk in [&warm, &cold] {
             generator.create_biomes(chunk);
-            generator.fill_from_noise(chunk, None);
+            generator.fill_from_noise(GenerationChunk::<NoisePhase>::for_test(chunk), None);
         }
         assert!(has_overworld_post_noise_state(&warm));
         assert!(has_overworld_post_noise_state(&cold));
 
         cold.clear_transient_generation_state();
         for chunk in [&warm, &cold] {
-            generator.build_surface(chunk, &|quart| self_neighbor_biome(chunk, quart));
+            generator.build_surface(GenerationChunk::<SurfacePhase>::for_test(chunk), &|quart| {
+                self_neighbor_biome(chunk, quart)
+            });
         }
         assert!(has_overworld_post_noise_state(&warm));
         assert!(!has_overworld_post_noise_state(&cold));
 
-        generator.apply_carvers(&warm);
-        generator.apply_carvers(&cold);
+        generator.apply_carvers(GenerationChunk::<CarversPhase>::for_test(&warm));
+        generator.apply_carvers(GenerationChunk::<CarversPhase>::for_test(&cold));
         assert!(!has_overworld_post_noise_state(&warm));
         assert!(!has_overworld_post_noise_state(&cold));
 

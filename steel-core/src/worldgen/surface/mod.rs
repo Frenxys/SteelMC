@@ -16,7 +16,7 @@ use steel_worldgen::density::NoiseParameters;
 use steel_worldgen::noise::{NormalNoise, PerlinSimplexNoise};
 use steel_worldgen::surface::SurfaceNoiseProvider;
 
-use crate::chunk::{Chunk, status::ChunkStatus};
+use crate::worldgen::generator::{GenerationChunk, SurfacePhase};
 
 const CLAY_BAND_LENGTH: usize = 192;
 
@@ -431,7 +431,7 @@ impl SurfaceSystem {
     )]
     pub fn eroded_badlands_extension(
         &self,
-        chunk: &Chunk,
+        chunk: GenerationChunk<'_, SurfacePhase>,
         local_x: usize,
         local_z: usize,
         block_x: i32,
@@ -497,13 +497,7 @@ impl SurfaceSystem {
             if !state.is_air() {
                 break;
             }
-            chunk.set_relative_block_for_generation(
-                ChunkStatus::Noise,
-                local_x,
-                rel_y,
-                local_z,
-                self.default_block,
-            );
+            chunk.set_relative_block(local_x, rel_y, local_z, self.default_block);
         }
 
         // Return updated start height (one above the extension top)

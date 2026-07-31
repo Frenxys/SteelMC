@@ -8,8 +8,10 @@ use steel_utils::random::RandomSource;
 use steel_utils::{BlockStateId, ChunkPos, Identifier};
 
 use crate::chunk::Chunk;
-use crate::chunk::status::ChunkStatus;
-use crate::worldgen::generator::{ChunkGenerator, xoroshiro_worldgen_region_random};
+use crate::worldgen::generator::{
+    CarversPhase, ChunkGenerator, GenerationChunk, NoisePhase, SurfacePhase,
+    xoroshiro_worldgen_region_random,
+};
 use crate::worldgen::region::WorldGenRegion;
 use crate::worldgen::structure::{StructureGenerator, create_structures};
 use steel_worldgen::noise::Beardifier;
@@ -281,27 +283,30 @@ impl ChunkGenerator for FlatChunkGenerator {
         chunk.mark_dirty();
     }
 
-    fn fill_from_noise(&self, chunk: &Chunk, _beardifier: Option<&Beardifier>) {
-        let max_relative_y = chunk.sections().sections.len() * 16;
+    fn fill_from_noise(
+        &self,
+        chunk: GenerationChunk<'_, NoisePhase>,
+        _beardifier: Option<&Beardifier>,
+    ) {
+        let max_relative_y = chunk.section_count() * 16;
 
         for x in 0..16 {
             for z in 0..16 {
                 for (relative_y, block) in self.layers.iter().enumerate().take(max_relative_y) {
-                    chunk.set_relative_block_for_generation(
-                        ChunkStatus::Biomes,
-                        x,
-                        relative_y,
-                        z,
-                        *block,
-                    );
+                    chunk.set_relative_block(x, relative_y, z, *block);
                 }
             }
         }
     }
 
-    fn build_surface(&self, _chunk: &Chunk, _neighbor_biomes: &dyn Fn(IVec3) -> u16) {}
+    fn build_surface(
+        &self,
+        _chunk: GenerationChunk<'_, SurfacePhase>,
+        _neighbor_biomes: &dyn Fn(IVec3) -> u16,
+    ) {
+    }
 
-    fn apply_carvers(&self, _chunk: &Chunk) {}
+    fn apply_carvers(&self, _chunk: GenerationChunk<'_, CarversPhase>) {}
 
     fn create_worldgen_region_random(&self, world_seed: i64, center: ChunkPos) -> RandomSource {
         xoroshiro_worldgen_region_random(world_seed, center)

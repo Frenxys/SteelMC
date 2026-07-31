@@ -14,25 +14,26 @@ use std::io::{BufReader, Cursor, Read as IoRead};
 use std::mem;
 use std::sync::{Arc, Weak};
 
-use flate2::read::GzDecoder;
-use glam::IVec3;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
-use serde::Deserialize;
-use steel_core::chunk::Chunk;
-use steel_core::chunk::chunk_generation_task::StaticCache2D;
-use steel_core::chunk::chunk_holder::ChunkHolder;
-use steel_core::chunk::chunk_pyramid::{ChunkStep, GENERATION_PYRAMID};
-use steel_core::chunk::chunk_ticket_manager::ChunkTicketLevel;
-use steel_core::chunk::light::{
+use crate::chunk::Chunk;
+use crate::chunk::chunk_generation_task::StaticCache2D;
+use crate::chunk::chunk_holder::ChunkHolder;
+use crate::chunk::chunk_pyramid::{ChunkStep, GENERATION_PYRAMID};
+use crate::chunk::chunk_ticket_manager::ChunkTicketLevel;
+use crate::chunk::light::{
     BlockLightChunkEdgeChecks, DATA_LAYER_SIZE, LightCacheLayout, LightCacheSetupRadius,
     LightLayer, LightSection, LightSectionRange, LightWorkset, SkyLightChunkEdgeChecks,
     propagate_block_light_chunk, propagate_sky_light_chunk,
 };
-use steel_core::chunk::section::{ChunkSection, Sections};
-use steel_core::chunk::status::ChunkStatus;
-use steel_core::level_data::WorldGenerationSettings;
-use steel_core::world::{World, WorldConfig, WorldStorageConfig};
-use steel_core::worldgen::{ChunkGenerator, ChunkGeneratorType, WorldGenContext};
+use crate::chunk::section::{ChunkSection, Sections};
+use crate::chunk::status::ChunkStatus;
+use crate::level_data::WorldGenerationSettings;
+use crate::world::{World, WorldConfig, WorldStorageConfig};
+use crate::worldgen::generator::{CarversPhase, GenerationChunk, NoisePhase, SurfacePhase};
+use crate::worldgen::{ChunkGenerator, ChunkGeneratorType, WorldGenContext};
+use flate2::read::GzDecoder;
+use glam::IVec3;
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use serde::Deserialize;
 use steel_registry::blocks::block_state_ext::BlockStateExt;
 use steel_registry::structure::TerrainAdjustment;
 use steel_registry::{dimension_type::DimensionTypeRef, vanilla_dimension_types};
@@ -130,7 +131,7 @@ const LIGHT_HASH_FORMAT: &str = "packet_data_layers_v1";
 const LIGHT_FEATURE_DEPENDENCY_RADIUS: i32 = 1;
 
 fn load_expected_hashes() -> ChunkStageHashesJson {
-    let json_str = include_str!("../test_assets/chunk_stage_hashes.json");
+    let json_str = include_str!("../../test_assets/chunk_stage_hashes.json");
     serde_json::from_str(json_str).expect("Failed to parse chunk_stage_hashes.json")
 }
 
@@ -997,7 +998,7 @@ fn generate_features_for_positions(
         let region_random = inputs
             .generator
             .create_worldgen_region_random(inputs.seed as i64, center);
-        let mut region = steel_core::worldgen::WorldGenRegion::new(
+        let mut region = crate::worldgen::WorldGenRegion::new(
             inputs.context,
             inputs.feature_step,
             &cache,
@@ -1074,10 +1075,10 @@ fn propagate_light_for_positions(
     reason = "large test with many hash assertions"
 )]
 fn chunk_stage_hashes_inner() {
-    use steel_core::behavior::init_behaviors;
-    use steel_core::block_entity::init_block_entities;
-    use steel_core::entity::init_entities;
-    use steel_core::worldgen::{EndGenerator, NetherGenerator, OverworldGenerator};
+    use crate::behavior::init_behaviors;
+    use crate::block_entity::init_block_entities;
+    use crate::entity::init_entities;
+    use crate::worldgen::{EndGenerator, NetherGenerator, OverworldGenerator};
     use steel_registry::{REGISTRY, Registry};
     use steel_worldgen::biomes::BiomeSourceKind;
 
@@ -1397,7 +1398,10 @@ fn chunk_stage_hashes_inner() {
             } else {
                 None
             };
-            generator.fill_from_noise(chunk, beardifier.as_ref());
+            generator.fill_from_noise(
+                GenerationChunk::<NoisePhase>::for_test(chunk),
+                beardifier.as_ref(),
+            );
         }
 
         let mut feature_holders: Option<FeatureHolderMap> = None;
@@ -1458,7 +1462,10 @@ fn chunk_stage_hashes_inner() {
                                 .biomes
                                 .get(local_qx, local_qy, local_qz)
                         };
-                        generator.build_surface(chunk, &neighbor_biomes);
+                        generator.build_surface(
+                            GenerationChunk::<SurfacePhase>::for_test(chunk),
+                            &neighbor_biomes,
+                        );
                     }
                     for &pos in &dependency_positions {
                         if tracked_block_stages_already_ran && tracked_positions.contains(&pos) {
@@ -1466,7 +1473,7 @@ fn chunk_stage_hashes_inner() {
                         }
                         let chunk = chunk_or_panic(&chunks, pos);
                         recalculate_section_counts(chunk);
-                        generator.apply_carvers(chunk);
+                        generator.apply_carvers(GenerationChunk::<CarversPhase>::for_test(chunk));
                     }
                     feature_dependencies_prepared = true;
                 }
@@ -1603,10 +1610,15 @@ fn chunk_stage_hashes_inner() {
                         };
 
                         match stage {
-                            "minecraft:surface" => generator.build_surface(chunk, &neighbor_biomes),
+                            "minecraft:surface" => generator.build_surface(
+                                GenerationChunk::<SurfacePhase>::for_test(chunk),
+                                &neighbor_biomes,
+                            ),
                             "minecraft:carvers" => {
                                 recalculate_section_counts(chunk);
-                                generator.apply_carvers(chunk);
+                                generator.apply_carvers(GenerationChunk::<CarversPhase>::for_test(
+                                    chunk,
+                                ));
                             }
                             _ => panic!("Stage {stage} not yet implemented in test harness"),
                         }

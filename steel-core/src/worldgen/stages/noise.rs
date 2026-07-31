@@ -8,8 +8,8 @@ use crate::chunk::{
     chunk_generation_task::StaticCache2D, chunk_holder::ChunkHolder, chunk_pyramid::ChunkStep,
     status::ChunkStatus,
 };
-use crate::worldgen::generator::ChunkGenerator;
 use crate::worldgen::generator::context::WorldGenContext;
+use crate::worldgen::generator::{ChunkGenerator, GenerationChunk, NoisePhase};
 use steel_worldgen::noise::Beardifier;
 use steel_worldgen::structure::StructureStart;
 
@@ -24,12 +24,10 @@ pub(crate) fn generate(
     let (chunk_x, chunk_z, references) = collect_structure_references(holder.as_ref());
     let beardifier = build_beardifier(cache, &references, chunk_x, chunk_z);
 
-    let chunk = holder
-        .try_chunk(ChunkStatus::Biomes)
-        .expect("Chunk not found at status Biomes");
-    context
-        .generator
-        .fill_from_noise(&chunk, beardifier.as_ref());
+    context.generator.fill_from_noise(
+        GenerationChunk::<NoisePhase>::acquire(&holder),
+        beardifier.as_ref(),
+    );
 }
 
 fn collect_structure_references(holder: &ChunkHolder) -> (i32, i32, StructureReferencesForNoise) {
