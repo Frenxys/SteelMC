@@ -191,12 +191,12 @@ impl World {
         };
 
         match result {
-            LevelChunkBlockSetResult::Changed(old_state) => {
+            FullChunkBlockSetResult::Changed(old_state) => {
                 self.finish_block_set(pos, old_state, new_state, flags, update_limit);
                 ConditionalBlockSetResult::Changed
             }
-            LevelChunkBlockSetResult::Unchanged => ConditionalBlockSetResult::Unchanged,
-            LevelChunkBlockSetResult::Stale(current_state) => {
+            FullChunkBlockSetResult::Unchanged => ConditionalBlockSetResult::Unchanged,
+            FullChunkBlockSetResult::Stale(current_state) => {
                 ConditionalBlockSetResult::Stale(current_state)
             }
         }
@@ -567,11 +567,7 @@ impl World {
     pub fn get_block_entity(&self, pos: BlockPos) -> Option<SharedBlockEntity> {
         let chunk_pos = Self::chunk_pos_for_block(pos);
         self.chunk_map
-            .with_full_chunk(chunk_pos, |chunk| {
-                chunk
-                    .as_full()
-                    .and_then(|lc| lc.get_block_entity_immediate(pos))
-            })
+            .with_full_chunk(chunk_pos, |chunk| chunk.get_block_entity_immediate(pos))
             .flatten()
     }
 
@@ -584,9 +580,7 @@ impl World {
 
         self.chunk_map
             .with_full_chunk(Self::chunk_pos_for_block(pos), |chunk| {
-                chunk
-                    .as_full()
-                    .is_some_and(|chunk| chunk.add_and_register_block_entity(block_entity))
+                chunk.add_and_register_block_entity(block_entity)
             })
             .unwrap_or(false)
     }
@@ -600,9 +594,7 @@ impl World {
 
         self.chunk_map
             .with_full_chunk(Self::chunk_pos_for_block(pos), |chunk| {
-                chunk
-                    .as_full()
-                    .is_some_and(|chunk| chunk.remove_block_entity_if_same(expected))
+                chunk.remove_block_entity_if_same(expected)
             })
             .unwrap_or(false)
     }
@@ -629,6 +621,6 @@ impl World {
     /// Called when entities move, are added/removed, or when block entities change.
     pub fn mark_chunk_dirty(&self, chunk_pos: ChunkPos) {
         self.chunk_map
-            .with_chunk_at_status(chunk_pos, ChunkStatus::Empty, ChunkAccess::mark_dirty);
+            .with_chunk_at_status(chunk_pos, ChunkStatus::Empty, |chunk| chunk.mark_dirty());
     }
 }

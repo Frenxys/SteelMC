@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::chunk::{
     Chunk,
-    chunk_access::ChunkAccess,
     chunk_generation_task::StaticCache2D,
     chunk_holder::ChunkHolder,
     chunk_pyramid::ChunkStep,
@@ -30,5 +29,5 @@ pub(crate) fn generate(
     );
 
     // Use no_notify variant so apply_step can notify through the completion channel.
-    holder.insert_chunk_no_notify(ChunkAccess::Proto(proto_chunk));
+    holder.insert_chunk_no_notify(proto_chunk);
 }

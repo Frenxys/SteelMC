@@ -1057,7 +1057,6 @@ mod tests {
     use crate::behavior::init_behaviors;
     use crate::chunk::{
         Chunk,
-        chunk_access::ChunkAccess,
         chunk_holder::ChunkHolder,
         chunk_ticket_manager::ChunkTicketLevel,
         light::{LightCacheSetupRadius, LightSection, LightSectionData, LightSectionRange},
@@ -1087,7 +1086,7 @@ mod tests {
             0,
             16,
         ));
-        holder.insert_chunk(ChunkAccess::Proto(proto), ChunkStatus::Light);
+        holder.insert_chunk(proto, ChunkStatus::Light);
         holder
     }
 
@@ -1235,14 +1234,14 @@ mod tests {
             panic!("center chunk should be available");
         };
         assert_eq!(
-            chunk.set_block_state(
+            chunk.set_block_state_for_generation(
+                ChunkStatus::Light,
                 removed_pos,
                 vanilla_blocks::AIR.default_state(),
                 UpdateFlags::UPDATE_NONE,
             ),
             Some(vanilla_blocks::STONE.default_state())
         );
-        drop(chunk);
 
         let layout = LightCacheLayout::new(center, range());
         let Ok(workset) = LightWorkset::setup(

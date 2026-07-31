@@ -20,7 +20,6 @@ pub(crate) fn generate(
         panic!("Chunk not found at status Carvers");
     };
     chunk.prime_final_heightmaps();
-    drop(chunk);
 
     let world_seed = context.world().seed();
     let region_random = context

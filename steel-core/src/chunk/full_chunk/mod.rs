@@ -1,4 +1,4 @@
-//! This module contains the `LevelChunk` struct, which is a chunk that is ready to be sent to the client.
+//! Full-chunk behavior over the common owning [`Chunk`].
 use std::{
     fmt,
     io::Cursor,
@@ -26,12 +26,11 @@ use steel_utils::locks::SyncMutex;
 use crate::behavior::{BLOCK_BEHAVIORS, BlockEntityCreation, FLUID_BEHAVIORS};
 use crate::block_entity::{
     BlockEntity, BlockEntityInsert, BlockEntityLifecycleExt as _, BlockEntityLookup,
-    BlockEntityStorage, ClearedBlockEntities, DetachedBlockEntity, LifecycleDispatchers,
-    SharedBlockEntity,
+    ClearedBlockEntities, DetachedBlockEntity, LifecycleDispatchers, SharedBlockEntity,
 };
 use crate::chunk::{
     Chunk,
-    block_entity_listener::{LevelChunkGameEventListeners, ListenerSelectionCommit},
+    block_entity_listener::{FullChunkGameEventListeners, ListenerSelectionCommit},
     chunk_holder::ChunkHolder,
     data::empty_postprocessing,
     heightmap::{ChunkHeightmaps, HeightmapType},
@@ -50,21 +49,21 @@ use crate::world::tick_scheduler::{
 use crate::world::{World, game_event::GameEventListenerCount};
 use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 
-/// A full chunk used by live world access.
+/// Borrowed capability for Full-only live world access.
 ///
 /// Similar to Java's `LevelChunk`, this holds a weak reference to the world
 /// (called `level` in Java) for callbacks during block state changes. Ticking
 /// and initial sending additionally require the corresponding neighborhood
 /// readiness confirmation from `ChunkMap`.
-pub struct LevelChunk {
-    /// Data retained from generation through the Full phase.
-    chunk: Chunk,
+#[derive(Clone, Copy)]
+pub struct FullChunkRef<'a> {
+    chunk: &'a Chunk,
 }
 
 /// State that only exists once a common chunk crosses the Full boundary.
 pub(crate) struct FullChunkRuntime {
     /// Section registries and exact listener selections owned by this retained chunk.
-    game_event_listeners: LevelChunkGameEventListeners,
+    game_event_listeners: FullChunkGameEventListeners,
     /// Main-boundary activation state and callbacks staged by background loading.
     block_entity_activation: SyncMutex<BlockEntityActivation>,
 }
@@ -72,7 +71,7 @@ pub(crate) struct FullChunkRuntime {
 impl FullChunkRuntime {
     fn new(listener_count: Arc<GameEventListenerCount>) -> Self {
         Self {
-            game_event_listeners: LevelChunkGameEventListeners::new(listener_count),
+            game_event_listeners: FullChunkGameEventListeners::new(listener_count),
             block_entity_activation: SyncMutex::new(BlockEntityActivation::default()),
         }
     }
@@ -96,15 +95,15 @@ pub(crate) struct BlockEntityActivationBatch {
 }
 
 /// Result of promoting a proto chunk to a full chunk.
-pub struct LevelChunkPromotion {
-    /// The promoted full chunk.
-    pub chunk: LevelChunk,
+pub struct FullChunkPromotion<'a> {
+    /// Full capability initialized by this promotion.
+    pub chunk: FullChunkRef<'a>,
     /// Entities that should be registered after the full chunk is published.
     pub pending_entities: Vec<SharedEntity>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LevelChunkBlockSetResult {
+pub(crate) enum FullChunkBlockSetResult {
     Changed(BlockStateId),
     Unchanged,
     Stale(BlockStateId),
@@ -159,29 +158,32 @@ impl BlockRandomPositionGenerator {
     }
 }
 
-impl LevelChunk {
-    fn initialize_runtime(chunk: &Chunk, listener_count: Arc<GameEventListenerCount>) {
-        let runtime = FullChunkRuntime::new(listener_count);
-        if chunk.initialize_full_runtime(runtime).is_err() {
-            panic!("Full chunk runtime was initialized more than once");
-        }
+impl FullChunkRef<'_> {
+    pub(crate) const fn from_full_context(chunk: &Chunk) -> FullChunkRef<'_> {
+        FullChunkRef { chunk }
     }
 
     fn runtime(&self) -> &FullChunkRuntime {
         let Some(runtime) = self.chunk.full_runtime() else {
-            panic!("LevelChunk was exposed without initialized Full runtime state");
+            panic!("Full chunk view was exposed without initialized runtime state");
         };
         runtime
     }
 
-    pub(crate) fn game_event_listeners(&self) -> &LevelChunkGameEventListeners {
+    pub(crate) fn game_event_listeners(&self) -> &FullChunkGameEventListeners {
         &self.runtime().game_event_listeners
     }
 
     /// Returns the data retained across generation and Full runtime access.
     #[must_use]
     pub(crate) const fn common(&self) -> &Chunk {
-        &self.chunk
+        self.chunk
+    }
+
+    /// Returns the sections shared with the generation phase.
+    #[must_use]
+    pub const fn sections(&self) -> &Sections {
+        self.chunk.sections()
     }
 
     /// Runs random block and fluid ticks for this chunk.
@@ -239,19 +241,27 @@ impl LevelChunk {
             }
         }
     }
+}
 
-    /// Creates a new `LevelChunk` from a `Chunk`.
+impl Chunk {
+    fn initialize_full_runtime_state(&self, listener_count: Arc<GameEventListenerCount>) {
+        let runtime = FullChunkRuntime::new(listener_count);
+        if self.initialize_full_runtime(runtime).is_err() {
+            panic!("Full chunk runtime was initialized more than once");
+        }
+    }
+
+    /// Promotes this chunk to Full status and initializes its runtime state.
     ///
     /// Transfers the chunk's heightmaps after ensuring every final map is primed.
     /// Recalculates section block counts for random tick optimization.
     ///
-    /// # Arguments
-    /// * `proto_chunk` - The proto chunk to convert
     /// # Panics
-    /// Panics if the proto chunk's light-section count does not match its world height.
+    /// Panics if this chunk's light-section count does not match its world height.
     ///
     #[must_use]
-    pub fn from_proto(proto_chunk: Chunk) -> LevelChunkPromotion {
+    pub(crate) fn promote_to_full(&self) -> FullChunkPromotion<'_> {
+        let proto_chunk = self;
         let min_y = proto_chunk.min_y();
         let height = proto_chunk.height();
         let level = proto_chunk.level_weak();
@@ -291,24 +301,23 @@ impl LevelChunk {
             panic!("invalid proto chunk light emptiness map length: {error:?}");
         }
 
-        Self::populate_poi(&level, &proto_chunk.sections, proto_chunk.pos, min_y);
+        FullChunkRef::populate_poi(&level, &proto_chunk.sections, proto_chunk.pos, min_y);
         let game_event_listener_count = level
             .upgrade()
             .map_or_else(GameEventListenerCount::shared, |world| {
                 world.game_event_listener_count()
             });
 
-        Self::initialize_runtime(&proto_chunk, game_event_listener_count);
-        let chunk = Self { chunk: proto_chunk };
-        chunk.adopt_proto_block_entities();
-        chunk.chunk.set_status(ChunkStatus::Full);
-        LevelChunkPromotion {
-            chunk,
+        proto_chunk.initialize_full_runtime_state(game_event_listener_count);
+        let full = FullChunkRef::from_full_context(proto_chunk);
+        full.adopt_proto_block_entities();
+        FullChunkPromotion {
+            chunk: full,
             pending_entities,
         }
     }
 
-    /// Creates a new `LevelChunk` that was loaded from disk (not dirty).
+    /// Creates an owning Full chunk loaded from disk (not dirty).
     ///
     /// Recalculates section block counts for random tick optimization.
     ///
@@ -332,7 +341,7 @@ impl LevelChunk {
         clippy::too_many_arguments,
         reason = "all parameters are required to fully restore a chunk from disk"
     )]
-    pub fn from_disk(
+    pub(crate) fn from_full_disk(
         sections: Sections,
         pos: ChunkPos,
         min_y: i32,
@@ -340,12 +349,22 @@ impl LevelChunk {
         level: Weak<World>,
         block_ticks: BlockTickList,
         fluid_ticks: FluidTickList,
-        heightmaps: ChunkHeightmaps,
+        mut heightmaps: ChunkHeightmaps,
         postprocessing: Vec<Vec<u16>>,
         structure_starts: StructureStartMap,
         structure_references: StructureReferenceMap,
         light: ChunkLightData,
-    ) -> Self {
+    ) -> Chunk {
+        // Disk payloads may omit maps that are derivable from section data.
+        // Full construction owns the invariant that every final map exists;
+        // callers cannot publish a partially initialized runtime chunk.
+        heightmaps.prime_from_sections(
+            HeightmapType::final_types(),
+            min_y,
+            height,
+            &sections.sections,
+        );
+
         let chunk = Chunk::from_disk(
             sections,
             pos,
@@ -363,17 +382,19 @@ impl LevelChunk {
             light,
         );
 
-        Self::populate_poi(&level, &chunk.sections, pos, min_y);
+        FullChunkRef::populate_poi(&level, &chunk.sections, pos, min_y);
         let game_event_listener_count = level
             .upgrade()
             .map_or_else(GameEventListenerCount::shared, |world| {
                 world.game_event_listener_count()
             });
 
-        Self::initialize_runtime(&chunk, game_event_listener_count);
-        Self { chunk }
+        chunk.initialize_full_runtime_state(game_event_listener_count);
+        chunk
     }
+}
 
+impl FullChunkRef<'_> {
     /// Revalidates proto block entities while retaining the same storage instance.
     fn adopt_proto_block_entities(&self) {
         // Vanilla's source is a HashMap. Preserve the storage's native order at
@@ -1308,81 +1329,6 @@ impl LevelChunk {
         valid
     }
 
-    /// Adds a factory result only while its owning block state is still live.
-    #[must_use]
-    pub(crate) fn add_and_register_block_entity_if_state(
-        &self,
-        block_entity: SharedBlockEntity,
-        expected_state: BlockStateId,
-    ) -> bool {
-        let pos = block_entity.get_block_pos();
-        let valid = ChunkPos::from_block_pos(pos) == self.chunk.pos
-            && expected_state.has_block_entity()
-            && block_entity.is_valid_block_state(expected_state);
-        let committed = self.with_locked_block_state(pos, |live_state| {
-            if live_state != expected_state {
-                return None;
-            }
-            if !valid {
-                return Some((false, LifecycleDispatchers::new()));
-            }
-            let (_, lifecycle_dispatchers) = self
-                .chunk
-                .block_entity_storage()
-                .add_staged(&block_entity, expected_state);
-            Some((true, lifecycle_dispatchers))
-        });
-        let Some((valid, lifecycle_dispatchers)) = committed else {
-            return false;
-        };
-        self.finish_block_entity_change(pos, lifecycle_dispatchers);
-        if valid {
-            self.mark_unsaved();
-        }
-        valid
-    }
-
-    /// Removes an entity or marker only while `expected_state` is still live.
-    pub(crate) fn remove_block_entity_if_state(
-        &self,
-        pos: BlockPos,
-        expected_state: BlockStateId,
-    ) -> bool {
-        if ChunkPos::from_block_pos(pos) != self.chunk.pos {
-            return false;
-        }
-        let removed = self.with_locked_block_state(pos, |live_state| {
-            (live_state == expected_state)
-                .then(|| self.chunk.block_entity_storage().remove_staged(pos))
-        });
-        let Some((removed, lifecycle_dispatchers)) = removed else {
-            return false;
-        };
-        self.finish_block_entity_change(pos, lifecycle_dispatchers);
-        if removed {
-            self.mark_unsaved();
-        }
-        removed
-    }
-
-    /// Sets a packed marker only while `expected_state` is still live.
-    pub(crate) fn set_pending_block_entity_if_state(
-        &self,
-        pos: BlockPos,
-        expected_state: BlockStateId,
-    ) -> bool {
-        if ChunkPos::from_block_pos(pos) != self.chunk.pos {
-            return false;
-        }
-        let inserted = self.with_locked_block_state(pos, |live_state| {
-            live_state == expected_state && self.chunk.block_entity_storage().set_pending(pos)
-        });
-        if inserted {
-            self.mark_unsaved();
-        }
-        inserted
-    }
-
     fn add_and_register_block_entity_staged(
         &self,
         block_entity: SharedBlockEntity,
@@ -1570,12 +1516,6 @@ impl LevelChunk {
         self.chunk.block_entity_storage().get_all()
     }
 
-    /// Returns a reference to the block entity storage.
-    #[must_use]
-    pub(crate) const fn block_entity_storage(&self) -> &BlockEntityStorage {
-        &self.chunk.block_entity_storage()
-    }
-
     /// Clears entity ownership while deferring lifecycle callbacks to an outer-lock-free caller.
     #[must_use]
     pub(crate) fn clear_all_block_entities_staged(&self) -> ClearedBlockEntities {
@@ -1608,8 +1548,8 @@ impl LevelChunk {
         flags: UpdateFlags,
     ) -> Option<BlockStateId> {
         match self.set_block_state_inner(pos, None, state, flags)? {
-            LevelChunkBlockSetResult::Changed(old_state) => Some(old_state),
-            LevelChunkBlockSetResult::Unchanged | LevelChunkBlockSetResult::Stale(_) => None,
+            FullChunkBlockSetResult::Changed(old_state) => Some(old_state),
+            FullChunkBlockSetResult::Unchanged | FullChunkBlockSetResult::Stale(_) => None,
         }
     }
 
@@ -1619,7 +1559,7 @@ impl LevelChunk {
         expected_state: BlockStateId,
         new_state: BlockStateId,
         flags: UpdateFlags,
-    ) -> Option<LevelChunkBlockSetResult> {
+    ) -> Option<FullChunkBlockSetResult> {
         self.set_block_state_inner(pos, Some(expected_state), new_state, flags)
     }
 
@@ -1633,7 +1573,7 @@ impl LevelChunk {
         expected_state: Option<BlockStateId>,
         state: BlockStateId,
         flags: UpdateFlags,
-    ) -> Option<LevelChunkBlockSetResult> {
+    ) -> Option<FullChunkBlockSetResult> {
         let y = pos.0.y;
 
         if y < self.min_y() || y >= self.min_y() + self.height() {
@@ -1657,10 +1597,10 @@ impl LevelChunk {
             let mut section_guard = section.write();
             let observed_state = section_guard.states.get(local_x, local_y, local_z);
             if expected_state.is_some_and(|expected| observed_state != expected) {
-                return Some(LevelChunkBlockSetResult::Stale(observed_state));
+                return Some(FullChunkBlockSetResult::Stale(observed_state));
             }
             if observed_state == state {
-                return Some(LevelChunkBlockSetResult::Unchanged);
+                return Some(FullChunkBlockSetResult::Unchanged);
             }
 
             // Behavior decisions run without section/storage locks. The following palette write
@@ -1786,7 +1726,7 @@ impl LevelChunk {
             // placement callbacks for the stale request.
             let current_state = section.read().states.get(local_x, local_y, local_z);
             if current_state.get_block() != new_block {
-                return Some(LevelChunkBlockSetResult::Stale(current_state));
+                return Some(FullChunkBlockSetResult::Stale(current_state));
             }
 
             // Call on_place for the new block
@@ -1802,7 +1742,7 @@ impl LevelChunk {
         }
 
         self.mark_unsaved();
-        Some(LevelChunkBlockSetResult::Changed(old_state))
+        Some(FullChunkBlockSetResult::Changed(old_state))
     }
 
     fn update_light_section_emptiness(&self, y: i32, is_empty: bool) {

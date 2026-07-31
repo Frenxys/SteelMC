@@ -115,10 +115,8 @@ fn persistent_chunk_loads_chunk_owned_light_into_full_chunk() {
         Weak::new(),
     );
 
-    let ChunkAccess::Full(chunk) = loaded.chunk else {
-        panic!("full status should load a full chunk");
-    };
-    let light = chunk.common().light.read();
+    let chunk = loaded.chunk;
+    let light = chunk.light.read();
     assert_eq!(visible_homogeneous_value(light.block.section(0)), Some(12));
     assert_eq!(light.block.section_empty(0), Some(true));
 }

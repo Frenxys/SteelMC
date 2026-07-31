@@ -7,7 +7,6 @@ use super::*;
 use crate::behavior::init_behaviors;
 use crate::chunk::{
     Chunk,
-    chunk_access::ChunkAccess,
     chunk_holder::ChunkHolder,
     chunk_ticket_manager::ChunkTicketLevel,
     light::{LightCacheSetupRadius, LightSection, LightSectionData, LightSectionRange},
@@ -48,7 +47,7 @@ fn holder_with_sections(pos: ChunkPos, sections: Vec<ChunkSection>) -> Arc<Chunk
         0,
         height,
     ));
-    holder.insert_chunk(ChunkAccess::Proto(proto), ChunkStatus::Light);
+    holder.insert_chunk(proto, ChunkStatus::Light);
     holder
 }
 
@@ -279,14 +278,14 @@ fn sky_light_changes_add_and_remove_air_column_shadow() {
     };
     assert!(
         chunk
-            .set_block_state(
+            .set_block_state_for_generation(
+                ChunkStatus::Light,
                 changed_pos,
                 vanilla_blocks::STONE.default_state(),
                 UpdateFlags::UPDATE_CLIENTS,
             )
             .is_some()
     );
-    drop(chunk);
 
     let Ok(workset) = LightWorkset::setup(
         layout,
@@ -319,14 +318,14 @@ fn sky_light_changes_add_and_remove_air_column_shadow() {
     };
     assert!(
         chunk
-            .set_block_state(
+            .set_block_state_for_generation(
+                ChunkStatus::Light,
                 changed_pos,
                 vanilla_blocks::AIR.default_state(),
                 UpdateFlags::UPDATE_CLIENTS,
             )
             .is_some()
     );
-    drop(chunk);
 
     let Ok(workset) = LightWorkset::setup(
         layout,

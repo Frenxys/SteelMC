@@ -16,7 +16,6 @@ use crate::block_entity::entities::ComparatorBlockEntity;
 use crate::block_entity::{BlockEntityBase, SharedBlockEntity, entities::RawBlockEntity};
 use crate::chunk::{
     Chunk,
-    chunk_access::ChunkAccess,
     chunk_ticket_manager::ChunkTicketLevel,
     heightmap::{ChunkHeightmaps, HeightmapType},
     light::{ChunkLightData, LightSection, LightSectionData},
@@ -26,15 +25,16 @@ use crate::chunk::{
 use crate::world::tick_scheduler::{BlockTickList, FluidTickList};
 use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 
-fn test_chunk() -> Arc<LevelChunk> {
-    let proto = Chunk::new(
+fn test_chunk() -> Arc<Chunk> {
+    let chunk = Arc::new(Chunk::new(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         ChunkPos::new(0, 0),
         0,
         16,
         Weak::new(),
-    );
-    Arc::new(LevelChunk::from_proto(proto).chunk)
+    ));
+    let _ = chunk.promote_to_full();
+    chunk
 }
 
 #[test]
@@ -50,7 +50,7 @@ fn promotion_installs_full_runtime_once() {
     );
     assert!(proto.full_runtime().is_none());
 
-    let full = LevelChunk::from_proto(proto).chunk;
+    let full = proto.promote_to_full().chunk;
 
     assert!(full.common().full_runtime().is_some());
     let replacement = FullChunkRuntime::new(GameEventListenerCount::shared());
@@ -61,7 +61,7 @@ fn promotion_installs_full_runtime_once() {
 fn full_disk_construction_returns_initialized_runtime() {
     init_test_registry();
     init_behaviors();
-    let full = LevelChunk::from_disk(
+    let full = Chunk::from_full_disk(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         ChunkPos::new(0, 0),
         0,
@@ -76,9 +76,8 @@ fn full_disk_construction_returns_initialized_runtime() {
         ChunkLightData::for_valid_world_height(0, 16),
     );
 
-    assert_eq!(full.common().status(), ChunkStatus::Full);
-    assert!(full.common().full_runtime().is_some());
-    let _ = full.game_event_listeners();
+    assert!(full.full_runtime().is_some());
+    let _ = FullChunkRef::from_full_context(&full).game_event_listeners();
 }
 
 #[test]
@@ -142,12 +141,11 @@ fn inactive_chunk_stages_lifecycle_callbacks_until_activation() {
         16,
         Weak::new(),
     );
-    let chunk = LevelChunk::from_proto(proto).chunk;
+    let full = proto.promote_to_full().chunk;
     let pos = BlockPos::new(1, 2, 3);
     let state = vanilla_blocks::OAK_SIGN.default_state();
     assert!(
-        chunk
-            .set_block_state(pos, state, UpdateFlags::UPDATE_NONE)
+        full.set_block_state(pos, state, UpdateFlags::UPDATE_NONE)
             .is_some()
     );
 
@@ -157,7 +155,7 @@ fn inactive_chunk_stages_lifecycle_callbacks_until_activation() {
     });
     concrete.set_removed();
     let entity: SharedBlockEntity = concrete.clone();
-    assert!(chunk.add_and_register_block_entity(entity));
+    assert!(full.add_and_register_block_entity(entity));
     assert!(concrete.events.lock().is_empty());
 
     let holder = Arc::new(ChunkHolder::new(
@@ -167,13 +165,10 @@ fn inactive_chunk_stages_lifecycle_callbacks_until_activation() {
         0,
         16,
     ));
-    holder.insert_chunk(ChunkAccess::Full(chunk), ChunkStatus::Full);
+    holder.insert_chunk(proto, ChunkStatus::Full);
     let batch = {
-        let guard = holder
-            .try_chunk(ChunkStatus::Full)
-            .expect("test chunk should remain full");
-        guard
-            .as_full()
+        holder
+            .try_full_chunk()
             .and_then(|chunk| chunk.prepare_block_entity_activation(&holder))
             .expect("first activation should produce a batch")
     };
@@ -195,7 +190,7 @@ fn extract_light_data_uses_chunk_owned_light_and_skylight_flag() {
         16,
         Weak::new(),
     );
-    let chunk = LevelChunk::from_proto(proto).chunk;
+    let chunk = proto.promote_to_full().chunk;
 
     {
         let mut light = chunk.common().light.write();
@@ -237,7 +232,7 @@ fn empty_and_out_of_range_sections_return_air() {
         16,
         Weak::new(),
     );
-    let chunk = LevelChunk::from_proto(proto).chunk;
+    let chunk = proto.promote_to_full().chunk;
 
     assert_eq!(
         chunk.get_block_state(BlockPos::new(0, 0, 0)),
@@ -261,7 +256,7 @@ fn draining_postprocessing_marks_full_chunk_dirty() {
         Weak::new(),
     );
     proto.mark_pos_for_postprocessing(BlockPos::new(1, 2, 3));
-    let chunk = LevelChunk::from_proto(proto).chunk;
+    let chunk = proto.promote_to_full().chunk;
     chunk.common().dirty.store(false, Ordering::Release);
 
     assert!(chunk.take_postprocessing().is_some());
@@ -273,7 +268,8 @@ fn draining_postprocessing_marks_full_chunk_dirty() {
 fn conditional_block_set_rejects_a_stale_state() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(0, 0, 0);
     let stone = vanilla_blocks::STONE.default_state();
     let dirt = vanilla_blocks::DIRT.default_state();
@@ -289,12 +285,12 @@ fn conditional_block_set_rejects_a_stale_state() {
             dirt,
             UpdateFlags::UPDATE_NONE,
         ),
-        Some(LevelChunkBlockSetResult::Stale(stone))
+        Some(FullChunkBlockSetResult::Stale(stone))
     );
     assert_eq!(chunk.get_block_state(pos), stone);
     assert_eq!(
         chunk.set_block_state_if_unchanged(pos, stone, stone, UpdateFlags::UPDATE_NONE),
-        Some(LevelChunkBlockSetResult::Unchanged)
+        Some(FullChunkBlockSetResult::Unchanged)
     );
 }
 
@@ -302,7 +298,8 @@ fn conditional_block_set_rejects_a_stale_state() {
 fn concurrent_consumers_cannot_both_claim_the_same_block_state() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(0, 0, 0);
     let stone = vanilla_blocks::STONE.default_state();
     assert!(
@@ -313,10 +310,11 @@ fn concurrent_consumers_cannot_both_claim_the_same_block_state() {
 
     let barrier = Arc::new(Barrier::new(3));
     let first = {
-        let chunk = Arc::clone(&chunk);
+        let chunk_owner = Arc::clone(&chunk_owner);
         let barrier = Arc::clone(&barrier);
         thread::spawn(move || {
             barrier.wait();
+            let chunk = FullChunkRef::from_full_context(&chunk_owner);
             chunk.set_block_state_if_unchanged(
                 pos,
                 stone,
@@ -326,10 +324,11 @@ fn concurrent_consumers_cannot_both_claim_the_same_block_state() {
         })
     };
     let second = {
-        let chunk = Arc::clone(&chunk);
+        let chunk_owner = Arc::clone(&chunk_owner);
         let barrier = Arc::clone(&barrier);
         thread::spawn(move || {
             barrier.wait();
+            let chunk = FullChunkRef::from_full_context(&chunk_owner);
             chunk.set_block_state_if_unchanged(
                 pos,
                 stone,
@@ -348,7 +347,7 @@ fn concurrent_consumers_cannot_both_claim_the_same_block_state() {
     };
     let changed = [first, second]
         .into_iter()
-        .filter(|result| matches!(result, Some(LevelChunkBlockSetResult::Changed(_))))
+        .filter(|result| matches!(result, Some(FullChunkBlockSetResult::Changed(_))))
         .count();
 
     assert_eq!(changed, 1);
@@ -359,7 +358,8 @@ fn concurrent_consumers_cannot_both_claim_the_same_block_state() {
 fn block_change_replaces_a_structurally_valid_raw_entity_with_the_new_factory() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(1, 2, 3);
     let chest = vanilla_blocks::CHEST.default_state();
     let comparator = vanilla_blocks::COMPARATOR.default_state();
@@ -395,7 +395,8 @@ fn block_change_replaces_a_structurally_valid_raw_entity_with_the_new_factory() 
 fn breaking_an_unimplemented_entity_block_removes_its_raw_entity() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(2, 2, 2);
     let chest = vanilla_blocks::CHEST.default_state();
     assert!(
@@ -427,7 +428,8 @@ fn breaking_an_unimplemented_entity_block_removes_its_raw_entity() {
 fn copper_chest_transformation_preserves_entity_identity() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(3, 2, 1);
     let copper = vanilla_blocks::COPPER_CHEST.default_state();
     let exposed = vanilla_blocks::EXPOSED_COPPER_CHEST.default_state();
@@ -466,7 +468,8 @@ fn copper_chest_transformation_preserves_entity_identity() {
 fn same_block_property_change_preserves_entity_data_and_updates_cached_state() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(3, 2, 2);
     let comparator = vanilla_blocks::COMPARATOR.default_state();
     assert!(
@@ -499,7 +502,8 @@ fn same_block_property_change_preserves_entity_data_and_updates_cached_state() {
 fn shared_entity_type_does_not_imply_cross_block_preservation() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(4, 2, 1);
     let chest = vanilla_blocks::CHEST.default_state();
     let trapped_chest = vanilla_blocks::TRAPPED_CHEST.default_state();
@@ -532,7 +536,8 @@ fn shared_entity_type_does_not_imply_cross_block_preservation() {
 fn insertion_rejects_an_entity_owned_by_another_chunk() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let local_pos = BlockPos::new(0, 2, 0);
     let foreign_pos = BlockPos::new(16, 2, 0);
     let chest = vanilla_blocks::CHEST.default_state();
@@ -557,7 +562,8 @@ fn insertion_rejects_an_entity_owned_by_another_chunk() {
 fn insertion_below_world_does_not_alias_the_bottom_section() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let bottom_section_pos = BlockPos::new(0, 15, 0);
     let below_world_pos = BlockPos::new(0, -1, 0);
     let chest = vanilla_blocks::CHEST.default_state();
@@ -581,7 +587,8 @@ fn insertion_below_world_does_not_alias_the_bottom_section() {
 fn stale_no_entity_promotion_cannot_consume_a_replacement_marker() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(2, 3, 4);
     let moving_piston = vanilla_blocks::MOVING_PISTON.default_state();
     assert!(
@@ -606,39 +613,11 @@ fn stale_no_entity_promotion_cannot_consume_a_replacement_marker() {
 }
 
 #[test]
-fn stale_worldgen_factory_cannot_replace_the_current_state_marker() {
-    init_test_registry();
-    init_behaviors();
-    let chunk = test_chunk();
-    let pos = BlockPos::new(2, 3, 4);
-    let copper = vanilla_blocks::COPPER_CHEST.default_state();
-    let exposed = vanilla_blocks::EXPOSED_COPPER_CHEST.default_state();
-    assert!(
-        chunk
-            .set_block_state(pos, copper, UpdateFlags::UPDATE_NONE)
-            .is_some()
-    );
-    assert_eq!(
-        chunk.set_block_state(pos, exposed, UpdateFlags::UPDATE_NONE),
-        Some(copper)
-    );
-    let stale: SharedBlockEntity = Arc::new(RawBlockEntity::new(
-        &vanilla_block_entity_types::CHEST,
-        Weak::new(),
-        pos,
-        copper,
-    ));
-
-    assert!(!chunk.add_and_register_block_entity_if_state(stale, copper));
-    assert_eq!(chunk.pending_block_entity_positions(), [pos]);
-    assert!(chunk.get_block_entity(pos).is_none());
-}
-
-#[test]
 fn immediate_lookup_recovers_a_missing_implemented_entity() {
     init_test_registry();
     init_behaviors();
-    let chunk = test_chunk();
+    let chunk_owner = test_chunk();
+    let chunk = FullChunkRef::from_full_context(&chunk_owner);
     let pos = BlockPos::new(2, 3, 4);
     let sign = vanilla_blocks::OAK_SIGN.default_state();
     assert!(

@@ -51,14 +51,14 @@ impl RamOnlyStorage {
     ) -> io::Result<Option<LoadedChunk>> {
         if let Ok(true) = self.chunk_exists(pos).await {
             if let Some(storage) = self.saved_chunks.read().await.get(&pos) {
-                Ok(Some(ChunkStorage::persistent_to_chunk(
+                Ok(Some(ChunkStorage::try_persistent_to_chunk(
                     &storage.prepared.persistent,
                     pos,
                     storage.prepared.status,
                     min_y,
                     height,
                     level,
-                )))
+                )?))
             } else {
                 Ok(None)
             }
@@ -70,7 +70,7 @@ impl RamOnlyStorage {
     /// Saves prepared chunk data to storage.
     pub async fn save_chunk_data(&self, prepared: PreparedChunkSave) -> io::Result<bool> {
         // Just track that this chunk has been saved
-        // The actual data is in the live World/ChunkAccess, not persisted
+        // The actual data is in the live World/Chunk, not persisted
         self.saved_chunks
             .write()
             .await

@@ -1,7 +1,7 @@
 use super::{
     Arc, AtomicI64, AtomicOrdering, BTreeSet, BinaryHeap, BlockPos, BlockRef, ChunkPos,
-    ChunkTickContainer, ChunkTickContainerLifecycle, ChunkTickLists, FluidRef, FxHashMap,
-    LevelChunk, Ordering, PackedChunkPos, ScheduledTick, ScheduledTickBatch, SyncMutex, SyncRwLock,
+    ChunkTickContainer, ChunkTickContainerLifecycle, ChunkTickLists, FluidRef, FullChunkRef,
+    FxHashMap, Ordering, PackedChunkPos, ScheduledTick, ScheduledTickBatch, SyncMutex, SyncRwLock,
     TickKey, TickList, TickPriority, TickSchedulerError, intra_tick_drain_order,
 };
 
@@ -189,7 +189,10 @@ impl WorldTickScheduler {
     }
 
     /// Registers an unpublished Full chunk's stable queues with the world index.
-    pub(crate) fn register_chunk(&self, chunk: &LevelChunk) -> Result<(), TickSchedulerError> {
+    pub(crate) fn register_chunk(
+        &self,
+        chunk: &FullChunkRef<'_>,
+    ) -> Result<(), TickSchedulerError> {
         let _phase = self.phase.read();
         let container = chunk.scheduled_tick_container();
         let mut container_state = container.state.lock();
@@ -363,7 +366,7 @@ impl WorldTickScheduler {
 
     pub(crate) fn schedule_block(
         &self,
-        chunk: &LevelChunk,
+        chunk: &FullChunkRef<'_>,
         block: BlockRef,
         pos: BlockPos,
         trigger_tick: i64,
@@ -421,7 +424,7 @@ impl WorldTickScheduler {
 
     pub(crate) fn schedule_fluid(
         &self,
-        chunk: &LevelChunk,
+        chunk: &FullChunkRef<'_>,
         fluid: FluidRef,
         pos: BlockPos,
         trigger_tick: i64,

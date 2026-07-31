@@ -7,7 +7,8 @@ use steel_registry::{REGISTRY, RegistryExt, vanilla_biomes};
 use steel_utils::random::RandomSource;
 use steel_utils::{BlockStateId, ChunkPos, Identifier};
 
-use crate::chunk::chunk_access::ChunkAccess;
+use crate::chunk::Chunk;
+use crate::chunk::status::ChunkStatus;
 use crate::worldgen::generator::{ChunkGenerator, xoroshiro_worldgen_region_random};
 use crate::worldgen::region::WorldGenRegion;
 use crate::worldgen::structure::{StructureGenerator, create_structures};
@@ -225,7 +226,7 @@ impl ChunkGenerator for FlatChunkGenerator {
         self.structure_generator.as_ref()
     }
 
-    fn create_structures(&self, chunk: &ChunkAccess) {
+    fn create_structures(&self, chunk: &Chunk) {
         let Some(structure_generator) = &self.structure_generator else {
             return;
         };
@@ -255,7 +256,7 @@ impl ChunkGenerator for FlatChunkGenerator {
         create_structures(structure_generator, chunk, &mut ctx);
     }
 
-    fn create_biomes(&self, chunk: &ChunkAccess) {
+    fn create_biomes(&self, chunk: &Chunk) {
         let section_count = chunk.sections().sections.len();
 
         for section_index in 0..section_count {
@@ -280,21 +281,27 @@ impl ChunkGenerator for FlatChunkGenerator {
         chunk.mark_dirty();
     }
 
-    fn fill_from_noise(&self, chunk: &ChunkAccess, _beardifier: Option<&Beardifier>) {
+    fn fill_from_noise(&self, chunk: &Chunk, _beardifier: Option<&Beardifier>) {
         let max_relative_y = chunk.sections().sections.len() * 16;
 
         for x in 0..16 {
             for z in 0..16 {
                 for (relative_y, block) in self.layers.iter().enumerate().take(max_relative_y) {
-                    chunk.set_relative_block_for_generation(x, relative_y, z, *block);
+                    chunk.set_relative_block_for_generation(
+                        ChunkStatus::Biomes,
+                        x,
+                        relative_y,
+                        z,
+                        *block,
+                    );
                 }
             }
         }
     }
 
-    fn build_surface(&self, _chunk: &ChunkAccess, _neighbor_biomes: &dyn Fn(IVec3) -> u16) {}
+    fn build_surface(&self, _chunk: &Chunk, _neighbor_biomes: &dyn Fn(IVec3) -> u16) {}
 
-    fn apply_carvers(&self, _chunk: &ChunkAccess) {}
+    fn apply_carvers(&self, _chunk: &Chunk) {}
 
     fn create_worldgen_region_random(&self, world_seed: i64, center: ChunkPos) -> RandomSource {
         xoroshiro_worldgen_region_random(world_seed, center)

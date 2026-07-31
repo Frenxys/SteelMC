@@ -51,7 +51,7 @@ use steel_utils::{
     locks::{SyncMutex, SyncRwLock},
 };
 
-use crate::chunk::level_chunk::LevelChunk;
+use crate::chunk::full_chunk::FullChunkRef;
 
 mod world;
 

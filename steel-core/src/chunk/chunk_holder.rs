@@ -1,12 +1,10 @@
 //! `ChunkHolder` manages chunk state and asynchronous generation tasks.
 use futures::Future;
-use parking_lot::RwLockReadGuard;
 use rustc_hash::FxHashSet;
 use std::fmt::Debug;
 use std::mem;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
-use steel_utils::locks::SyncRwLock;
+use std::sync::{Arc, OnceLock, Weak};
 use steel_utils::{BlockPos, ChunkPos, PackedSectionBlockPos, SectionPos, locks::SyncMutex};
 use tokio::sync::{Notify, oneshot};
 #[cfg(feature = "slow_chunk_gen")]
@@ -34,10 +32,10 @@ use crate::worldgen::WorldGenContext;
 use crate::{
     ChunkMap,
     chunk::{
-        chunk_access::ChunkAccess,
+        Chunk,
         chunk_generation_task::ChunkGenerationTask,
         chunk_pyramid::ChunkStep,
-        level_chunk::{LevelChunk, LevelChunkPromotion},
+        full_chunk::{FullChunkPromotion, FullChunkRef},
         status::ChunkStatus,
     },
 };
@@ -45,6 +43,9 @@ use crate::{
 const STATUS_NONE: u8 = u8::MAX;
 const UNPUBLISHED_STATUS: u8 = 0;
 const NO_TICKET_LEVEL: u8 = u8::MAX;
+const SAVE_LIFECYCLE_ACTIVE: u8 = 0;
+const SAVE_LIFECYCLE_UNLOADING: u8 = 1;
+const SAVE_LIFECYCLE_PREPARING: u8 = 2;
 
 fn optional_ticket_level_raw(level: Option<ChunkTicketLevel>) -> u8 {
     level.map_or(NO_TICKET_LEVEL, ChunkTicketLevel::raw)
@@ -118,26 +119,6 @@ pub(crate) enum PostProcessGenerationError {
     WorldUnavailable,
 }
 
-struct ChunkGuard(SyncRwLock<ChunkAccess>);
-
-impl ChunkGuard {
-    pub const fn new(chunk_access: ChunkAccess) -> Self {
-        ChunkGuard(SyncRwLock::new(chunk_access))
-    }
-
-    pub fn read(&self) -> RwLockReadGuard<'_, ChunkAccess> {
-        self.0.read_recursive()
-    }
-
-    pub fn with_write<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut ChunkAccess) -> R,
-    {
-        let mut guard = self.0.write();
-        f(&mut guard)
-    }
-}
-
 #[derive(Debug, Default)]
 struct ChangedLightSectionSets {
     sky: FxHashSet<SectionPos>,
@@ -168,7 +149,7 @@ impl ChangedLightSections {
 /// reading `data`; `status_changed` wakes async waiters so they can re-check
 /// the atomic state.
 pub struct ChunkHolder {
-    data: ChunkGuard,
+    data: OnceLock<Chunk>,
     published_status: AtomicU8,
     status_changed: Notify,
     generation_task: SyncMutex<Option<Arc<ChunkGenerationTask>>>,
@@ -182,6 +163,8 @@ pub struct ChunkHolder {
     started_work: AtomicUsize,
     /// Number of save dependencies that have not completed yet.
     active_save_dependencies: AtomicUsize,
+    /// Coordinates unloading revival with the short immutable save-preparation phase.
+    save_lifecycle: AtomicU8,
     /// The highest status that generation is allowed to reach.
     highest_allowed_status: AtomicU8,
     /// The minimum Y coordinate of the world.
@@ -233,6 +216,25 @@ impl Drop for ChunkSaveDependency {
         self.holder
             .active_save_dependencies
             .fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+pub(crate) struct ChunkSavePreparationGuard {
+    holder: Arc<ChunkHolder>,
+}
+
+impl Drop for ChunkSavePreparationGuard {
+    fn drop(&mut self) {
+        let result = self.holder.save_lifecycle.compare_exchange(
+            SAVE_LIFECYCLE_PREPARING,
+            SAVE_LIFECYCLE_UNLOADING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        assert!(
+            result.is_ok(),
+            "chunk save preparation ended outside the preparing lifecycle"
+        );
     }
 }
 
@@ -288,7 +290,7 @@ impl ChunkHolder {
             .collect::<Box<[_]>>();
 
         Self {
-            data: ChunkGuard::new(ChunkAccess::Unloaded),
+            data: OnceLock::new(),
             published_status: AtomicU8::new(UNPUBLISHED_STATUS),
             status_changed: Notify::new(),
             generation_task: SyncMutex::new(None),
@@ -298,6 +300,7 @@ impl ChunkHolder {
             simulation_level: AtomicU8::new(optional_ticket_level_raw(simulation_level)),
             started_work: AtomicUsize::new(usize::MAX),
             active_save_dependencies: AtomicUsize::new(0),
+            save_lifecycle: AtomicU8::new(SAVE_LIFECYCLE_ACTIVE),
             highest_allowed_status: AtomicU8::new(highest_allowed_status),
             min_y,
             height,
@@ -431,18 +434,10 @@ impl ChunkHolder {
         };
         range.section_index(section_pos.y())?;
 
-        let chunk = self.data.read();
-        match &*chunk {
-            ChunkAccess::Full(_) => {
-                chunk.mark_dirty();
-                Some(self.ticking_readiness_snapshot().is_block_ticking())
-            }
-            ChunkAccess::Proto(_) => {
-                chunk.mark_dirty();
-                Some(false)
-            }
-            ChunkAccess::Unloaded => None,
-        }
+        let status = self.published_status()?;
+        let chunk = self.data.get()?;
+        chunk.mark_dirty();
+        Some(status == ChunkStatus::Full && self.ticking_readiness_snapshot().is_block_ticking())
     }
 
     /// Returns whether there are pending changes to broadcast.
@@ -604,23 +599,29 @@ impl ChunkHolder {
 
     /// Gets access to the chunk if it has reached the given status.
     #[inline]
-    pub fn try_chunk(&self, status: ChunkStatus) -> Option<RwLockReadGuard<'_, ChunkAccess>> {
+    pub fn try_chunk(&self, status: ChunkStatus) -> Option<&Chunk> {
         let published = self.published_status.load(Ordering::Acquire);
-        (published >= encoded_published_status(status)).then(|| self.data.read())
+        (published >= encoded_published_status(status))
+            .then(|| self.data.get())
+            .flatten()
+    }
+
+    /// Gets the Full-only capability after Full status is published.
+    #[must_use]
+    pub fn try_full_chunk(&self) -> Option<FullChunkRef<'_>> {
+        self.try_chunk(ChunkStatus::Full)
+            .map(FullChunkRef::from_full_context)
     }
 
     /// Waits until the chunk has reached the given status.
-    pub async fn await_chunk(
-        &self,
-        status: ChunkStatus,
-    ) -> Option<RwLockReadGuard<'_, ChunkAccess>> {
+    pub async fn await_chunk(&self, status: ChunkStatus) -> Option<&Chunk> {
         loop {
             // Register before checking the state so a concurrent publication
             // cannot land between the check and the wait.
             let notified = self.status_changed.notified();
 
             if self.published_status.load(Ordering::Acquire) >= encoded_published_status(status) {
-                return Some(self.data.read());
+                return self.data.get();
             }
 
             if self.is_status_disallowed(status) {
@@ -680,6 +681,49 @@ impl ChunkHolder {
         ChunkSaveDependency {
             holder: Arc::clone(self),
         }
+    }
+
+    /// Moves an active holder into the unloading lifecycle.
+    pub(crate) fn begin_unloading(&self) {
+        let result = self.save_lifecycle.compare_exchange(
+            SAVE_LIFECYCLE_ACTIVE,
+            SAVE_LIFECYCLE_UNLOADING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        assert!(
+            result.is_ok(),
+            "an active chunk holder entered unloading from an invalid lifecycle"
+        );
+    }
+
+    /// Reserves the unloading holder while its immutable save input is assembled.
+    pub(crate) fn try_begin_save_preparation(
+        self: &Arc<Self>,
+    ) -> Option<ChunkSavePreparationGuard> {
+        self.save_lifecycle
+            .compare_exchange(
+                SAVE_LIFECYCLE_UNLOADING,
+                SAVE_LIFECYCLE_PREPARING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .ok()
+            .map(|_| ChunkSavePreparationGuard {
+                holder: Arc::clone(self),
+            })
+    }
+
+    /// Attempts to reactivate an unloading holder without waiting for save preparation.
+    pub(crate) fn try_revive_from_unloading(&self) -> bool {
+        self.save_lifecycle
+            .compare_exchange(
+                SAVE_LIFECYCLE_UNLOADING,
+                SAVE_LIFECYCLE_ACTIVE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     /// Applies a step to the chunk.
@@ -879,14 +923,19 @@ impl ChunkHolder {
         }
 
         if chunk_exists {
-            return Self::apply_existing_empty_step(
+            match Self::apply_existing_empty_step(
                 &holder,
                 target_status,
                 &context,
                 &storage,
                 &thread_pool,
             )
-            .await;
+            .await
+            {
+                Some(true) => return Some(()),
+                Some(false) => {}
+                None => return None,
+            }
         }
 
         if holder.is_status_disallowed(target_status) {
@@ -928,7 +977,7 @@ impl ChunkHolder {
         context: &Arc<WorldGenContext>,
         storage: &Arc<ChunkStorage>,
         thread_pool: &rayon::ThreadPool,
-    ) -> Option<()> {
+    ) -> Option<bool> {
         let loaded = match storage
             .load_chunk(
                 holder.pos,
@@ -941,17 +990,11 @@ impl ChunkHolder {
         {
             Ok(Some(loaded)) => loaded,
             Ok(None) => {
-                tracing::error!(
+                tracing::warn!(
                     chunk = ?holder.pos,
-                    "Chunk storage reported an existing chunk but load returned no chunk; aborting generation to avoid overwriting saved data",
+                    "Chunk storage entry disappeared or was discarded as corrupt; regenerating it",
                 );
-                if let Err(error) = storage.release_chunk(holder.pos).await {
-                    tracing::error!(
-                        chunk = ?holder.pos,
-                        "Failed to release chunk storage after missing load result: {error}",
-                    );
-                }
-                return None;
+                return Some(false);
             }
             Err(error) => {
                 tracing::error!(
@@ -1008,7 +1051,7 @@ impl ChunkHolder {
         if loaded_status == ChunkStatus::Full {
             holder.publish_full();
         }
-        Some(())
+        Some(true)
     }
 
     async fn apply_generated_step(
@@ -1127,33 +1170,22 @@ impl ChunkHolder {
 
     /// Upgrades the chunk to a full chunk.
     ///
-    /// If the chunk is already a `LevelChunk` (e.g., loaded from disk), this is a no-op.
+    /// If the chunk is already Full (e.g., loaded from disk), this is a no-op.
     ///
     /// # Panics
-    /// Panics if the chunk is not at the `ChunkAccess::Proto` stage or already full.
-    pub fn upgrade_to_full(&self) {
-        let promoted_entities = self.data.with_write(|chunk| {
-            use std::mem::replace;
-            let owned = replace(chunk, ChunkAccess::Unloaded);
-
-            match owned {
-                ChunkAccess::Proto(proto) => {
-                    let LevelChunkPromotion {
-                        chunk: full,
-                        pending_entities,
-                    } = LevelChunk::from_proto(proto);
-                    let pos = full.common().pos;
-                    let world = full.get_level();
-                    *chunk = ChunkAccess::Full(full);
-                    Some((world, pos, pending_entities))
-                }
-                ChunkAccess::Full(full) => {
-                    *chunk = ChunkAccess::Full(full);
-                    None
-                }
-                ChunkAccess::Unloaded => panic!("Chunk is unloaded, cannot upgrade to full"),
-            }
-        });
+    /// Panics if no chunk has been installed or Full runtime initialization repeats.
+    pub(crate) fn upgrade_to_full(&self) {
+        if self.published_status() == Some(ChunkStatus::Full) {
+            return;
+        }
+        let Some(chunk) = self.data.get() else {
+            panic!("cannot promote an uninitialized chunk holder");
+        };
+        let FullChunkPromotion {
+            chunk: full,
+            pending_entities,
+        } = chunk.promote_to_full();
+        let promoted_entities = Some((full.get_level(), chunk.pos, pending_entities));
         if let Some((world, pos, pending_entities)) = promoted_entities
             && let Some(world) = world
         {
@@ -1164,8 +1196,7 @@ impl ChunkHolder {
     /// Runs Full-load post-processing and returns the number of packed positions attempted.
     pub(crate) fn post_process_generation(&self) -> Result<usize, PostProcessGenerationError> {
         let postprocessing = {
-            let chunk = self.data.read();
-            let ChunkAccess::Full(full) = &*chunk else {
+            let Some(full) = self.try_full_chunk() else {
                 return Err(PostProcessGenerationError::ChunkNotFull);
             };
             let world = full
@@ -1178,13 +1209,12 @@ impl ChunkHolder {
         let post_process_position_count =
             if let Some((world, pos, min_y, postprocessing)) = postprocessing {
                 let position_count = postprocessing.iter().map(Vec::len).sum();
-                LevelChunk::post_process_generation(&world, pos, min_y, postprocessing);
+                FullChunkRef::post_process_generation(&world, pos, min_y, postprocessing);
                 position_count
             } else {
                 0
             };
-        let chunk = self.data.read();
-        let ChunkAccess::Full(full) = &*chunk else {
+        let Some(full) = self.try_full_chunk() else {
             return Err(PostProcessGenerationError::ChunkNotFull);
         };
         full.promote_pending_block_entities();
@@ -1193,14 +1223,12 @@ impl ChunkHolder {
 
     /// Finishes a generated status on the async scheduler after the Rayon task returns.
     fn finish_generation_status(self: &Arc<Self>, status: ChunkStatus) {
+        if let Some(stored_chunk) = self.data.get()
+            && self
+                .published_status()
+                .is_none_or(|published| published < status)
         {
-            let stored_chunk = self.data.read();
-            if let ChunkAccess::Proto(proto_chunk) = &*stored_chunk
-                && proto_chunk.status() < status
-            {
-                proto_chunk.set_status(status);
-                stored_chunk.mark_dirty();
-            }
+            stored_chunk.mark_dirty();
         }
 
         if status == ChunkStatus::Full {
@@ -1218,27 +1246,23 @@ impl ChunkHolder {
     /// Inserts a chunk into the holder with a specific status.
     /// This notifies watchers - use `insert_chunk_no_notify` + separate notification
     /// if calling from a rayon thread to avoid contention.
-    pub fn insert_chunk(self: &Arc<Self>, chunk: ChunkAccess, status: ChunkStatus) {
+    pub fn insert_chunk(self: &Arc<Self>, chunk: Chunk, status: ChunkStatus) {
         self.store_and_publish_chunk_status(chunk, status);
         if status == ChunkStatus::Full {
             self.publish_full();
         }
     }
 
-    fn store_and_publish_chunk_status(&self, chunk: ChunkAccess, status: ChunkStatus) {
+    fn store_and_publish_chunk_status(&self, chunk: Chunk, status: ChunkStatus) {
         assert_eq!(
             self.published_status.load(Ordering::Acquire),
             UNPUBLISHED_STATUS,
             "initial chunk installation cannot replace published data"
         );
-        if let ChunkAccess::Proto(proto) = &chunk {
-            debug_assert!(
-                status < ChunkStatus::Full,
-                "full status must be stored as a LevelChunk"
-            );
-            proto.set_status(status);
-        }
-        self.data.with_write(|c| *c = chunk);
+        assert!(
+            self.data.set(chunk).is_ok(),
+            "initial chunk installation cannot replace existing data"
+        );
         if status == ChunkStatus::Full {
             self.register_full_chunk_ticks();
         }
@@ -1258,28 +1282,28 @@ impl ChunkHolder {
 
     /// Registers tick queues before Full status becomes observable to watchers.
     fn register_full_chunk_ticks(&self) {
-        let chunk = self.data.read();
-        let ChunkAccess::Full(full) = &*chunk else {
-            panic!("Full status must be backed by a LevelChunk");
+        let Some(chunk) = self.data.get() else {
+            panic!("Full status must have installed chunk data");
         };
+        let Some(_) = chunk.full_runtime() else {
+            panic!("Full status must expose a Full chunk view");
+        };
+        let full = FullChunkRef::from_full_context(chunk);
         let Some(world) = full.get_level() else {
             // Focused holder tests construct chunks without a live world. Real
             // loaded/generated chunks always carry the WorldGenContext world.
             return;
         };
-        if let Err(error) = world.register_full_chunk_ticks(full) {
+        if let Err(error) = world.register_full_chunk_ticks(&full) {
             panic!("Full chunk scheduled-tick registration invariant failed: {error:?}");
         }
     }
 
     fn publish_full(self: &Arc<Self>) {
-        let world = {
-            let chunk = self.data.read();
-            let ChunkAccess::Full(full) = &*chunk else {
-                return;
-            };
-            full.get_level()
+        let Some(full) = self.try_full_chunk() else {
+            return;
         };
+        let world = full.get_level();
         if let Some(world) = world {
             world.update_entity_chunk_visibility(self.pos, self.entity_visibility());
         }
@@ -1291,8 +1315,11 @@ impl ChunkHolder {
 
     /// Inserts a chunk into the holder without notifying watchers.
     /// The caller is responsible for notifying via the completion channel.
-    pub(crate) fn insert_chunk_no_notify(&self, chunk: ChunkAccess) {
-        self.data.with_write(|c| *c = chunk);
+    pub(crate) fn insert_chunk_no_notify(&self, chunk: Chunk) {
+        assert!(
+            self.data.set(chunk).is_ok(),
+            "initial chunk installation cannot replace existing data"
+        );
     }
 
     /// Wakes all `await_chunk` watchers without changing the chunk result.
@@ -1366,20 +1393,18 @@ mod tests {
         ))
     }
 
-    fn test_proto_chunk(status: ChunkStatus) -> Chunk {
-        let proto = Chunk::new(
+    fn test_proto_chunk(_status: ChunkStatus) -> Chunk {
+        Chunk::new(
             Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
             ChunkPos::new(0, 0),
             0,
             16,
             Weak::new(),
-        );
-        proto.set_status(status);
-        proto
+        )
     }
 
     #[test]
-    fn insert_chunk_synchronizes_proto_status_with_published_status() {
+    fn insert_chunk_publishes_the_authoritative_status() {
         init_chunk_test_registry();
         let holder = test_holder();
         let proto = Chunk::new(
@@ -1390,15 +1415,13 @@ mod tests {
             Weak::new(),
         );
 
-        holder.insert_chunk(ChunkAccess::Proto(proto), ChunkStatus::Light);
+        holder.insert_chunk(proto, ChunkStatus::Light);
 
         let Some(chunk) = holder.try_chunk(ChunkStatus::Light) else {
             panic!("inserted chunk should be available at published status");
         };
-        let ChunkAccess::Proto(proto) = &*chunk else {
-            panic!("inserted test chunk should remain proto");
-        };
-        assert_eq!(proto.status(), ChunkStatus::Light);
+        assert_eq!(holder.published_status(), Some(ChunkStatus::Light));
+        assert!(chunk.full_runtime().is_none());
     }
 
     #[test]
@@ -1413,9 +1436,10 @@ mod tests {
             16,
             Arc::downgrade(&publications),
         ));
-        let full = LevelChunk::from_proto(test_proto_chunk(ChunkStatus::Light)).chunk;
+        let full = test_proto_chunk(ChunkStatus::Light);
+        let _ = full.promote_to_full();
 
-        holder.store_and_publish_chunk_status(ChunkAccess::Full(full), ChunkStatus::Full);
+        holder.store_and_publish_chunk_status(full, ChunkStatus::Full);
 
         assert_eq!(holder.published_status(), Some(ChunkStatus::Full));
         assert!(!holder.is_full_status_initialized());
@@ -1431,10 +1455,7 @@ mod tests {
     fn generated_full_status_is_accessible_when_readiness_is_published() {
         init_chunk_test_registry();
         let holder = test_holder();
-        holder.insert_chunk(
-            ChunkAccess::Proto(test_proto_chunk(ChunkStatus::Light)),
-            ChunkStatus::Light,
-        );
+        holder.insert_chunk(test_proto_chunk(ChunkStatus::Light), ChunkStatus::Light);
         holder.upgrade_to_full();
 
         assert_eq!(holder.entity_visibility(), EntityVisibility::Hidden);
@@ -1450,10 +1471,7 @@ mod tests {
     fn late_lower_generation_completion_does_not_regress_published_status() {
         init_chunk_test_registry();
         let holder = test_holder();
-        holder.insert_chunk(
-            ChunkAccess::Proto(test_proto_chunk(ChunkStatus::Light)),
-            ChunkStatus::Light,
-        );
+        holder.insert_chunk(test_proto_chunk(ChunkStatus::Light), ChunkStatus::Light);
 
         holder.finish_generation_status(ChunkStatus::Spawn);
         holder.finish_generation_status(ChunkStatus::Features);
@@ -1468,10 +1486,7 @@ mod tests {
         let holder = test_holder();
         let waiter = holder.await_chunk_status(ChunkStatus::Empty);
 
-        holder.insert_chunk(
-            ChunkAccess::Proto(test_proto_chunk(ChunkStatus::Empty)),
-            ChunkStatus::Empty,
-        );
+        holder.insert_chunk(test_proto_chunk(ChunkStatus::Empty), ChunkStatus::Empty);
 
         assert_eq!(waiter.await, Some(ChunkStatus::Empty));
     }
@@ -1488,10 +1503,8 @@ mod tests {
 
         let publishing_holder = Arc::clone(&holder);
         let publish_task = tokio::spawn(async move {
-            publishing_holder.insert_chunk(
-                ChunkAccess::Proto(test_proto_chunk(ChunkStatus::Empty)),
-                ChunkStatus::Empty,
-            );
+            publishing_holder
+                .insert_chunk(test_proto_chunk(ChunkStatus::Empty), ChunkStatus::Empty);
         });
 
         let (first_status, second_status) = tokio::select! {
@@ -1524,7 +1537,6 @@ mod tests {
             height,
             Arc::downgrade(&world),
         );
-        proto.set_status(ChunkStatus::Light);
         let block_pos = BlockPos::new(1, min_y + 1, 1);
         let fluid_pos = BlockPos::new(2, min_y + 1, 2);
         proto.schedule_block_tick(block_pos, &vanilla_blocks::STONE, TickPriority::High);
@@ -1541,7 +1553,7 @@ mod tests {
             .chunk_map
             .chunks
             .insert_sync(chunk_pos, Arc::clone(&holder));
-        holder.insert_chunk(ChunkAccess::Proto(proto), ChunkStatus::Light);
+        holder.insert_chunk(proto, ChunkStatus::Light);
         holder.upgrade_to_full();
 
         assert!(!world.has_registered_full_chunk_ticks(chunk_pos));
@@ -1556,8 +1568,9 @@ mod tests {
     fn client_deltas_require_confirmed_block_readiness() {
         init_chunk_test_registry();
         let holder = test_holder();
-        let full = LevelChunk::from_proto(test_proto_chunk(ChunkStatus::Light)).chunk;
-        holder.insert_chunk(ChunkAccess::Full(full), ChunkStatus::Full);
+        let full = test_proto_chunk(ChunkStatus::Light);
+        let _ = full.promote_to_full();
+        holder.insert_chunk(full, ChunkStatus::Full);
         let pos = BlockPos::new(1, 1, 1);
         let section_pos = SectionPos::new(0, 0, 0);
         let revision = holder.packet_content_revision();
@@ -1565,7 +1578,6 @@ mod tests {
             .try_chunk(ChunkStatus::Full)
             .expect("the test holder should contain a Full chunk");
         chunk.clear_dirty();
-        drop(chunk);
 
         assert!(!holder.block_changed(pos));
         assert!(!holder.light_changed(LightLayer::Block, section_pos));
@@ -1608,10 +1620,7 @@ mod tests {
     fn unpublished_child_claim_rolls_back_to_published_parent() {
         init_chunk_test_registry();
         let holder = test_holder();
-        holder.insert_chunk(
-            ChunkAccess::Proto(test_proto_chunk(ChunkStatus::Empty)),
-            ChunkStatus::Empty,
-        );
+        holder.insert_chunk(test_proto_chunk(ChunkStatus::Empty), ChunkStatus::Empty);
 
         let claim = holder
             .claim_status_work(ChunkStatus::StructureStarts)
@@ -1636,7 +1645,7 @@ mod tests {
             .expect("empty status should be claimable");
 
         holder.insert_chunk(
-            ChunkAccess::Proto(test_proto_chunk(ChunkStatus::StructureStarts)),
+            test_proto_chunk(ChunkStatus::StructureStarts),
             ChunkStatus::StructureStarts,
         );
         drop(empty_claim);
@@ -1676,5 +1685,30 @@ mod tests {
 
         drop(second);
         assert!(holder.is_ready_for_saving());
+    }
+
+    #[test]
+    fn save_preparation_defers_revival_only_until_the_snapshot_is_built() {
+        let holder = test_holder();
+        holder.begin_unloading();
+        let preparation = holder
+            .try_begin_save_preparation()
+            .expect("an unloading holder should begin save preparation");
+
+        assert!(!holder.try_revive_from_unloading());
+
+        drop(preparation);
+
+        assert!(holder.try_revive_from_unloading());
+        assert!(holder.try_begin_save_preparation().is_none());
+    }
+
+    #[test]
+    fn revival_winning_the_lifecycle_race_cancels_save_preparation() {
+        let holder = test_holder();
+        holder.begin_unloading();
+
+        assert!(holder.try_revive_from_unloading());
+        assert!(holder.try_begin_save_preparation().is_none());
     }
 }

@@ -22,8 +22,9 @@ use steel_worldgen::density::DimensionNoises;
 use steel_worldgen::surface::{SurfaceConditionNoiseCache, SurfaceRuleContext};
 
 use crate::chunk::{
-    chunk_access::ChunkAccess,
+    Chunk,
     heightmap::{Heightmap, HeightmapType},
+    status::ChunkStatus,
 };
 use crate::worldgen::surface::SurfaceSystem;
 use steel_worldgen::noise::{Aquifer, AquiferResult};
@@ -358,7 +359,7 @@ where
     /// Noise generators for this dimension.
     pub noises: &'a N,
     /// Chunk being carved into.
-    pub chunk: &'a ChunkAccess,
+    pub chunk: &'a Chunk,
     /// Chunk NW block X (cached; `ctx.chunk_min_x` mirrors this).
     pub chunk_min_x: i32,
     /// Chunk NW block Z (cached; `ctx.chunk_min_z` mirrors this).
@@ -478,7 +479,12 @@ where
             CarveState::Skip => return false,
         };
 
-        self.chunk.set_block_state(pos, state, UpdateFlags::empty());
+        self.chunk.set_block_state_for_generation(
+            ChunkStatus::Surface,
+            pos,
+            state,
+            UpdateFlags::empty(),
+        );
         if params.style == CarverStyle::Overworld
             && self.ctx.aquifer.should_schedule_fluid_update()
             && state.has_fluid()
@@ -505,8 +511,12 @@ where
                     steep,
                     under_fluid,
                 ) {
-                    self.chunk
-                        .set_block_state(below_pos, top, UpdateFlags::empty());
+                    self.chunk.set_block_state_for_generation(
+                        ChunkStatus::Surface,
+                        below_pos,
+                        top,
+                        UpdateFlags::empty(),
+                    );
                     if top.has_fluid() {
                         self.chunk.mark_pos_for_postprocessing(below_pos);
                     }
@@ -529,7 +539,7 @@ where
     }
 
     fn steep_material_condition(&self, world_x: i32, world_z: i32) -> bool {
-        let heightmaps = self.chunk.proto_heightmaps();
+        let heightmaps = self.chunk.generation_heightmaps();
         if let Some(worldgen_surface) = heightmaps.get(HeightmapType::WorldSurfaceWg) {
             return steep_material_condition(worldgen_surface, world_x, world_z);
         }
@@ -537,7 +547,7 @@ where
 
         self.chunk
             .prime_heightmaps(&[HeightmapType::WorldSurfaceWg]);
-        let heightmaps = self.chunk.proto_heightmaps();
+        let heightmaps = self.chunk.generation_heightmaps();
         if let Some(worldgen_surface) = heightmaps.get(HeightmapType::WorldSurfaceWg) {
             return steep_material_condition(worldgen_surface, world_x, world_z);
         }

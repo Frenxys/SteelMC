@@ -13,7 +13,6 @@ use steel_registry::vanilla_fluids;
 use steel_utils::Identifier;
 
 use crate::behavior::init_behaviors;
-use crate::chunk::status::ChunkStatus;
 use crate::test_support::{fresh_test_world, insert_ready_full_chunk};
 
 fn test_block() -> BlockRef {
@@ -224,10 +223,7 @@ fn chunk_snapshot_does_not_wait_for_world_scheduler_metadata() {
     let (sender, receiver) = mpsc::channel();
     let worker = thread::spawn(move || {
         worker_barrier.wait();
-        let Some(chunk) = holder.try_chunk(ChunkStatus::Full) else {
-            return;
-        };
-        let Some(full) = chunk.as_full() else {
+        let Some(full) = holder.try_full_chunk() else {
             return;
         };
         let _ = sender.send(full.scheduled_tick_snapshot().block.len());

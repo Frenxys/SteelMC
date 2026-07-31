@@ -69,7 +69,7 @@ fn build_beardifier(
     source_positions.sort_by_key(|pos| (pos.0.x, pos.0.y));
     source_positions.dedup();
 
-    // Acquire referenced chunks without holding the center chunk lock. The
+    // Resolve referenced chunks before acquiring any section or structure locks. The
     // position order prevents cross-chunk read cycles when writers are queued.
     let source_holders = source_positions
         .iter()

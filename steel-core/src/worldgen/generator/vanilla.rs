@@ -19,8 +19,8 @@ use steel_worldgen::surface::{
     SurfaceBiomeProvider, SurfaceConditionNoiseCache, SurfaceRuleContext,
 };
 
-use crate::chunk::chunk_access::ChunkAccess;
 use crate::chunk::heightmap::{Heightmap, HeightmapType};
+use crate::chunk::{Chunk, status::ChunkStatus};
 use crate::worldgen::carver::{
     CarveRun, CarverBlockIds, CarvingContext, PreliminarySurfaceCorners, SourceChunk, cave,
 };
@@ -208,7 +208,7 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
         Some(&self.structure_generator)
     }
 
-    fn create_structures(&self, chunk: &ChunkAccess) {
+    fn create_structures(&self, chunk: &Chunk) {
         let pos = chunk.pos();
         let chunk_x = pos.0.x;
         let chunk_z = pos.0.y;
@@ -246,7 +246,7 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
         create_structures(&self.structure_generator, chunk, &mut ctx);
     }
 
-    fn create_biomes(&self, chunk: &ChunkAccess) {
+    fn create_biomes(&self, chunk: &Chunk) {
         let pos = chunk.pos();
         let min_y = chunk.min_y();
         let section_count = chunk.sections().sections.len();
@@ -297,7 +297,7 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
         chunk.mark_dirty();
     }
 
-    fn fill_from_noise(&self, chunk: &ChunkAccess, beardifier: Option<&Beardifier>) {
+    fn fill_from_noise(&self, chunk: &Chunk, beardifier: Option<&Beardifier>) {
         let pos = chunk.pos();
         let chunk_min_x = pos.0.x * 16;
         let chunk_min_z = pos.0.y * 16;
@@ -342,7 +342,8 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
                 // Flush when we move to a new column
                 if local_x != prev_x || local_z != prev_z {
                     if !pending_writes.is_empty() {
-                        chunk.write_block_batch_for_generation(&pending_writes);
+                        chunk
+                            .write_block_batch_for_generation(ChunkStatus::Biomes, &pending_writes);
                         pending_writes.clear();
                     }
                     prev_x = local_x;
@@ -389,19 +390,17 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
 
         // Flush remaining writes
         if !pending_writes.is_empty() {
-            chunk.write_block_batch_for_generation(&pending_writes);
+            chunk.write_block_batch_for_generation(ChunkStatus::Biomes, &pending_writes);
         }
 
-        let ChunkAccess::Proto(proto) = chunk else {
-            return;
-        };
+        let proto = chunk;
         let mut heightmaps = proto.heightmaps.write();
         heightmaps.replace(ocean_floor_wg);
         heightmaps.replace(world_surface_wg);
     }
 
     #[expect(clippy::too_many_lines, reason = "splitting would hurt readability")]
-    fn build_surface(&self, chunk: &ChunkAccess, neighbor_biomes: &dyn Fn(IVec3) -> u16) {
+    fn build_surface(&self, chunk: &Chunk, neighbor_biomes: &dyn Fn(IVec3) -> u16) {
         let min_y = N::Settings::MIN_Y;
         let pos = chunk.pos();
         let chunk_min_x = pos.0.x * 16;
@@ -478,7 +477,7 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
 
                 // Start scanning from one above the highest non-air block
                 let mut start_height =
-                    chunk.height_at(HeightmapType::WorldSurfaceWg, local_x, local_z);
+                    chunk.generation_height_at(HeightmapType::WorldSurfaceWg, local_x, local_z);
 
                 // Column-local Voronoi cache for fuzzed biome lookups.
                 let mut biome_col = biome_data.as_deref().map(|biome_data| {
@@ -557,18 +556,26 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
                     let z_north = local_z.saturating_sub(1);
                     let z_south = (local_z + 1).min(15);
                     let h_north =
-                        chunk.height_at(HeightmapType::WorldSurfaceWg, local_x, z_north) - 1;
+                        chunk.generation_height_at(HeightmapType::WorldSurfaceWg, local_x, z_north)
+                            - 1;
                     let h_south =
-                        chunk.height_at(HeightmapType::WorldSurfaceWg, local_x, z_south) - 1;
+                        chunk.generation_height_at(HeightmapType::WorldSurfaceWg, local_x, z_south)
+                            - 1;
                     if h_south >= h_north + 4 {
                         true
                     } else {
                         let x_west = local_x.saturating_sub(1);
                         let x_east = (local_x + 1).min(15);
-                        let h_west =
-                            chunk.height_at(HeightmapType::WorldSurfaceWg, x_west, local_z) - 1;
-                        let h_east =
-                            chunk.height_at(HeightmapType::WorldSurfaceWg, x_east, local_z) - 1;
+                        let h_west = chunk.generation_height_at(
+                            HeightmapType::WorldSurfaceWg,
+                            x_west,
+                            local_z,
+                        ) - 1;
+                        let h_east = chunk.generation_height_at(
+                            HeightmapType::WorldSurfaceWg,
+                            x_east,
+                            local_z,
+                        ) - 1;
                         h_west >= h_east + 4
                     }
                 };
@@ -660,11 +667,17 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
 
                 // Flush batched writes — holds each section's write guard once
                 if !pending_writes.is_empty() {
-                    chunk.write_column_blocks_for_generation(local_x, local_z, &pending_writes);
+                    chunk.write_column_blocks_for_generation(
+                        ChunkStatus::Noise,
+                        local_x,
+                        local_z,
+                        &pending_writes,
+                    );
                     for &(relative_y, state) in &pending_writes {
                         column_buf[relative_y] = state;
                     }
                     chunk.update_heightmaps_after_direct_column_writes(
+                        ChunkStatus::Noise,
                         local_x,
                         local_z,
                         &pending_writes,
@@ -689,8 +702,14 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
                         &mut pending_writes,
                     );
                     if !pending_writes.is_empty() {
-                        chunk.write_column_blocks_for_generation(local_x, local_z, &pending_writes);
+                        chunk.write_column_blocks_for_generation(
+                            ChunkStatus::Noise,
+                            local_x,
+                            local_z,
+                            &pending_writes,
+                        );
                         chunk.update_heightmaps_after_direct_column_writes(
+                            ChunkStatus::Noise,
                             local_x,
                             local_z,
                             &pending_writes,
@@ -703,11 +722,9 @@ impl<N: DimensionNoises> ChunkGenerator for VanillaGenerator<N> {
     }
 
     #[expect(clippy::too_many_lines, reason = "matches vanilla carver setup flow")]
-    fn apply_carvers(&self, chunk: &ChunkAccess) {
+    fn apply_carvers(&self, chunk: &Chunk) {
         // Carvers only run on proto chunks.
-        let ChunkAccess::Proto(proto) = chunk else {
-            return;
-        };
+        let proto = chunk;
 
         if self
             .uniform_carver_biome

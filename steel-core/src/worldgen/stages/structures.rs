@@ -35,16 +35,14 @@ pub(crate) fn generate_references(
     cache: &Arc<StaticCache2D<Arc<ChunkHolder>>>,
     holder: Arc<ChunkHolder>,
 ) {
-    let chunk = holder
-        .try_chunk(ChunkStatus::StructureStarts)
-        .expect("Chunk not found at status StructureStarts");
+    let Some(chunk) = holder.try_chunk(ChunkStatus::StructureStarts) else {
+        panic!("Chunk not found at status StructureStarts");
+    };
     let target_pos = chunk.pos();
     let target_x = target_pos.0.x;
     let target_z = target_pos.0.y;
     let target_block_x = target_x * 16;
     let target_block_z = target_z * 16;
-    drop(chunk);
-
     let mut references = StructureReferenceMap::default();
 
     // Radius-8 scan for starts whose BB intersects this chunk.

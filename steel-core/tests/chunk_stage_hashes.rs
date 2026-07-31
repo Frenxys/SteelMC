@@ -19,7 +19,6 @@ use glam::IVec3;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use serde::Deserialize;
 use steel_core::chunk::Chunk;
-use steel_core::chunk::chunk_access::ChunkAccess;
 use steel_core::chunk::chunk_generation_task::StaticCache2D;
 use steel_core::chunk::chunk_holder::ChunkHolder;
 use steel_core::chunk::chunk_pyramid::{ChunkStep, GENERATION_PYRAMID};
@@ -203,27 +202,21 @@ fn debug_stage_filter() -> Option<String> {
         .filter(|stage| !stage.is_empty())
 }
 
-fn empty_proto_chunk(
-    pos: (i32, i32),
-    section_count: usize,
-    min_y: i32,
-    height: i32,
-) -> ChunkAccess {
+fn empty_proto_chunk(pos: (i32, i32), section_count: usize, min_y: i32, height: i32) -> Chunk {
     let sections: Box<[ChunkSection]> = (0..section_count)
         .map(|_| ChunkSection::new_empty())
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    let proto = Chunk::new(
+    Chunk::new(
         Sections::from_owned(sections),
         ChunkPos::new(pos.0, pos.1),
         min_y,
         height,
         Weak::new(),
-    );
-    ChunkAccess::Proto(proto)
+    )
 }
 
-fn chunk_or_panic(chunks: &FxHashMap<(i32, i32), ChunkAccess>, pos: (i32, i32)) -> &ChunkAccess {
+fn chunk_or_panic(chunks: &FxHashMap<(i32, i32), Chunk>, pos: (i32, i32)) -> &Chunk {
     match chunks.get(&pos) {
         Some(chunk) => chunk,
         None => panic!("Missing test chunk ({}, {})", pos.0, pos.1),
@@ -279,7 +272,7 @@ fn create_test_world(
 }
 
 fn build_feature_holders(
-    chunks: FxHashMap<(i32, i32), ChunkAccess>,
+    chunks: FxHashMap<(i32, i32), Chunk>,
     carver_positions: &FxHashSet<(i32, i32)>,
     min_y: i32,
     height: i32,
@@ -346,8 +339,8 @@ fn compute_block_hash(sections: &Sections) -> String {
     format!("{:x}", ctx.finalize())
 }
 
-fn recalculate_section_counts(chunk: &ChunkAccess) {
-    for section in &chunk.sections().sections {
+fn recalculate_section_counts(chunk: &Chunk) {
+    for section in &chunk.sections.sections {
         section.write().recalculate_counts();
     }
 }
@@ -702,7 +695,7 @@ fn light_section_state(section: &LightSection) -> (u8, Option<Box<[u8; DATA_LAYE
     }
 }
 
-fn compute_light_hash(chunk: &ChunkAccess) -> String {
+fn compute_light_hash(chunk: &Chunk) -> String {
     let light = chunk.light();
     let range = light.sky.range();
     let mut ctx = md5::Context::new();
@@ -807,7 +800,7 @@ fn diff_light_layer(
     }
 }
 
-fn diff_light_chunk(chunk: &ChunkAccess, reference: &ReferenceLightChunk) -> LightDiffs {
+fn diff_light_chunk(chunk: &Chunk, reference: &ReferenceLightChunk) -> LightDiffs {
     let mut diffs = LightDiffs {
         total: 0,
         lines: Vec::new(),
@@ -918,10 +911,10 @@ const DIMENSION_ORDER: &[&str] = &[
 /// production logic in `worldgen::stages::noise` but reads from a `HashMap` instead
 /// of a chunk cache.
 fn build_test_beardifier(
-    chunk: &ChunkAccess,
-    chunks: &FxHashMap<(i32, i32), ChunkAccess>,
+    chunk: &Chunk,
+    chunks: &FxHashMap<(i32, i32), Chunk>,
 ) -> Option<Beardifier> {
-    let pos = chunk.pos();
+    let pos = chunk.pos;
     let chunk_x = pos.0.x;
     let chunk_z = pos.0.y;
 
@@ -935,14 +928,14 @@ fn build_test_beardifier(
         return None;
     }
 
-    let source_chunk_refs: Vec<&ChunkAccess> = source_positions
+    let source_chunk_refs: Vec<&Chunk> = source_positions
         .iter()
         .filter_map(|p| chunks.get(&(p.0.x, p.0.y)))
         .collect();
     let mut source_indices: FxHashMap<ChunkPos, usize> = FxHashMap::default();
     let mut starts_guards = Vec::with_capacity(source_chunk_refs.len());
     for source_chunk in &source_chunk_refs {
-        let source_pos = source_chunk.pos();
+        let source_pos = source_chunk.pos;
         source_indices.insert(source_pos, starts_guards.len());
         starts_guards.push(source_chunk.structure_starts());
     }
@@ -1327,7 +1320,7 @@ fn chunk_stage_hashes_inner() {
             starts_positions.extend(biome_positions.iter().copied());
         }
 
-        let mut chunks: FxHashMap<(i32, i32), ChunkAccess> =
+        let mut chunks: FxHashMap<(i32, i32), Chunk> =
             FxHashMap::with_capacity_and_hasher(starts_positions.len(), FxBuildHasher);
         for &pos in &starts_positions {
             chunks.insert(pos, empty_proto_chunk(pos, section_count, min_y, height));
@@ -1454,7 +1447,7 @@ fn chunk_stage_hashes_inner() {
                             let cx = q.x >> 2;
                             let cz = q.z >> 2;
                             let neighbor = chunk_or_panic(&chunks, (cx, cz));
-                            let sections = neighbor.sections();
+                            let sections = &neighbor.sections;
                             let local_qx = (q.x - cx * 4) as usize;
                             let local_qz = (q.z - cz * 4) as usize;
                             let qy_clamped = (q.y - min_qy).clamp(0, total_quarts_y - 1) as usize;
@@ -1575,7 +1568,7 @@ fn chunk_stage_hashes_inner() {
                     let Some(chunk) = holder.try_chunk(ChunkStatus::Carvers) else {
                         panic!("Feature center chunk ({chunk_x}, {chunk_z}) missing");
                     };
-                    compute_block_hash(chunk.sections())
+                    compute_block_hash(&chunk.sections)
                 } else if stage == LIGHT_STAGE {
                     let Some(holders) = &feature_holders else {
                         panic!("light stage missing chunk holders");
@@ -1586,7 +1579,7 @@ fn chunk_stage_hashes_inner() {
                     let Some(chunk) = holder.try_chunk(ChunkStatus::Empty) else {
                         panic!("Light center chunk ({chunk_x}, {chunk_z}) missing");
                     };
-                    compute_light_hash(&chunk)
+                    compute_light_hash(chunk)
                 } else {
                     let chunk = chunk_or_panic(&chunks, (chunk_x, chunk_z));
 
@@ -1597,7 +1590,7 @@ fn chunk_stage_hashes_inner() {
                             let cx = q.x >> 2;
                             let cz = q.z >> 2;
                             let neighbor = chunk_or_panic(&chunks, (cx, cz));
-                            let sections = neighbor.sections();
+                            let sections = &neighbor.sections;
                             let local_qx = (q.x - cx * 4) as usize;
                             let local_qz = (q.z - cz * 4) as usize;
                             let qy_clamped = (q.y - min_qy).clamp(0, total_quarts_y - 1) as usize;
@@ -1619,7 +1612,7 @@ fn chunk_stage_hashes_inner() {
                         }
                     }
 
-                    compute_block_hash(chunk.sections())
+                    compute_block_hash(&chunk.sections)
                 };
 
                 let ok = actual_hash == expected_hash;
@@ -1646,7 +1639,7 @@ fn chunk_stage_hashes_inner() {
                                 let Some(chunk) = holder.try_chunk(ChunkStatus::Empty) else {
                                     panic!("Light center chunk ({chunk_x}, {chunk_z}) missing");
                                 };
-                                ChunkDiff::Light(diff_light_chunk(&chunk, ref_data))
+                                ChunkDiff::Light(diff_light_chunk(chunk, ref_data))
                             })
                     } else {
                         reference_blocks
@@ -1667,10 +1660,10 @@ fn chunk_stage_hashes_inner() {
                                             "Feature center chunk ({chunk_x}, {chunk_z}) missing"
                                         );
                                     };
-                                    ChunkDiff::Blocks(diff_chunk(chunk.sections(), ref_data, min_y))
+                                    ChunkDiff::Blocks(diff_chunk(&chunk.sections, ref_data, min_y))
                                 } else {
                                     let chunk = chunk_or_panic(&chunks, (chunk_x, chunk_z));
-                                    ChunkDiff::Blocks(diff_chunk(chunk.sections(), ref_data, min_y))
+                                    ChunkDiff::Blocks(diff_chunk(&chunk.sections, ref_data, min_y))
                                 }
                             })
                     };

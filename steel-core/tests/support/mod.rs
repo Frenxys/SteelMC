@@ -15,10 +15,8 @@ use tokio::runtime::{Builder, Runtime};
 use toml::map::Map;
 
 use crate::chunk::Chunk;
-use crate::chunk::chunk_access::ChunkAccess;
 use crate::chunk::chunk_holder::{ChunkHolder, TickingReadiness};
 use crate::chunk::chunk_ticket_manager::ChunkTicketLevel;
-use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::section::{ChunkSection, Sections};
 use crate::chunk::status::ChunkStatus;
 use crate::entity::Entity;
@@ -63,7 +61,7 @@ pub(crate) fn insert_ready_full_chunk(world: &Arc<World>, pos: ChunkPos) -> Arc<
         height,
         Arc::downgrade(world),
     );
-    let chunk = LevelChunk::from_proto(proto).chunk;
+    let _ = proto.promote_to_full();
     let holder = Arc::new(ChunkHolder::new(
         pos,
         ChunkTicketLevel::BLOCK_TICKING_CHUNK,
@@ -71,7 +69,7 @@ pub(crate) fn insert_ready_full_chunk(world: &Arc<World>, pos: ChunkPos) -> Arc<
         min_y,
         height,
     ));
-    holder.insert_chunk(ChunkAccess::Full(chunk), ChunkStatus::Full);
+    holder.insert_chunk(proto, ChunkStatus::Full);
     assert_eq!(
         holder.transition_ticking_readiness(TickingReadiness::BlockTicking),
         Some(TickingReadiness::Unready)

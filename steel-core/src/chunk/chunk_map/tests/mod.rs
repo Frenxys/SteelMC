@@ -5,8 +5,8 @@ use crate::block_entity::{
     entities::{ComparatorBlockEntity, SignBlockEntity},
 };
 use crate::chunk::Chunk;
+use crate::chunk::full_chunk::FullChunkRef;
 use crate::chunk::heightmap::ChunkHeightmaps;
-use crate::chunk::level_chunk::LevelChunk;
 use crate::chunk::light::ChunkLightData;
 use crate::chunk::section::{ChunkSection, Sections};
 use crate::chunk_saver::RamOnlyStorage;
@@ -98,10 +98,7 @@ fn advance_until_revision(chunk_map: &Arc<ChunkMap>, revision: ChunkTicketRevisi
     panic!("chunk ticket revision did not commit");
 }
 
-fn add_test_comparator(chunk: &ChunkAccess, pos: BlockPos) -> SharedBlockEntity {
-    let Some(full) = chunk.as_full() else {
-        panic!("test comparator requires a full chunk");
-    };
+fn add_test_comparator(full: &FullChunkRef<'_>, pos: BlockPos) -> SharedBlockEntity {
     let Ok(relative_y) = usize::try_from(pos.y() - full.min_y()) else {
         panic!("test comparator position must be inside the chunk height");
     };
@@ -118,10 +115,7 @@ fn add_test_comparator(chunk: &ChunkAccess, pos: BlockPos) -> SharedBlockEntity 
     block_entity
 }
 
-fn add_test_sign(chunk: &ChunkAccess, pos: BlockPos) -> SharedBlockEntity {
-    let Some(full) = chunk.as_full() else {
-        panic!("test sign requires a full chunk");
-    };
+fn add_test_sign(full: &FullChunkRef<'_>, pos: BlockPos) -> SharedBlockEntity {
     let Ok(relative_y) = usize::try_from(pos.y() - full.min_y()) else {
         panic!("test sign position must be inside the chunk height");
     };
@@ -166,7 +160,7 @@ fn insert_active_full_holder_with_ticks(
         .map(|_| ChunkSection::new_empty())
         .collect::<Vec<_>>()
         .into_boxed_slice();
-    let chunk = LevelChunk::from_disk(
+    let chunk = Chunk::from_full_disk(
         Sections::from_owned(sections),
         pos,
         min_y,
@@ -189,18 +183,15 @@ fn insert_active_full_holder_with_ticks(
         height,
         Arc::downgrade(&world.chunk_map.full_publications),
     ));
-    holder.insert_chunk(ChunkAccess::Full(chunk), ChunkStatus::Full);
+    holder.insert_chunk(chunk, ChunkStatus::Full);
     let _ = world.chunk_map.chunks.insert_sync(pos, Arc::clone(&holder));
     holder
 }
 
 fn assert_postprocessing_drained(holder: &ChunkHolder) {
     let chunk = holder
-        .try_chunk(ChunkStatus::Full)
+        .try_full_chunk()
         .expect("the center should remain Full");
-    let ChunkAccess::Full(chunk) = &*chunk else {
-        panic!("the center should remain a LevelChunk");
-    };
     assert!(
         chunk
             .postprocessing_for_serialization()
@@ -253,12 +244,12 @@ fn unloaded_light_holder(pos: ChunkPos) -> Arc<ChunkHolder> {
         0,
         16,
     ));
-    holder.insert_chunk(ChunkAccess::Proto(proto), ChunkStatus::Light);
+    holder.insert_chunk(proto, ChunkStatus::Light);
     holder
 }
 
 fn unloaded_full_holder(pos: ChunkPos) -> Arc<ChunkHolder> {
-    let chunk = LevelChunk::from_disk(
+    let chunk = Chunk::from_full_disk(
         Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
         pos,
         0,
@@ -279,7 +270,7 @@ fn unloaded_full_holder(pos: ChunkPos) -> Arc<ChunkHolder> {
         0,
         16,
     ));
-    holder.insert_chunk(ChunkAccess::Full(chunk), ChunkStatus::Full);
+    holder.insert_chunk(chunk, ChunkStatus::Full);
     holder
 }
 

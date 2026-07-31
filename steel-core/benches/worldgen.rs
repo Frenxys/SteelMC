@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use steel_core::behavior::init_behaviors;
 use steel_core::block_entity::init_block_entities;
 use steel_core::chunk::Chunk;
-use steel_core::chunk::chunk_access::ChunkAccess;
 use steel_core::chunk::chunk_generation_task::StaticCache2D;
 use steel_core::chunk::chunk_holder::ChunkHolder;
 use steel_core::chunk::chunk_map::ChunkMap;
@@ -100,20 +99,14 @@ fn create_benchmark_generator(
         .expect(context)
 }
 
-fn make_proto_chunk(chunk_x: i32, chunk_z: i32, dim: &DimensionType) -> ChunkAccess {
+fn make_proto_chunk(chunk_x: i32, chunk_z: i32, dim: &DimensionType) -> Chunk {
     let section_count = (dim.height / 16) as usize;
     let sections: Box<[ChunkSection]> = (0..section_count)
         .map(|_| ChunkSection::new_empty())
         .collect();
     let sections = Sections::from_owned(sections);
     let pos = ChunkPos::new(chunk_x, chunk_z);
-    ChunkAccess::Proto(Chunk::new(
-        sections,
-        pos,
-        dim.min_y,
-        dim.height,
-        Weak::new(),
-    ))
+    Chunk::new(sections, pos, dim.min_y, dim.height, Weak::new())
 }
 
 /// Build a `neighbor_biomes` closure that reads from the chunk's own sections.
@@ -121,7 +114,7 @@ fn make_proto_chunk(chunk_x: i32, chunk_z: i32, dim: &DimensionType) -> ChunkAcc
 /// In a real pipeline this reads from a neighbor cache, but for a single-chunk
 /// benchmark the chunk is its own neighbor (biome lookups near edges will
 /// wrap but that's fine for timing).
-fn self_neighbor_biomes(chunk: &ChunkAccess) -> impl Fn(IVec3) -> u16 + '_ {
+fn self_neighbor_biomes(chunk: &Chunk) -> impl Fn(IVec3) -> u16 + '_ {
     let sections = chunk.sections();
     let min_qy = chunk.min_y() >> 2;
     let total_quarts_y = (sections.sections.len() * 4) as i32;
@@ -449,7 +442,7 @@ fn make_chunk_through_carvers(
     chunk_z: i32,
     dim: &DimensionType,
     generator: &ChunkGeneratorType,
-) -> ChunkAccess {
+) -> Chunk {
     let chunk = make_proto_chunk(chunk_x, chunk_z, dim);
     generator.create_structures(&chunk);
     generator.create_biomes(&chunk);
@@ -1515,13 +1508,13 @@ fn bench_end_features(c: &mut Criterion) {
 /// full-placement, and jigsaw paths.
 const STRUCTURE_GRID_SIDE: i32 = 20;
 
-fn structure_grid_chunks(dim: &'static DimensionType) -> Vec<ChunkAccess> {
+fn structure_grid_chunks(dim: &'static DimensionType) -> Vec<Chunk> {
     (0..STRUCTURE_GRID_SIDE)
         .flat_map(|x| (0..STRUCTURE_GRID_SIDE).map(move |z| make_proto_chunk(x, z, dim)))
         .collect()
 }
 
-fn run_grid<G: ChunkGenerator>(generator: &G, chunks: &[ChunkAccess]) {
+fn run_grid<G: ChunkGenerator>(generator: &G, chunks: &[Chunk]) {
     for chunk in chunks {
         generator.create_structures(black_box(chunk));
     }

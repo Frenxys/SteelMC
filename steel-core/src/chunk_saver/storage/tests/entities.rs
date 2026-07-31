@@ -1,4 +1,5 @@
 use super::*;
+use steel_registry::RegistryEntry as _;
 
 fn test_persistent_end_crystal(pos: DVec3) -> PersistentEntity {
     PersistentEntity {
@@ -78,13 +79,18 @@ fn proto_block_entities_roundtrip_and_promote_to_full_chunk() {
     let barrel = REGISTRY
         .blocks
         .get_default_state_id(&vanilla_blocks::BARREL);
-    proto.set_block_state(block_pos, barrel, UpdateFlags::UPDATE_NONE);
+    proto.set_block_state_for_generation(
+        ChunkStatus::Features,
+        block_pos,
+        barrel,
+        UpdateFlags::UPDATE_NONE,
+    );
     proto.set_pending_block_entity(block_pos);
 
     assert!(proto.get_block_entity(block_pos).is_none());
     assert_eq!(proto.pending_block_entity_positions(), [block_pos]);
 
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
     let Some(prepared) =
         ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Features, &[], false)
     else {
@@ -101,18 +107,16 @@ fn proto_block_entities_roundtrip_and_promote_to_full_chunk() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Proto(loaded_proto) = loaded.chunk else {
-        panic!("features status should load as proto chunk");
-    };
+    let loaded_proto = loaded.chunk;
     assert!(loaded_proto.get_block_entity(block_pos).is_none());
     assert_eq!(loaded_proto.pending_block_entity_positions(), [block_pos]);
 
-    let full = LevelChunk::from_proto(loaded_proto).chunk;
-    assert!(full.get_block_entities().is_empty());
-    assert_eq!(full.pending_block_entity_positions(), [block_pos]);
+    let full_ref = loaded_proto.promote_to_full().chunk;
+    assert!(full_ref.get_block_entities().is_empty());
+    assert_eq!(full_ref.pending_block_entity_positions(), [block_pos]);
 
-    let full = ChunkAccess::Full(full);
-    let Some(full_save) = ChunkStorage::prepare_chunk_save(&full, ChunkStatus::Full, &[], true)
+    let Some(full_save) =
+        ChunkStorage::prepare_chunk_save(&loaded_proto, ChunkStatus::Full, &[], true)
     else {
         panic!("forced full-chunk save should retain the pending marker");
     };
@@ -126,9 +130,8 @@ fn proto_block_entities_roundtrip_and_promote_to_full_chunk() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Full(loaded_full) = loaded.chunk else {
-        panic!("full status should load a full chunk");
-    };
+    let loaded_full = loaded.chunk;
+    let loaded_full = FullChunkRef::from_full_context(&loaded_full);
     assert!(loaded_full.get_block_entities().is_empty());
     assert_eq!(loaded_full.pending_block_entity_positions(), [block_pos]);
     assert!(loaded_full.get_block_entity(block_pos).is_some());
@@ -208,7 +211,7 @@ fn proto_entities_roundtrip_and_promote_to_full_chunk() {
     crystal.set_custom_data(custom_data);
     proto.add_entity(crystal);
 
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
     let Some(prepared) =
         ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Features, &[], false)
     else {
@@ -250,12 +253,10 @@ fn proto_entities_roundtrip_and_promote_to_full_chunk() {
         Weak::new(),
     );
     assert!(loaded.pending_entities.is_empty());
-    let ChunkAccess::Proto(loaded_proto) = loaded.chunk else {
-        panic!("features status should load as proto chunk");
-    };
+    let loaded_proto = loaded.chunk;
     assert_eq!(loaded_proto.get_entities().len(), 1);
 
-    let promoted = LevelChunk::from_proto(loaded_proto);
+    let promoted = loaded_proto.promote_to_full();
     assert_eq!(promoted.pending_entities.len(), 1);
     assert!(promoted.pending_entities[0].is_no_gravity());
     assert!(promoted.pending_entities[0].is_invulnerable());
@@ -287,7 +288,7 @@ fn prepared_save_reports_handled_runtime_entity_ids() {
 
     let pos = ChunkPos::new(0, 0);
     let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
     let entity: SharedEntity = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
         next_entity_id(),
@@ -314,7 +315,7 @@ fn full_chunk_load_defers_entities_to_world_registration() {
 
     let pos = ChunkPos::new(0, 0);
     let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
     let entity: SharedEntity = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
         next_entity_id(),
@@ -340,7 +341,6 @@ fn full_chunk_load_defers_entities_to_world_registration() {
         Weak::new(),
     );
 
-    assert!(matches!(loaded.chunk, ChunkAccess::Full(_)));
     assert_eq!(loaded.status, ChunkStatus::Full);
     assert_eq!(loaded.pending_entities.len(), 1);
     assert_eq!(loaded.pending_entities[0].uuid(), entity.uuid());
@@ -352,7 +352,7 @@ fn runtime_entity_passengers_save_nested_and_load_flattened_for_registration() {
 
     let pos = ChunkPos::new(0, 0);
     let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
     let vehicle: SharedEntity = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
         next_entity_id(),
@@ -396,7 +396,7 @@ fn runtime_entity_passengers_save_nested_and_load_flattened_for_registration() {
         Weak::new(),
     );
 
-    assert!(matches!(loaded.chunk, ChunkAccess::Full(_)));
+    assert_eq!(loaded.status, ChunkStatus::Full);
     assert_eq!(loaded.pending_entities.len(), 2);
     let Some(loaded_passenger) = loaded
         .pending_entities
@@ -418,7 +418,7 @@ fn runtime_entity_passengers_skip_non_serializable_entities_like_vanilla() {
 
     let pos = ChunkPos::new(0, 0);
     let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
     let vehicle: SharedEntity = Arc::new(EndCrystalEntity::new(
         &vanilla_entities::END_CRYSTAL,
         next_entity_id(),
@@ -459,7 +459,7 @@ fn runtime_entity_passengers_skip_non_serializable_entities_like_vanilla() {
         Weak::new(),
     );
 
-    assert!(matches!(loaded.chunk, ChunkAccess::Full(_)));
+    assert_eq!(loaded.status, ChunkStatus::Full);
     assert_eq!(loaded.pending_entities.len(), 1);
     assert_eq!(loaded.pending_entities[0].uuid(), vehicle_uuid);
 }
@@ -474,7 +474,12 @@ fn unimplemented_block_entities_preserve_nbt_through_proto_save_load() {
     let spawner = REGISTRY
         .blocks
         .get_default_state_id(&vanilla_blocks::SPAWNER);
-    proto.set_block_state(block_pos, spawner, UpdateFlags::UPDATE_NONE);
+    proto.set_block_state_for_generation(
+        ChunkStatus::Features,
+        block_pos,
+        spawner,
+        UpdateFlags::UPDATE_NONE,
+    );
 
     let mut nbt = NbtCompound::new();
     nbt.insert("LootTable", "minecraft:chests/simple_dungeon");
@@ -488,7 +493,7 @@ fn unimplemented_block_entities_preserve_nbt_through_proto_save_load() {
     );
     assert!(proto.set_block_entity(entity));
 
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
     let Some(prepared) =
         ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Features, &[], false)
     else {
@@ -504,9 +509,7 @@ fn unimplemented_block_entities_preserve_nbt_through_proto_save_load() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Proto(loaded_proto) = loaded.chunk else {
-        panic!("features status should load as proto chunk");
-    };
+    let loaded_proto = loaded.chunk;
     let Some(loaded_entity) = loaded_proto.get_block_entity(block_pos) else {
         panic!("raw block entity should survive chunk load");
     };

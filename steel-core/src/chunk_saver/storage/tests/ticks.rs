@@ -48,9 +48,7 @@ fn persisted_proto_ticks_deduplicate_while_full_ticks_retain_saved_entries() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Proto(proto) = proto_loaded.chunk else {
-        panic!("non-Full status should load a proto chunk");
-    };
+    let proto = proto_loaded.chunk;
     let Some(proto_ticks) = proto.scheduled_ticks.pending_block_snapshot() else {
         panic!("loaded proto ticks should remain pending");
     };
@@ -60,9 +58,7 @@ fn persisted_proto_ticks_deduplicate_while_full_ticks_retain_saved_entries() {
 
     let full_loaded =
         ChunkStorage::persistent_to_chunk(&persistent, pos, ChunkStatus::Full, 0, 16, Weak::new());
-    let ChunkAccess::Full(full) = full_loaded.chunk else {
-        panic!("Full status should load a full chunk");
-    };
+    let full = FullChunkRef::from_full_context(&full_loaded.chunk);
     assert_eq!(full.scheduled_tick_snapshot().block.len(), 2);
 }
 
@@ -122,13 +118,13 @@ fn persisted_tick_priorities_clamp_to_vanilla_extremes() {
 #[test]
 fn forced_prepare_preserves_dirty_set_after_save_decision() {
     init_test_registry();
-    let chunk = ChunkAccess::Proto(Chunk::new(
+    let chunk = Chunk::new(
         single_empty_section(),
         ChunkPos::new(0, 0),
         0,
         16,
         Weak::new(),
-    ));
+    );
 
     assert!(chunk.take_dirty());
     chunk.mark_dirty();

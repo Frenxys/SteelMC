@@ -1,19 +1,78 @@
 use super::*;
 
 #[test]
+fn unknown_referenced_block_state_is_corruption_instead_of_air_recovery() {
+    init_test_registry();
+
+    let pos = ChunkPos::new(0, 0);
+    let chunk = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let Some(mut prepared) =
+        ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Empty, &[], true)
+    else {
+        panic!("forced chunk save should produce a payload");
+    };
+    let Some(block_state) = prepared.persistent.block_states.first_mut() else {
+        panic!("an empty section should still persist its air state");
+    };
+    block_state.name = Identifier::new_static("steel_test", "missing_block");
+
+    let error = match ChunkStorage::try_persistent_to_chunk(
+        &prepared.persistent,
+        pos,
+        ChunkStatus::Empty,
+        0,
+        16,
+        Weak::new(),
+    ) {
+        Ok(_) => panic!("unknown referenced block state must reject the complete payload"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn unknown_referenced_biome_is_corruption_instead_of_plains_recovery() {
+    init_test_registry();
+
+    let pos = ChunkPos::new(0, 0);
+    let chunk = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
+    let Some(mut prepared) =
+        ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Empty, &[], true)
+    else {
+        panic!("forced chunk save should produce a payload");
+    };
+    let Some(biome) = prepared.persistent.biomes.first_mut() else {
+        panic!("an empty section should still persist its biome");
+    };
+    *biome = Identifier::new_static("steel_test", "missing_biome");
+
+    let error = match ChunkStorage::try_persistent_to_chunk(
+        &prepared.persistent,
+        pos,
+        ChunkStatus::Empty,
+        0,
+        16,
+        Weak::new(),
+    ) {
+        Ok(_) => panic!("unknown referenced biome must reject the complete payload"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
 fn proto_heightmap_save_preserves_existing_maps_and_load_primes_missing_maps() {
     init_test_registry();
 
     let pos = ChunkPos::new(3, -4);
     let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
-    proto.set_status(ChunkStatus::Noise);
     proto.heightmaps.write().prime_from_sections(
         &[HeightmapType::WorldSurfaceWg],
         0,
         16,
         &proto.sections.sections,
     );
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
 
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Noise, &[], false)
     else {
@@ -33,9 +92,7 @@ fn proto_heightmap_save_preserves_existing_maps_and_load_primes_missing_maps() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Proto(loaded) = loaded.chunk else {
-        panic!("noise status should load as a proto chunk");
-    };
+    let loaded = loaded.chunk;
     let heightmaps = loaded.heightmaps.read();
     assert!(heightmaps.get(HeightmapType::WorldSurfaceWg).is_some());
     assert!(heightmaps.get(HeightmapType::OceanFloorWg).is_some());
@@ -52,13 +109,12 @@ fn carvers_heightmap_save_excludes_stale_worldgen_maps() {
         16,
         Weak::new(),
     );
-    proto.set_status(ChunkStatus::Carvers);
     {
         let mut heightmaps = proto.heightmaps.write();
         heightmaps.replace(Heightmap::new(HeightmapType::WorldSurfaceWg, 0, 16));
         heightmaps.replace(Heightmap::new(HeightmapType::WorldSurface, 0, 16));
     }
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
 
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
     else {
@@ -77,9 +133,8 @@ fn proto_carving_mask_presence_roundtrips_when_empty() {
 
     let pos = ChunkPos::new(3, -4);
     let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
-    proto.set_status(ChunkStatus::Carvers);
     drop(proto.get_or_create_carving_mask());
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
 
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
     else {
@@ -95,9 +150,7 @@ fn proto_carving_mask_presence_roundtrips_when_empty() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Proto(loaded_proto) = loaded.chunk else {
-        panic!("carvers status should load as proto chunk");
-    };
+    let loaded_proto = loaded.chunk;
 
     assert!(loaded_proto.carving_mask.read().is_some());
 }
@@ -108,8 +161,7 @@ async fn ram_only_storage_restores_the_status_bundled_with_the_prepared_save() {
 
     let pos = ChunkPos::new(3, -4);
     let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
-    proto.set_status(ChunkStatus::Carvers);
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
     else {
         panic!("dirty proto chunk should prepare for saving");
@@ -124,7 +176,6 @@ async fn ram_only_storage_restores_the_status_bundled_with_the_prepared_save() {
     };
 
     assert_eq!(loaded.status, ChunkStatus::Carvers);
-    assert!(matches!(loaded.chunk, ChunkAccess::Proto(_)));
 }
 
 #[test]
@@ -133,12 +184,11 @@ fn proto_carving_mask_bits_roundtrip_through_persistent_chunk() {
 
     let pos = ChunkPos::new(3, -4);
     let proto = Chunk::new(single_empty_section(), pos, 0, 16, Weak::new());
-    proto.set_status(ChunkStatus::Carvers);
     {
         let mut mask = proto.get_or_create_carving_mask();
         mask.set(7, 5, 11);
     }
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
 
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Carvers, &[], false)
     else {
@@ -160,9 +210,7 @@ fn proto_carving_mask_bits_roundtrip_through_persistent_chunk() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Proto(loaded_proto) = loaded.chunk else {
-        panic!("carvers status should load as proto chunk");
-    };
+    let loaded_proto = loaded.chunk;
 
     let mask_guard = loaded_proto.carving_mask.read();
     let Some(mask) = mask_guard.as_ref() else {
@@ -179,10 +227,9 @@ fn proto_postprocessing_roundtrips_through_persistent_chunk() {
     let pos = ChunkPos::new(-2, 1);
     let marked = BlockPos::new(-17, -63, 31);
     let proto = Chunk::new(single_empty_section(), pos, -64, 16, Weak::new());
-    proto.set_status(ChunkStatus::Noise);
     proto.mark_pos_for_postprocessing(marked);
     let packed = Chunk::pack_postprocessing_offset(marked);
-    let chunk = ChunkAccess::Proto(proto);
+    let chunk = proto;
 
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Noise, &[], false)
     else {
@@ -199,9 +246,7 @@ fn proto_postprocessing_roundtrips_through_persistent_chunk() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Proto(loaded_proto) = loaded.chunk else {
-        panic!("noise status should load as proto chunk");
-    };
+    let loaded_proto = loaded.chunk;
 
     assert_eq!(loaded_proto.postprocessing.lock()[0], vec![packed]);
 }
@@ -239,15 +284,13 @@ fn full_chunk_postprocessing_roundtrips_through_persistent_chunk() {
         16,
         Weak::new(),
     );
-    let ChunkAccess::Full(loaded_full) = loaded.chunk else {
-        panic!("full status should load as a full chunk");
-    };
+    let chunk = loaded.chunk;
+    let loaded_full = FullChunkRef::from_full_context(&chunk);
     assert_eq!(
         loaded_full.postprocessing_for_serialization(),
         vec![vec![packed]]
     );
 
-    let chunk = ChunkAccess::Full(loaded_full);
     chunk.mark_dirty();
     let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Full, &[], false)
     else {

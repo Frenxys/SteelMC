@@ -16,6 +16,10 @@ impl ChunkMap {
         self.chunk_encoding_pool.spawn(move || {
             let chunk_pos = holder.get_pos();
             let prepared = {
+                let Some(save_preparation) = holder.try_begin_save_preparation() else {
+                    let _ = sender.send(None);
+                    return;
+                };
                 let Some(chunk_guard) = holder.try_chunk(ChunkStatus::StructureStarts) else {
                     // Vanilla only persists chunks once they reach StructureStarts.
                     // Runtime entities in lower-status chunks are an accepted loss
@@ -24,9 +28,10 @@ impl ChunkMap {
                     return;
                 };
 
-                let status = holder
-                    .published_status()
-                    .expect("The check above confirmed it exists");
+                let Some(status) = holder.published_status() else {
+                    let _ = sender.send(None);
+                    return;
+                };
 
                 let world = map.world_gen_context.world();
                 let runtime_entities = world
@@ -35,7 +40,7 @@ impl ChunkMap {
                 let force = world.entity_manager().has_save_pending_for_chunk(chunk_pos);
                 let dirty = chunk_guard.take_dirty();
                 let prepared = if dirty || force {
-                    ChunkStorage::prepare_chunk_save(&chunk_guard, status, &runtime_entities, true)
+                    ChunkStorage::prepare_chunk_save(chunk_guard, status, &runtime_entities, true)
                 } else {
                     None
                 };
@@ -44,6 +49,8 @@ impl ChunkMap {
                     chunk_guard.mark_dirty();
                 }
 
+                // Revival need not wait for encoding or disk I/O once this owned input exists.
+                drop(save_preparation);
                 prepared
             };
 
@@ -82,7 +89,7 @@ impl ChunkMap {
             .await;
 
         // Save chunk data if dirty. Preparation runs on the shared chunk encoding
-        // pool so chunk locks and persistence conversion never block Tokio workers.
+        // pool so snapshot locking and persistence conversion never block Tokio workers.
         if let Some(mut prepared) = self.prepare_chunk_save_on_pool(chunk_holder).await {
             let handled_runtime_entity_ids = mem::take(&mut prepared.handled_runtime_entity_ids);
             let world = self.world_gen_context.world();
@@ -165,11 +172,17 @@ impl ChunkMap {
         let world = self.world_gen_context.world();
         for (pos, holder, has_chunk) in finalized {
             let cleared = if has_chunk {
-                holder
-                    .try_chunk(ChunkStatus::Empty)
-                    .map_or_else(ClearedBlockEntities::default, |chunk| {
-                        chunk.clear_all_block_entities_staged()
-                    })
+                holder.try_chunk(ChunkStatus::Empty).map_or_else(
+                    ClearedBlockEntities::default,
+                    |chunk| {
+                        if let Some(full) = holder.try_full_chunk() {
+                            full.clear_all_block_entities_staged()
+                        } else {
+                            chunk.clear_all_block_entities();
+                            ClearedBlockEntities::default()
+                        }
+                    },
+                )
             } else {
                 ClearedBlockEntities::default()
             };
@@ -250,7 +263,7 @@ impl ChunkMap {
                 let force = world.entity_manager().has_save_pending_for_chunk(chunk_pos);
                 let dirty = chunk.take_dirty();
                 let prepared = if dirty || force {
-                    ChunkStorage::prepare_chunk_save(&chunk, status, &runtime_entities, true)
+                    ChunkStorage::prepare_chunk_save(chunk, status, &runtime_entities, true)
                 } else {
                     None
                 };
