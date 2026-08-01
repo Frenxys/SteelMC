@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn committed_move_updates_spatial_index_within_the_same_section() {
+    let manager = WorldEntityManager::new();
+    load_chunk(&manager, ChunkPos::new(0, 0));
+
+    let entity = entity(1, 1, DVec3::new(1.0, 64.0, 1.0));
+    assert!(
+        manager
+            .add_live_entity(Arc::clone(&entity), EntityOwnership::ManagerOwned)
+            .is_ok()
+    );
+
+    let old_bounds = entity.bounding_box();
+    let new_position = DVec3::new(13.0, 64.0, 1.0);
+    entity.base().set_position_local(new_position);
+    let update = match manager.commit_move(entity.id(), new_position) {
+        Ok(update) => update,
+        Err(error) => panic!("same-section move should commit: {error}"),
+    };
+
+    assert!(!update.section_changed());
+    assert!(manager.get_entities_in_aabb(&old_bounds).is_empty());
+    let moved = manager.get_entities_in_aabb(&entity.bounding_box());
+    assert_eq!(moved.len(), 1);
+    assert!(Arc::ptr_eq(&moved[0], &entity));
+}
+
+#[test]
 fn committed_move_updates_chunk_index_for_loaded_destination() {
     let manager = WorldEntityManager::new();
     load_chunk(&manager, ChunkPos::new(0, 0));
