@@ -1,3 +1,5 @@
+use std::thread;
+
 use super::*;
 
 #[test]
@@ -337,7 +339,7 @@ fn delayed_bounding_box_callback_cannot_restore_stale_bounds() {
     let stale_bounds = WorldAabb::new(4.0, 64.0, 0.0, 5.0, 65.0, 1.0);
     let current_bounds = WorldAabb::new(8.0, 64.0, 0.0, 9.0, 65.0, 1.0);
     let first_entity = Arc::clone(&entity);
-    let first_update = std::thread::spawn(move || {
+    let first_update = thread::spawn(move || {
         first_entity.base().set_bounding_box(stale_bounds);
     });
 
