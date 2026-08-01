@@ -304,10 +304,50 @@ fn bounding_box_change_updates_spatial_index_without_position_change() {
 
     let new_bounds = WorldAabb::new(8.0, 64.0, 0.0, 9.0, 65.0, 1.0);
     entity.base().set_bounding_box(new_bounds);
-    manager.commit_bounding_box_change(entity.id(), new_bounds);
+    manager.commit_bounding_box_change(entity.id());
 
     assert!(manager.get_entities_in_aabb(&old_bounds).is_empty());
     let moved_bounds = manager.get_entities_in_aabb(&new_bounds);
     assert_eq!(moved_bounds.len(), 1);
     assert!(Arc::ptr_eq(&moved_bounds[0], &entity));
+}
+
+#[test]
+fn delayed_bounding_box_callback_cannot_restore_stale_bounds() {
+    let manager = Arc::new(WorldEntityManager::new());
+    load_chunk(&manager, ChunkPos::new(0, 0));
+
+    let entity = entity(1, 1, DVec3::new(1.0, 64.0, 1.0));
+    assert!(
+        manager
+            .add_live_entity(Arc::clone(&entity), EntityOwnership::ManagerOwned)
+            .is_ok()
+    );
+
+    let first_callback_entered = Arc::new(Barrier::new(2));
+    let release_first_callback = Arc::new(Barrier::new(2));
+    entity.set_level_callback(Arc::new(DelayedFirstBoundsCallback {
+        entity_id: entity.id(),
+        manager: Arc::clone(&manager),
+        first_callback_entered: Arc::clone(&first_callback_entered),
+        release_first_callback: Arc::clone(&release_first_callback),
+        callback_count: AtomicUsize::new(0),
+    }));
+
+    let stale_bounds = WorldAabb::new(4.0, 64.0, 0.0, 5.0, 65.0, 1.0);
+    let current_bounds = WorldAabb::new(8.0, 64.0, 0.0, 9.0, 65.0, 1.0);
+    let first_entity = Arc::clone(&entity);
+    let first_update = std::thread::spawn(move || {
+        first_entity.base().set_bounding_box(stale_bounds);
+    });
+
+    first_callback_entered.wait();
+    entity.base().set_bounding_box(current_bounds);
+    release_first_callback.wait();
+    assert!(first_update.join().is_ok());
+
+    assert!(manager.get_entities_in_aabb(&stale_bounds).is_empty());
+    let current = manager.get_entities_in_aabb(&current_bounds);
+    assert_eq!(current.len(), 1);
+    assert!(Arc::ptr_eq(&current[0], &entity));
 }

@@ -182,11 +182,11 @@ impl EntityLevelCallback for PlayerEntityCallback {
         Ok(())
     }
 
-    fn on_bounding_box_changed(&self, bounding_box: WorldAabb) {
+    fn on_bounding_box_changed(&self, _bounding_box: WorldAabb) {
         if let Some(world) = self.world.upgrade() {
             world
                 .entity_manager()
-                .commit_bounding_box_change(self.entity_id, bounding_box);
+                .commit_bounding_box_change(self.entity_id);
         }
     }
 
@@ -267,11 +267,11 @@ impl EntityLevelCallback for EntityChunkCallback {
         Ok(())
     }
 
-    fn on_bounding_box_changed(&self, bounding_box: WorldAabb) {
+    fn on_bounding_box_changed(&self, _bounding_box: WorldAabb) {
         if let Some(world) = self.world.upgrade() {
             world
                 .entity_manager()
-                .commit_bounding_box_change(self.entity_id, bounding_box);
+                .commit_bounding_box_change(self.entity_id);
         }
     }
 

@@ -65,6 +65,7 @@ impl World {
     pub(super) fn attach_managed_entity_callback(self: &Arc<Self>, entity: &SharedEntity) {
         let callback = Arc::new(EntityChunkCallback::new(entity.id(), Arc::downgrade(self)));
         entity.set_level_callback(callback);
+        self.entity_manager.commit_bounding_box_change(entity.id());
     }
 
     pub(crate) fn add_entity_to_tracker(self: &Arc<Self>, entity: &SharedEntity) {

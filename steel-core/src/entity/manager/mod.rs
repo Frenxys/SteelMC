@@ -1052,12 +1052,16 @@ impl WorldEntityManager {
     }
 
     /// Commits a live entity bounding-box change to the spatial query index.
-    pub fn commit_bounding_box_change(&self, entity_id: i32, bounding_box: WorldAabb) {
-        let new_spatial_cells = EntitySpatialCellBounds::from_aabb(&bounding_box).cells();
+    ///
+    /// Reads the current bounds after acquiring the manager lock so concurrent
+    /// callbacks may complete in either order without restoring stale bounds.
+    pub fn commit_bounding_box_change(&self, entity_id: i32) {
         let mut state = self.state.write();
         let Some(current) = state.live_by_id.get(&entity_id) else {
             return;
         };
+        let bounding_box = current.entity.bounding_box();
+        let new_spatial_cells = EntitySpatialCellBounds::from_aabb(&bounding_box).cells();
         let query_order = current.query_order();
 
         if current.spatial_cells == new_spatial_cells {
@@ -1674,6 +1678,8 @@ impl WorldEntityManager {
 
     fn insert_live_entry(state: &mut ManagerState, mut entry: EntityEntry) {
         let entity_id = entry.entity.id();
+        entry.bounding_box = entry.entity.bounding_box();
+        entry.spatial_cells = EntitySpatialCellBounds::from_aabb(&entry.bounding_box).cells();
         let is_accessible = Self::is_accessible_at(state, entry.ownership, entry.chunk);
         assert!(
             !state.live_by_id.contains_key(&entity_id),
