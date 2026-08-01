@@ -57,6 +57,10 @@ impl ChunkStorage {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeps complete chunk payload validation in one ordered pass"
+    )]
     fn validate_persistent_chunk(
         persistent: &PersistentChunk<'_>,
         status: ChunkStatus,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::chunk::Chunk;
 
 mod neighbor_updater;
 
@@ -661,6 +662,6 @@ impl World {
     /// Called when entities move, are added/removed, or when block entities change.
     pub fn mark_chunk_dirty(&self, chunk_pos: ChunkPos) {
         self.chunk_map
-            .with_chunk_at_status(chunk_pos, ChunkStatus::Empty, |chunk| chunk.mark_dirty());
+            .with_chunk_at_status(chunk_pos, ChunkStatus::Empty, Chunk::mark_dirty);
     }
 }

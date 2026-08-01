@@ -765,7 +765,6 @@ impl<N: VanillaPostNoiseStateType> ChunkGenerator for VanillaGenerator<N> {
         }
     }
 
-    #[expect(clippy::too_many_lines, reason = "matches vanilla carver setup flow")]
     fn apply_carvers(&self, chunk: GenerationChunk<'_, CarversPhase>) {
         if self
             .uniform_carver_biome
@@ -1249,6 +1248,7 @@ mod tests {
         heightmap::HeightmapType,
         section::{ChunkSection, Sections},
     };
+    use crate::worldgen::carving_mask::CarvingMask;
     use crate::worldgen::generator::{
         CarversPhase, ChunkGenerator as _, GenerationChunk, NoisePhase, SurfacePhase,
         context::OverworldGenerator,
@@ -1343,11 +1343,11 @@ mod tests {
             warm.carving_mask
                 .read()
                 .as_ref()
-                .map(|mask| mask.to_packed_u64s()),
+                .map(CarvingMask::to_packed_u64s),
             cold.carving_mask
                 .read()
                 .as_ref()
-                .map(|mask| mask.to_packed_u64s())
+                .map(CarvingMask::to_packed_u64s)
         );
         assert_eq!(&*warm.postprocessing.lock(), &*cold.postprocessing.lock());
         for x in 0..16 {

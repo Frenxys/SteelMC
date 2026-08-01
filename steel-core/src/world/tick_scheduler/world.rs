@@ -94,7 +94,7 @@ impl World {
 
     pub(crate) fn register_full_chunk_ticks(
         &self,
-        chunk: &FullChunkRef<'_>,
+        chunk: FullChunkRef<'_>,
     ) -> Result<(), super::TickSchedulerError> {
         self.scheduled_ticks.register_chunk(chunk)
     }
@@ -115,7 +115,7 @@ impl World {
 
     pub(crate) fn schedule_block_tick_for_chunk(
         &self,
-        chunk: &FullChunkRef<'_>,
+        chunk: FullChunkRef<'_>,
         pos: BlockPos,
         block: BlockRef,
         trigger_tick: i64,
@@ -134,7 +134,7 @@ impl World {
 
     pub(crate) fn schedule_fluid_tick_for_chunk(
         &self,
-        chunk: &FullChunkRef<'_>,
+        chunk: FullChunkRef<'_>,
         pos: BlockPos,
         fluid: FluidRef,
         trigger_tick: i64,

@@ -129,6 +129,10 @@ impl GenerationChunk<'_, NoisePhase> {
     }
 
     /// Replaces the two heightmaps initialized directly by terrain noise filling.
+    ///
+    /// # Panics
+    ///
+    /// Panics if either heightmap has a type other than its corresponding noise-stage type.
     pub fn replace_noise_heightmaps(self, ocean_floor: Heightmap, world_surface: Heightmap) {
         assert_eq!(ocean_floor.heightmap_type(), HeightmapType::OceanFloorWg);
         assert_eq!(

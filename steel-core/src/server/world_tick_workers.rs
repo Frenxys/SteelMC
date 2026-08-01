@@ -127,6 +127,8 @@ impl WorldTickWorkers {
 
 #[cfg(test)]
 mod tests {
+    use futures::executor::block_on;
+
     use super::WorldTickWorkers;
     use crate::test_support::fresh_test_world;
 
@@ -138,14 +140,14 @@ mod tests {
             panic!("world tick workers should start");
         };
 
-        let Ok(first_tick) = futures::executor::block_on(workers.tick_all(1, true)) else {
+        let Ok(first_tick) = block_on(workers.tick_all(1, true)) else {
             panic!("world tick workers should finish the first tick");
         };
         assert_eq!(first_tick.len(), 2);
         assert_eq!(first.game_time(), 1);
         assert_eq!(second.game_time(), 1);
 
-        let Ok(second_tick) = futures::executor::block_on(workers.tick_all(2, true)) else {
+        let Ok(second_tick) = block_on(workers.tick_all(2, true)) else {
             panic!("world tick workers should finish the second tick");
         };
         assert_eq!(second_tick.len(), 2);

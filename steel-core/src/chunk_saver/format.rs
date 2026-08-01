@@ -237,7 +237,6 @@ impl RegionHeader {
     ///
     /// # Panics
     /// Panics if bytes length is not exactly `CHUNK_TABLE_SIZE`.
-    #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, usize> {
         assert_eq!(bytes.len(), CHUNK_TABLE_SIZE);
         let mut entries = Box::new([ChunkEntry::default(); CHUNKS_PER_REGION]);

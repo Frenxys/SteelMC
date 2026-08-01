@@ -98,7 +98,7 @@ fn advance_until_revision(chunk_map: &Arc<ChunkMap>, revision: ChunkTicketRevisi
     panic!("chunk ticket revision did not commit");
 }
 
-fn add_test_comparator(full: &FullChunkRef<'_>, pos: BlockPos) -> SharedBlockEntity {
+fn add_test_comparator(full: FullChunkRef<'_>, pos: BlockPos) -> SharedBlockEntity {
     let Ok(relative_y) = usize::try_from(pos.y() - full.min_y()) else {
         panic!("test comparator position must be inside the chunk height");
     };
@@ -115,7 +115,7 @@ fn add_test_comparator(full: &FullChunkRef<'_>, pos: BlockPos) -> SharedBlockEnt
     block_entity
 }
 
-fn add_test_sign(full: &FullChunkRef<'_>, pos: BlockPos) -> SharedBlockEntity {
+fn add_test_sign(full: FullChunkRef<'_>, pos: BlockPos) -> SharedBlockEntity {
     let Ok(relative_y) = usize::try_from(pos.y() - full.min_y()) else {
         panic!("test sign position must be inside the chunk height");
     };

@@ -115,6 +115,7 @@ impl<N: DimensionNoises> CarvingContext<'_, N> {
     /// carver-specific variant). Vanilla hardcodes
     /// `stone_depth_above = stone_depth_below = 1` here, and the water height
     /// depends on whether the carved block was replaced with a fluid.
+    #[must_use]
     pub fn top_material(
         &self,
         biome_id: u16,

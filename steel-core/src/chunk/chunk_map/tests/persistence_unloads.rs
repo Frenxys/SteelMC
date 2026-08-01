@@ -111,9 +111,9 @@ fn final_full_chunk_unload_finalizes_chunk_owned_tick_queues() {
         panic!("inserted test chunk must remain Full");
     };
     let block_entity_pos = BlockPos::new(1, 64, 1);
-    let block_entity = add_test_comparator(&chunk, block_entity_pos);
+    let block_entity = add_test_comparator(chunk, block_entity_pos);
     let sign_pos = BlockPos::new(2, 64, 1);
-    let sign = add_test_sign(&chunk, sign_pos);
+    let sign = add_test_sign(chunk, sign_pos);
     chunk.schedule_block_tick(
         BlockPos::new(3, 64, 1),
         &vanilla_blocks::STONE,
@@ -156,7 +156,7 @@ fn unloading_full_chunk_revival_keeps_chunk_owned_tick_queues() {
     let Some(chunk) = original.try_full_chunk() else {
         panic!("inserted test chunk must remain Full");
     };
-    let block_entity = add_test_comparator(&chunk, block_pos);
+    let block_entity = add_test_comparator(chunk, block_pos);
 
     world.chunk_map.update_chunk_level(chunk_pos, None, None);
     assert!(world.has_registered_full_chunk_ticks(chunk_pos));
@@ -204,7 +204,7 @@ fn weak_revival_stays_dormant_until_the_same_holder_returns_to_full() {
     let Some(chunk) = revived.try_full_chunk() else {
         panic!("weak revival should preserve the serialized Full chunk");
     };
-    let _sign = add_test_sign(&chunk, sign_pos);
+    let _sign = add_test_sign(chunk, sign_pos);
     assert_eq!(world.block_entity_tickers().registered_len(), 0);
 
     insert_active_full_holder(

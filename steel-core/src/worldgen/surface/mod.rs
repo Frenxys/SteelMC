@@ -429,6 +429,7 @@ impl SurfaceSystem {
         clippy::too_many_arguments,
         reason = "matches vanilla SurfaceSystem.erodedBadlandsExtension signature"
     )]
+    #[must_use]
     pub fn eroded_badlands_extension(
         &self,
         chunk: GenerationChunk<'_, SurfacePhase>,

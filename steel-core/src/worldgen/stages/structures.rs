@@ -22,7 +22,7 @@ pub(crate) fn generate_starts(
         .try_chunk(ChunkStatus::Empty)
         .expect("Chunk not found at status Empty");
 
-    context.generator.create_structures(&chunk);
+    context.generator.create_structures(chunk);
 }
 
 /// Collects structure references from surrounding chunks' starts.

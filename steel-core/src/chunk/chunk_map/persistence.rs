@@ -1,5 +1,5 @@
 use super::{
-    Arc, ChunkHolder, ChunkMap, ChunkPos, ChunkSaveDependency, ChunkStatus, ChunkStorage,
+    Arc, Chunk, ChunkHolder, ChunkMap, ChunkPos, ChunkSaveDependency, ChunkStatus, ChunkStorage,
     ClearedBlockEntities, FinalizedBlockEntityUnload, FxHashSet, instrument, io, mem,
 };
 use crate::chunk_saver::PreparedChunkSave;
@@ -146,7 +146,7 @@ impl ChunkMap {
 
                 let is_dirty = holder
                     .try_chunk(ChunkStatus::StructureStarts)
-                    .is_some_and(|chunk| chunk.is_dirty());
+                    .is_some_and(Chunk::is_dirty);
                 let has_save_pending_entities = self
                     .world_gen_context
                     .world()

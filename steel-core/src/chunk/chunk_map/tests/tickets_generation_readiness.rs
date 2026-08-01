@@ -507,7 +507,7 @@ fn full_load_activation_uses_packed_chunk_position_order() {
     let Some(second) = second.try_full_chunk() else {
         panic!("inserted second chunk should remain Full");
     };
-    add_test_sign(&second, second_sign);
+    add_test_sign(second, second_sign);
 
     let first = insert_active_full_holder(
         &world,
@@ -518,7 +518,7 @@ fn full_load_activation_uses_packed_chunk_position_order() {
     let Some(first) = first.try_full_chunk() else {
         panic!("inserted first chunk should remain Full");
     };
-    add_test_sign(&first, first_sign);
+    add_test_sign(first, first_sign);
 
     world
         .chunk_map

@@ -189,10 +189,7 @@ impl WorldTickScheduler {
     }
 
     /// Registers an unpublished Full chunk's stable queues with the world index.
-    pub(crate) fn register_chunk(
-        &self,
-        chunk: &FullChunkRef<'_>,
-    ) -> Result<(), TickSchedulerError> {
+    pub(crate) fn register_chunk(&self, chunk: FullChunkRef<'_>) -> Result<(), TickSchedulerError> {
         let _phase = self.phase.read();
         let container = chunk.scheduled_tick_container();
         let mut container_state = container.state.lock();
@@ -366,7 +363,7 @@ impl WorldTickScheduler {
 
     pub(crate) fn schedule_block(
         &self,
-        chunk: &FullChunkRef<'_>,
+        chunk: FullChunkRef<'_>,
         block: BlockRef,
         pos: BlockPos,
         trigger_tick: i64,
@@ -424,7 +421,7 @@ impl WorldTickScheduler {
 
     pub(crate) fn schedule_fluid(
         &self,
-        chunk: &FullChunkRef<'_>,
+        chunk: FullChunkRef<'_>,
         fluid: FluidRef,
         pos: BlockPos,
         trigger_tick: i64,

@@ -10,6 +10,7 @@ use std::{
     time::Instant,
 };
 
+use parking_lot::{RwLockReadGuard, RwLockWriteGuard};
 use simdnbt::owned::NbtCompound;
 use steel_registry::{
     REGISTRY, block_entity_type::BlockEntityTypeRef, blocks::BlockRef,
@@ -20,6 +21,7 @@ use steel_utils::random::RandomSource;
 use steel_utils::{
     BlockPos, BlockStateId, ChunkPos, PackedSectionBlockPos, SectionPos, types::UpdateFlags,
 };
+use steel_worldgen::structure::{StructureReferenceMap, StructureStartMap};
 
 use crate::behavior::{BLOCK_BEHAVIORS, FLUID_BEHAVIORS};
 use crate::block_entity::{BLOCK_ENTITIES, SharedBlockEntity};
@@ -30,7 +32,7 @@ use crate::chunk::{
     chunk_pyramid::ChunkStep,
     full_chunk::FullChunkRef,
     heightmap::{Heightmap, HeightmapType},
-    section::{ChunkSection, SectionHolder, SectionWriteGuard},
+    section::{ChunkSection, SectionHolder, SectionWriteGuard, Sections},
     status::ChunkStatus,
 };
 use crate::entity::SharedEntity;
@@ -98,19 +100,15 @@ impl WorldGenChunkRef<'_> {
     }
 
     #[must_use]
-    pub(crate) const fn sections(&self) -> &crate::chunk::section::Sections {
+    pub(crate) const fn sections(&self) -> &Sections {
         self.chunk.sections()
     }
 
-    pub(crate) fn structure_starts_mut(
-        &self,
-    ) -> parking_lot::RwLockWriteGuard<'_, steel_worldgen::structure::StructureStartMap> {
+    pub(crate) fn structure_starts_mut(&self) -> RwLockWriteGuard<'_, StructureStartMap> {
         self.chunk.structure_starts_mut()
     }
 
-    pub(crate) fn structure_references(
-        &self,
-    ) -> parking_lot::RwLockReadGuard<'_, steel_worldgen::structure::StructureReferenceMap> {
+    pub(crate) fn structure_references(&self) -> RwLockReadGuard<'_, StructureReferenceMap> {
         self.chunk.structure_references()
     }
 
@@ -731,7 +729,7 @@ impl<'a> WorldGenRegion<'a> {
 
     fn cached_proto_height_at(
         &self,
-        proto: &crate::chunk::Chunk,
+        proto: &Chunk,
         heightmap_type: HeightmapType,
         chunk_x: i32,
         chunk_z: i32,
@@ -772,10 +770,7 @@ impl<'a> WorldGenRegion<'a> {
         height
     }
 
-    fn proto_heightmap_columns(
-        proto: &crate::chunk::Chunk,
-        heightmap_type: HeightmapType,
-    ) -> Box<[i32; 256]> {
+    fn proto_heightmap_columns(proto: &Chunk, heightmap_type: HeightmapType) -> Box<[i32; 256]> {
         {
             let heightmaps = proto.heightmaps.read();
             if let Some(heightmap) = heightmaps.get(heightmap_type) {
@@ -1169,7 +1164,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
     fn section_for_read<'chunk>(
         chunk: &'chunk CachedWorldGenChunk<'_>,
         section_index: usize,
-    ) -> Option<&'chunk crate::chunk::section::SectionHolder> {
+    ) -> Option<&'chunk SectionHolder> {
         if !chunk.access_mode.allows_writes() {
             return None;
         }

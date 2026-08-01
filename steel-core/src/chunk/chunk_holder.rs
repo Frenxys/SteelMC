@@ -1309,7 +1309,7 @@ impl ChunkHolder {
             // loaded/generated chunks always carry the WorldGenContext world.
             return;
         };
-        if let Err(error) = world.register_full_chunk_ticks(&full) {
+        if let Err(error) = world.register_full_chunk_ticks(full) {
             panic!("Full chunk scheduled-tick registration invariant failed: {error:?}");
         }
     }
@@ -1607,7 +1607,7 @@ mod tests {
         assert!(
             holder
                 .try_chunk(ChunkStatus::Full)
-                .is_some_and(|chunk| chunk.is_dirty()),
+                .is_some_and(Chunk::is_dirty),
             "pre-readiness light changes must still be persisted"
         );
 

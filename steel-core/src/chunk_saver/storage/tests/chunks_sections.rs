@@ -31,16 +31,15 @@ fn unknown_referenced_block_state_is_corruption_instead_of_air_recovery() {
     };
     block_state.name = Identifier::new_static("steel_test", "missing_block");
 
-    let error = match ChunkStorage::try_persistent_to_chunk(
+    let Err(error) = ChunkStorage::try_persistent_to_chunk(
         &prepared.persistent,
         pos,
         ChunkStatus::Empty,
         0,
         16,
         Weak::new(),
-    ) {
-        Ok(_) => panic!("unknown referenced block state must reject the complete payload"),
-        Err(error) => error,
+    ) else {
+        panic!("unknown referenced block state must reject the complete payload");
     };
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }
@@ -61,16 +60,15 @@ fn unknown_referenced_biome_is_corruption_instead_of_plains_recovery() {
     };
     *biome = Identifier::new_static("steel_test", "missing_biome");
 
-    let error = match ChunkStorage::try_persistent_to_chunk(
+    let Err(error) = ChunkStorage::try_persistent_to_chunk(
         &prepared.persistent,
         pos,
         ChunkStatus::Empty,
         0,
         16,
         Weak::new(),
-    ) {
-        Ok(_) => panic!("unknown referenced biome must reject the complete payload"),
-        Err(error) => error,
+    ) else {
+        panic!("unknown referenced biome must reject the complete payload");
     };
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 }

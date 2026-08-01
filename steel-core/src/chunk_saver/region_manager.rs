@@ -5,6 +5,7 @@
 //! format, avoiding memory duplication.
 
 use std::{
+    fmt,
     io::{self},
     path::PathBuf,
     sync::Weak,
@@ -32,8 +33,8 @@ use super::{
 #[derive(Debug)]
 struct CorruptChunkData(String);
 
-impl std::fmt::Display for CorruptChunkData {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for CorruptChunkData {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
 }
@@ -681,7 +682,9 @@ impl RegionManager {
 #[cfg(test)]
 mod tests {
     use std::{
+        env,
         path::Path,
+        process,
         sync::{
             Weak,
             atomic::{AtomicU64, Ordering},
@@ -695,9 +698,9 @@ mod tests {
 
     fn test_directory(name: &str) -> PathBuf {
         let sequence = NEXT_TEST_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
+        env::temp_dir().join(format!(
             "steel-region-manager-{name}-{}-{sequence}",
-            std::process::id()
+            process::id()
         ))
     }
 
@@ -870,12 +873,11 @@ mod tests {
                 .await
                 .expect("region should open")
         );
-        let error = match manager
+        let Err(error) = manager
             .load_chunk(pos, 0, 16, Weak::new(), &test_thread_pool())
             .await
-        {
-            Ok(_) => panic!("short filesystem read must not be treated as payload corruption"),
-            Err(error) => error,
+        else {
+            panic!("short filesystem read must not be treated as payload corruption");
         };
         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
         assert!(manager.chunk_exists(pos).await.expect("slot should remain"));
@@ -905,12 +907,11 @@ mod tests {
                 .await
                 .expect("region should open")
         );
-        let error = match manager
+        let Err(error) = manager
             .load_chunk(pos, 1, 16, Weak::new(), &test_thread_pool())
             .await
-        {
-            Ok(_) => panic!("invalid world geometry must fail before decoding the chunk"),
-            Err(error) => error,
+        else {
+            panic!("invalid world geometry must fail before decoding the chunk");
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         assert!(manager.chunk_exists(pos).await.expect("slot should remain"));
@@ -950,9 +951,8 @@ mod tests {
         drop(file);
 
         let manager = RegionManager::new(&directory);
-        let error = match manager.acquire_chunk(pos).await {
-            Ok(_) => panic!("invalid status byte must reject the region header"),
-            Err(error) => error,
+        let Err(error) = manager.acquire_chunk(pos).await else {
+            panic!("invalid status byte must reject the region header");
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 

@@ -17,5 +17,5 @@ pub(crate) fn generate(
         .try_chunk(ChunkStatus::StructureReferences)
         .expect("Chunk not found at status StructureReferences");
 
-    context.generator.create_biomes(&chunk);
+    context.generator.create_biomes(chunk);
 }

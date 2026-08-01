@@ -158,6 +158,10 @@ impl BlockRandomPositionGenerator {
     }
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "FullChunkRef is a borrowed capability with a conventional shared-receiver API"
+)]
 impl FullChunkRef<'_> {
     pub(crate) const fn from_full_context(chunk: &Chunk) -> FullChunkRef<'_> {
         FullChunkRef { chunk }
@@ -246,9 +250,10 @@ impl FullChunkRef<'_> {
 impl Chunk {
     fn initialize_full_runtime_state(&self, listener_count: Arc<GameEventListenerCount>) {
         let runtime = FullChunkRuntime::new(listener_count);
-        if self.initialize_full_runtime(runtime).is_err() {
-            panic!("Full chunk runtime was initialized more than once");
-        }
+        assert!(
+            self.initialize_full_runtime(runtime).is_ok(),
+            "Full chunk runtime was initialized more than once"
+        );
     }
 
     /// Promotes this chunk to Full status and initializes its runtime state.
@@ -292,9 +297,10 @@ impl Chunk {
         // Vanilla keeps proto ticks pending through Full promotion. Retaining
         // the same container also makes the promotion linearizable with any
         // concurrent scheduling against the chunk.
-        if !proto_chunk.scheduled_tick_container().promote_to_full() {
-            panic!("Proto chunk scheduled-tick container was already promoted");
-        }
+        assert!(
+            proto_chunk.scheduled_tick_container().promote_to_full(),
+            "Proto chunk scheduled-tick container was already promoted"
+        );
         let pending_entities = proto_chunk.entities.close_and_drain();
         if let Err(error) = proto_chunk
             .light
@@ -397,6 +403,10 @@ impl Chunk {
     }
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "FullChunkRef is a borrowed capability with a conventional shared-receiver API"
+)]
 impl FullChunkRef<'_> {
     /// Revalidates proto block entities while retaining the same storage instance.
     fn adopt_proto_block_entities(&self) {
@@ -448,7 +458,7 @@ impl FullChunkRef<'_> {
                 });
 
                 match adoption {
-                    ProtoBlockEntityAdoption::Retry => continue,
+                    ProtoBlockEntityAdoption::Retry => {}
                     ProtoBlockEntityAdoption::Gone => break,
                     ProtoBlockEntityAdoption::Discarded => {
                         log::warn!(
@@ -803,7 +813,7 @@ impl FullChunkRef<'_> {
     ) {
         let result = if let Some(world) = self.get_level() {
             world.schedule_block_tick_for_chunk(
-                self,
+                *self,
                 pos,
                 block,
                 trigger_tick,
@@ -838,7 +848,7 @@ impl FullChunkRef<'_> {
     ) {
         let result = if let Some(world) = self.get_level() {
             world.schedule_fluid_tick_for_chunk(
-                self,
+                *self,
                 pos,
                 fluid,
                 trigger_tick,
@@ -1298,6 +1308,7 @@ impl FullChunkRef<'_> {
     /// Removes a block entity at the given position.
     ///
     /// Marks the entity as removed and unbinds its world ticker.
+    #[must_use]
     pub fn remove_block_entity(&self, pos: BlockPos) -> bool {
         let (removed, lifecycle_dispatchers) = self.chunk.block_entity_storage().remove_staged(pos);
         self.finish_block_entity_change(pos, lifecycle_dispatchers);

@@ -3,7 +3,7 @@
 //! Full chunks do not own or tick entities. `EntityStorage` only keeps entities
 //! staged in proto chunks until promotion hands them to `WorldEntityManager`.
 
-use std::{collections::hash_map::Entry, fmt};
+use std::{collections::hash_map::Entry, fmt, mem};
 
 use rustc_hash::FxHashMap;
 use steel_utils::locks::SyncRwLock;
@@ -58,7 +58,7 @@ impl EntityStorage {
 
     /// Creates empty storage that has already crossed the Full promotion boundary.
     #[must_use]
-    pub(crate) fn new_closed() -> Self {
+    pub(crate) const fn new_closed() -> Self {
         Self {
             state: SyncRwLock::new(EntityStorageState::Closed),
         }
@@ -93,7 +93,7 @@ impl EntityStorage {
     pub(crate) fn close_and_drain(&self) -> Vec<SharedEntity> {
         let mut state = self.state.write();
         let EntityStorageState::Open(entities) =
-            std::mem::replace(&mut *state, EntityStorageState::Closed)
+            mem::replace(&mut *state, EntityStorageState::Closed)
         else {
             return Vec::new();
         };

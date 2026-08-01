@@ -151,7 +151,7 @@ fn full_chunk_save_snapshots_chunk_owned_scheduled_ticks() {
     let Some(chunk) = holder.try_chunk(ChunkStatus::Full) else {
         panic!("inserted test chunk must remain Full");
     };
-    let Some(prepared) = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Full, &[], true)
+    let Some(prepared) = ChunkStorage::prepare_chunk_save(chunk, ChunkStatus::Full, &[], true)
     else {
         panic!("forced Full-chunk save must produce a snapshot");
     };
