@@ -71,8 +71,8 @@ pub(crate) struct WorldGenBulkSectionAccess<'region, 'world, 'profile> {
 }
 
 struct CachedWorldGenChunk<'region> {
+    holder: &'region ChunkHolder,
     chunk: &'region Chunk,
-    published_status: ChunkStatus,
     verified_status: ChunkStatus,
     access_mode: WorldGenAccessMode,
 }
@@ -84,12 +84,19 @@ struct CachedWorldGenChunk<'region> {
 /// writable, and a newly acquired Full view behaves like `ImposterProtoChunk(false)`.
 #[derive(Clone, Copy)]
 pub(crate) struct WorldGenChunkRef<'a> {
+    holder: &'a ChunkHolder,
     chunk: &'a Chunk,
-    published_status: ChunkStatus,
     access_mode: WorldGenAccessMode,
 }
 
 impl WorldGenChunkRef<'_> {
+    fn published_status(self) -> ChunkStatus {
+        let Some(status) = self.holder.published_status() else {
+            panic!("worldgen chunk data cannot lose its published status");
+        };
+        status
+    }
+
     #[must_use]
     pub(crate) const fn sections(&self) -> &crate::chunk::section::Sections {
         self.chunk.sections()
@@ -332,8 +339,8 @@ impl<'a> WorldGenRegion<'a> {
         let chunk = holder.try_chunk(available_status)?;
         let published_status = holder.published_status()?;
         Some(WorldGenChunkRef {
+            holder,
             chunk,
-            published_status,
             access_mode: WorldGenAccessMode::capture(published_status),
         })
     }
@@ -391,7 +398,7 @@ impl<'a> WorldGenRegion<'a> {
             } else {
                 *slot = Some(CachedWorldGenChunk {
                     access_mode: chunk.access_mode,
-                    published_status: chunk.published_status,
+                    holder: chunk.holder,
                     chunk: chunk.chunk,
                     verified_status: status,
                 });
@@ -403,8 +410,8 @@ impl<'a> WorldGenRegion<'a> {
             panic!("Worldgen region cache failed to store chunk ({chunk_x}, {chunk_z})");
         };
         f(WorldGenChunkRef {
+            holder: cached.holder,
             chunk: cached.chunk,
-            published_status: cached.published_status,
             access_mode: cached.access_mode,
         })
     }
@@ -508,7 +515,7 @@ impl<'a> WorldGenRegion<'a> {
                 return false;
             }
             let old_state = chunk.chunk.set_block_state_for_generation(
-                chunk.published_status,
+                chunk.published_status(),
                 pos,
                 state,
                 flags,
@@ -985,7 +992,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
         };
 
         let old_state = Self::set_bulk_block_state(
-            chunk.published_status,
+            chunk.holder,
             &mut section_guard,
             local_x,
             local_y,
@@ -1056,7 +1063,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
                 let old_state = section_guard.states.get(local_x, local_y, local_z);
                 if let Some(state) = replacement(old_state) {
                     let old_state = Self::set_bulk_block_state(
-                        chunk.published_status,
+                        chunk.holder,
                         &mut section_guard,
                         local_x,
                         local_y,
@@ -1076,7 +1083,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
                 let old_state = section_guard.states.get(local_x, local_y, local_z);
                 if let Some(state) = replacement(old_state) {
                     let old_state = Self::set_bulk_block_state(
-                        chunk.published_status,
+                        chunk.holder,
                         &mut section_guard,
                         local_x,
                         local_y,
@@ -1201,7 +1208,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
 
         let mut section_guard = Self::ore_section_write_guard(ore_profile, section, key);
         let old_state = Self::set_bulk_block_state(
-            chunk.published_status,
+            chunk.holder,
             &mut section_guard,
             Self::local_coord(pos.x()),
             Self::local_coord(pos.y()),
@@ -1232,13 +1239,16 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
     }
 
     fn set_bulk_block_state(
-        status: ChunkStatus,
+        holder: &ChunkHolder,
         section: &mut ChunkSection,
         local_x: usize,
         local_y: usize,
         local_z: usize,
         state: BlockStateId,
     ) -> BlockStateId {
+        let Some(status) = holder.published_status() else {
+            panic!("worldgen chunk data cannot lose its published status");
+        };
         if status < ChunkStatus::InitializeLight {
             return section.set_block_state_for_generation(local_x, local_y, local_z, state);
         }
@@ -1305,7 +1315,7 @@ impl<'region, 'world, 'profile> WorldGenBulkSectionAccess<'region, 'world, 'prof
             };
             *slot = Some(CachedWorldGenChunk {
                 access_mode: chunk.access_mode,
-                published_status: chunk.published_status,
+                holder: chunk.holder,
                 chunk: chunk.chunk,
                 verified_status: status,
             });
@@ -1484,14 +1494,16 @@ impl LevelAccessor for WorldGenRegion<'_> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Weak;
+    use std::sync::{Arc, Weak};
 
     use steel_registry::{test_support::init_test_registry, vanilla_blocks};
-    use steel_utils::ChunkPos;
+    use steel_utils::{BlockPos, ChunkPos, types::UpdateFlags};
 
     use crate::behavior::init_behaviors;
     use crate::chunk::{
         Chunk,
+        chunk_holder::ChunkHolder,
+        chunk_ticket_manager::ChunkTicketLevel,
         heightmap::{Heightmap, HeightmapType},
         section::{ChunkSection, Sections},
         status::ChunkStatus,
@@ -1501,6 +1513,31 @@ mod tests {
         CachedWorldGenChunk, WorldGenAccessMode, WorldGenBulkSectionAccess, WorldGenChunkRef,
         WorldGenRegion,
     };
+
+    fn test_holder() -> ChunkHolder {
+        ChunkHolder::new(
+            ChunkPos::new(0, 0),
+            ChunkTicketLevel::FULL_CHUNK,
+            Some(ChunkTicketLevel::FULL_CHUNK),
+            0,
+            16,
+        )
+    }
+
+    fn published_holder(status: ChunkStatus) -> Arc<ChunkHolder> {
+        let holder = Arc::new(test_holder());
+        holder.insert_chunk(
+            Chunk::new(
+                Sections::from_owned(vec![ChunkSection::new_empty()].into_boxed_slice()),
+                ChunkPos::new(0, 0),
+                0,
+                16,
+                Weak::new(),
+            ),
+            status,
+        );
+        holder
+    }
 
     #[test]
     fn full_imposter_maps_worldgen_height_queries_to_final_heightmaps() {
@@ -1522,9 +1559,10 @@ mod tests {
             heightmaps.replace(final_map);
         }
         let _ = chunk.promote_to_full();
+        let holder = test_holder();
         let view = WorldGenChunkRef {
+            holder: &holder,
             chunk: &chunk,
-            published_status: ChunkStatus::Full,
             access_mode: WorldGenAccessMode::ReadOnlyFull,
         };
 
@@ -1601,16 +1639,17 @@ mod tests {
             16,
             Weak::new(),
         );
+        let holder = test_holder();
 
         let writable = CachedWorldGenChunk {
+            holder: &holder,
             chunk: &chunk,
-            published_status: ChunkStatus::Empty,
             verified_status: ChunkStatus::Empty,
             access_mode: WorldGenAccessMode::WritableProto,
         };
         let full_imposter = CachedWorldGenChunk {
+            holder: &holder,
             chunk: &chunk,
-            published_status: ChunkStatus::Full,
             verified_status: ChunkStatus::Full,
             access_mode: WorldGenAccessMode::ReadOnlyFull,
         };
@@ -1627,9 +1666,10 @@ mod tests {
         let air = vanilla_blocks::AIR.default_state();
 
         let mut pre_light_section = ChunkSection::new_empty();
+        let pre_light_holder = published_holder(ChunkStatus::Empty);
 
         WorldGenBulkSectionAccess::set_bulk_block_state(
-            ChunkStatus::Empty,
+            &pre_light_holder,
             &mut pre_light_section,
             1,
             2,
@@ -1640,9 +1680,10 @@ mod tests {
         assert_eq!(pre_light_section.non_empty_block_count(), 0);
 
         let mut initialized_section = ChunkSection::new_empty();
+        let initialized_holder = published_holder(ChunkStatus::InitializeLight);
 
         WorldGenBulkSectionAccess::set_bulk_block_state(
-            ChunkStatus::InitializeLight,
+            &initialized_holder,
             &mut initialized_section,
             1,
             2,
@@ -1656,7 +1697,7 @@ mod tests {
         initialized_building_section.set_block_state_for_generation(1, 2, 3, stone);
 
         let old_state = WorldGenBulkSectionAccess::set_bulk_block_state(
-            ChunkStatus::InitializeLight,
+            &initialized_holder,
             &mut initialized_building_section,
             4,
             5,
@@ -1666,5 +1707,39 @@ mod tests {
 
         assert_eq!(old_state, air);
         assert_eq!(initialized_building_section.non_empty_block_count(), 2);
+    }
+
+    #[test]
+    fn cached_worldgen_view_observes_holder_status_advancement() {
+        init_test_registry();
+        init_behaviors();
+        let holder = published_holder(ChunkStatus::Features);
+        let Some(chunk) = holder.try_chunk(ChunkStatus::Features) else {
+            panic!("test chunk was not published");
+        };
+        let view = WorldGenChunkRef {
+            holder: &holder,
+            chunk,
+            access_mode: WorldGenAccessMode::WritableProto,
+        };
+
+        holder.finish_generation_status_for_test(ChunkStatus::InitializeLight);
+
+        let stone = vanilla_blocks::STONE.default_state();
+        let old_state = view.chunk.set_block_state_for_generation(
+            view.published_status(),
+            BlockPos::new(1, 2, 3),
+            stone,
+            UpdateFlags::UPDATE_NONE,
+        );
+        assert!(old_state.is_some());
+        assert_eq!(
+            chunk.sections().sections[0].read().non_empty_block_count(),
+            1
+        );
+
+        let mut section = chunk.sections().sections[0].write();
+        WorldGenBulkSectionAccess::set_bulk_block_state(&holder, &mut section, 4, 5, 6, stone);
+        assert_eq!(section.non_empty_block_count(), 2);
     }
 }

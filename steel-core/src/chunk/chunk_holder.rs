@@ -1243,6 +1243,11 @@ impl ChunkHolder {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn finish_generation_status_for_test(self: &Arc<Self>, status: ChunkStatus) {
+        self.finish_generation_status(status);
+    }
+
     /// Inserts a chunk into the holder with a specific status.
     /// This notifies watchers - use `insert_chunk_no_notify` + separate notification
     /// if calling from a rayon thread to avoid contention.
