@@ -555,6 +555,10 @@ impl ChunkStorage {
     /// Prepares chunk data and its authoritative persisted status for saving.
     /// Call this during the holder's snapshot-preparation phase, then pass the result to
     /// `save_chunk_data` after ending that phase.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `status` does not match whether Full runtime state is initialized.
     #[must_use]
     #[expect(
         clippy::similar_names,
@@ -564,12 +568,17 @@ impl ChunkStorage {
         clippy::too_many_lines,
         reason = "chunk save preparation keeps related serialization setup in one pass"
     )]
-    pub fn prepare_chunk_save(
+    pub(crate) fn prepare_chunk_save(
         chunk: &Chunk,
         status: ChunkStatus,
         runtime_entities: &[SharedEntity],
         force: bool,
     ) -> Option<PreparedChunkSave> {
+        assert_eq!(
+            status == ChunkStatus::Full,
+            chunk.full_runtime().is_some(),
+            "persisted chunk status must match its Full runtime state"
+        );
         if !force && !chunk.is_dirty() {
             return None;
         }

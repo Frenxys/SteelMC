@@ -135,7 +135,7 @@ pub use crate::config::WorldStorageConfig;
 use crate::worldgen::generators::vanilla::fuzzed_biome_at_block;
 use crate::worldgen::{ChunkGenerator, ChunkGeneratorType};
 use block_event::BlockEventQueue;
-pub(crate) use block_region::BlockRegionBounds;
+pub(crate) use block_region::{BlockRegionBounds, MAX_BLOCK_REGION_WORKSET_SLOTS};
 use block_updates::CollectingNeighborUpdater;
 pub use border::WorldBorderError;
 use border::{WorldBorder, WorldBorderSnapshot};

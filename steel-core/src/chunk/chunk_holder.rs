@@ -1251,6 +1251,11 @@ impl ChunkHolder {
     /// Inserts a chunk into the holder with a specific status.
     /// This notifies watchers - use `insert_chunk_no_notify` + separate notification
     /// if calling from a rayon thread to avoid contention.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `status` claims Full without initialized Full runtime state, or if
+    /// initialized Full runtime state is paired with a lower status.
     pub fn insert_chunk(self: &Arc<Self>, chunk: Chunk, status: ChunkStatus) {
         self.store_and_publish_chunk_status(chunk, status);
         if status == ChunkStatus::Full {
@@ -1263,6 +1268,11 @@ impl ChunkHolder {
             self.published_status.load(Ordering::Acquire),
             UNPUBLISHED_STATUS,
             "initial chunk installation cannot replace published data"
+        );
+        assert_eq!(
+            status == ChunkStatus::Full,
+            chunk.full_runtime().is_some(),
+            "initial chunk status must match its Full runtime state"
         );
         assert!(
             self.data.set(chunk).is_ok(),
@@ -1427,6 +1437,13 @@ mod tests {
         };
         assert_eq!(holder.published_status(), Some(ChunkStatus::Light));
         assert!(chunk.full_runtime().is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "initial chunk status must match its Full runtime state")]
+    fn insert_chunk_rejects_full_status_for_proto_data() {
+        init_chunk_test_registry();
+        test_holder().insert_chunk(test_proto_chunk(ChunkStatus::Spawn), ChunkStatus::Full);
     }
 
     #[test]

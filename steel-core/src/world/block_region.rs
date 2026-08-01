@@ -9,6 +9,9 @@ use crate::chunk::{chunk_holder::ChunkHolder, section::ChunkSection, status::Chu
 
 use super::World;
 
+/// Maximum combined chunk-holder and section slots acquired by one bulk region read.
+pub(crate) const MAX_BLOCK_REGION_WORKSET_SLOTS: usize = 64;
+
 /// Inclusive block bounds for one scoped region read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BlockRegionBounds {
@@ -50,7 +53,7 @@ struct BlockRegionWorkset {
 }
 
 impl BlockRegionWorkset {
-    fn new(world: &World, bounds: BlockRegionBounds) -> Self {
+    fn try_new(world: &World, bounds: BlockRegionBounds) -> Option<Self> {
         let min_chunk_x =
             SectionPos::block_to_section_coord(bounds.min.x()).max(-ChunkPos::MAX_COORDINATE_VALUE);
         let max_chunk_x =
@@ -62,6 +65,19 @@ impl BlockRegionWorkset {
 
         let chunk_width = inclusive_count(min_chunk_x, max_chunk_x);
         let chunk_depth = inclusive_count(min_chunk_z, max_chunk_z);
+        let world_min_y = world.get_min_y();
+        let world_max_y = world.get_max_y();
+        let min_section_y = SectionPos::block_to_section_coord(bounds.min.y().max(world_min_y));
+        let max_section_y = SectionPos::block_to_section_coord(bounds.max.y().min(world_max_y));
+        let section_y_count = inclusive_count(min_section_y, max_section_y);
+
+        let chunk_count = chunk_width.checked_mul(chunk_depth)?;
+        let section_slot_count = chunk_count.checked_mul(section_y_count)?;
+        let workset_slot_count = chunk_count.checked_add(section_slot_count)?;
+        if workset_slot_count > MAX_BLOCK_REGION_WORKSET_SLOTS {
+            return None;
+        }
+
         let mut chunks = SmallVec::new();
         for chunk_x_offset in 0..chunk_width {
             let chunk_x = min_chunk_x + chunk_x_offset as i32;
@@ -75,13 +91,7 @@ impl BlockRegionWorkset {
             }
         }
 
-        let world_min_y = world.get_min_y();
-        let world_max_y = world.get_max_y();
-        let min_section_y = SectionPos::block_to_section_coord(bounds.min.y().max(world_min_y));
-        let max_section_y = SectionPos::block_to_section_coord(bounds.max.y().min(world_max_y));
-        let section_y_count = inclusive_count(min_section_y, max_section_y);
-
-        Self {
+        Some(Self {
             bounds,
             chunks,
             min_chunk_x,
@@ -91,7 +101,7 @@ impl BlockRegionWorkset {
             section_y_count,
             world_min_y,
             world_max_y,
-        }
+        })
     }
 
     fn with_read<R>(&self, f: impl FnOnce(&BlockRegionRead<'_>) -> R) -> R {
@@ -239,12 +249,12 @@ impl World {
     /// world writes. Re-entering a world read for a covered section can deadlock if a writer is
     /// already waiting because the requested section read guards remain held until the callback
     /// returns.
-    pub(crate) fn with_block_region<R>(
+    pub(crate) fn try_with_block_region<R>(
         &self,
         bounds: BlockRegionBounds,
         f: impl FnOnce(&BlockRegionRead<'_>) -> R,
-    ) -> R {
-        BlockRegionWorkset::new(self, bounds).with_read(f)
+    ) -> Option<R> {
+        Some(BlockRegionWorkset::try_new(self, bounds)?.with_read(f))
     }
 }
 
@@ -265,7 +275,7 @@ mod tests {
         test_support::{fresh_test_world, insert_ready_full_chunk},
     };
 
-    use super::BlockRegionBounds;
+    use super::{BlockRegionBounds, BlockRegionWorkset};
 
     #[test]
     fn region_reuses_section_reads_across_chunk_and_section_boundaries() {
@@ -290,39 +300,41 @@ mod tests {
         let below_world = BlockPos::new(15, world.get_min_y() - 1, 0);
         let missing_chunk = BlockPos::new(32, 64, 0);
         let bounds = BlockRegionBounds::from_corners(below_world, BlockPos::new(32, 80, 0));
-        world.with_block_region(bounds, |region| {
-            assert_eq!(
-                region.get_block_state(first),
-                Some(vanilla_blocks::STONE.default_state())
-            );
-            assert_eq!(
-                region.get_block_state(second),
-                Some(vanilla_blocks::DIRT.default_state())
-            );
-            assert_eq!(
-                region.get_block_state(missing_chunk),
-                Some(vanilla_blocks::AIR.default_state())
-            );
-            assert_eq!(
-                region.get_block_state(below_world),
-                Some(vanilla_blocks::VOID_AIR.default_state())
-            );
-            assert_eq!(region.get_block_state(first.west()), None);
+        world
+            .try_with_block_region(bounds, |region| {
+                assert_eq!(
+                    region.get_block_state(first),
+                    Some(vanilla_blocks::STONE.default_state())
+                );
+                assert_eq!(
+                    region.get_block_state(second),
+                    Some(vanilla_blocks::DIRT.default_state())
+                );
+                assert_eq!(
+                    region.get_block_state(missing_chunk),
+                    Some(vanilla_blocks::AIR.default_state())
+                );
+                assert_eq!(
+                    region.get_block_state(below_world),
+                    Some(vanilla_blocks::VOID_AIR.default_state())
+                );
+                assert_eq!(region.get_block_state(first.west()), None);
 
-            let Some(section) = region.section(SectionPos::from_block_pos(first)) else {
-                panic!("the first block's loaded section should be cached");
-            };
-            assert_eq!(
-                section.get_block_state(first),
-                Some(vanilla_blocks::STONE.default_state())
-            );
-            assert_eq!(section.get_block_state(second), None);
-            assert!(
-                region
-                    .section(SectionPos::new(i32::MAX, i32::MAX, i32::MAX))
-                    .is_none()
-            );
-        });
+                let Some(section) = region.section(SectionPos::from_block_pos(first)) else {
+                    panic!("the first block's loaded section should be cached");
+                };
+                assert_eq!(
+                    section.get_block_state(first),
+                    Some(vanilla_blocks::STONE.default_state())
+                );
+                assert_eq!(section.get_block_state(second), None);
+                assert!(
+                    region
+                        .section(SectionPos::new(i32::MAX, i32::MAX, i32::MAX))
+                        .is_none()
+                );
+            })
+            .expect("focused region should fit the bounded workset");
 
         assert!(
             !world.block_states_in_aabb_are_air(WorldAabb::new(15.0, 64.0, 0.0, 15.9, 64.9, 0.9,))
@@ -330,5 +342,31 @@ mod tests {
         assert!(
             world.block_states_in_aabb_are_air(WorldAabb::new(32.0, 64.0, 0.0, 32.9, 64.9, 0.9,))
         );
+    }
+
+    #[test]
+    fn oversized_region_uses_streaming_reads() {
+        let world = fresh_test_world("oversized_block_region_reads");
+        init_behaviors();
+        insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
+
+        let first = BlockPos::new(0, 64, 0);
+        assert!(world.set_block(
+            first,
+            vanilla_blocks::STONE.default_state(),
+            UpdateFlags::UPDATE_NONE,
+        ));
+
+        let oversized_bounds =
+            BlockRegionBounds::from_corners(first, BlockPos::new(16 * 64, first.y(), first.z()));
+        assert!(BlockRegionWorkset::try_new(&world, oversized_bounds).is_none());
+        assert!(!world.block_states_in_aabb_are_air(WorldAabb::new(
+            f64::from(first.x()),
+            f64::from(first.y()),
+            f64::from(first.z()),
+            f64::from(16 * 64),
+            f64::from(first.y()),
+            f64::from(first.z()),
+        )));
     }
 }

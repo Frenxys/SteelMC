@@ -1,6 +1,21 @@
 use super::*;
 
 #[test]
+#[should_panic(expected = "persisted chunk status must match its Full runtime state")]
+fn chunk_save_rejects_full_status_for_proto_data() {
+    init_test_registry();
+
+    let chunk = Chunk::new(
+        single_empty_section(),
+        ChunkPos::new(0, 0),
+        0,
+        16,
+        Weak::new(),
+    );
+    let _ = ChunkStorage::prepare_chunk_save(&chunk, ChunkStatus::Full, &[], true);
+}
+
+#[test]
 fn unknown_referenced_block_state_is_corruption_instead_of_air_recovery() {
     init_test_registry();
 

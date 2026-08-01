@@ -4,6 +4,8 @@ mod neighbor_updater;
 
 pub(in crate::world) use neighbor_updater::{CollectingNeighborUpdater, ShapeUpdate};
 
+static LARGE_BLOCK_REGION_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
+
 impl World {
     /// Gets the block state at the given position.
     ///
@@ -76,7 +78,8 @@ impl World {
     ///
     /// Matches `BlockGetter.getBlockStates(AABB)` using
     /// `BlockPos.betweenClosedStream(AABB)`: both min and max coordinates are
-    /// floored before iterating the inclusive block range.
+    /// floored before iterating the inclusive block range. Large ranges fall back
+    /// to streaming reads instead of acquiring an unbounded section workset.
     #[must_use]
     pub fn block_states_in_aabb_are_air(&self, aabb: WorldAabb) -> bool {
         let min_x = aabb.min_x().floor() as i32;
@@ -90,7 +93,21 @@ impl World {
             BlockPos::new(min_x, min_y, min_z),
             BlockPos::new(max_x, max_y, max_z),
         );
-        self.with_block_region(bounds, |region| {
+
+        let streaming_read = || {
+            for y in min_y..=max_y {
+                for z in min_z..=max_z {
+                    for x in min_x..=max_x {
+                        if !self.get_block_state(BlockPos::new(x, y, z)).is_air() {
+                            return false;
+                        }
+                    }
+                }
+            }
+            true
+        };
+
+        let Some(all_air) = self.try_with_block_region(bounds, |region| {
             for y in min_y..=max_y {
                 for z in min_z..=max_z {
                     for x in min_x..=max_x {
@@ -104,7 +121,22 @@ impl World {
                 }
             }
             true
-        })
+        }) else {
+            if !LARGE_BLOCK_REGION_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    min_x,
+                    min_y,
+                    min_z,
+                    max_x,
+                    max_y,
+                    max_z,
+                    max_workset_slots = MAX_BLOCK_REGION_WORKSET_SLOTS,
+                    "Block-state AABB exceeds the bulk-read limit; using streaming reads"
+                );
+            }
+            return streaming_read();
+        };
+        all_air
     }
 
     /// Sets a block at the given position.
