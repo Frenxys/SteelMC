@@ -83,8 +83,7 @@ fn chunk_light_persistence_canonicalizes_visible_and_internal_sections() {
 
 #[test]
 fn persistent_chunk_loads_chunk_owned_light_into_full_chunk() {
-    init_test_registry();
-    init_runtime_registries();
+    init_test_core();
     let mut light = ChunkLightData::for_valid_world_height(0, 16);
     *light.block.section_mut(0).expect("real section in range") =
         LightSection::visible(LightSectionData::homogeneous(12));

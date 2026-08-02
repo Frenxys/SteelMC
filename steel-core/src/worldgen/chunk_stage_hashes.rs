@@ -1075,19 +1075,11 @@ fn propagate_light_for_positions(
     reason = "large test with many hash assertions"
 )]
 fn chunk_stage_hashes_inner() {
-    use crate::behavior::init_behaviors;
-    use crate::block_entity::init_block_entities;
-    use crate::entity::init_entities;
+    use crate::test_support::init_test_core;
     use crate::worldgen::{EndGenerator, NetherGenerator, OverworldGenerator};
-    use steel_registry::{REGISTRY, Registry};
     use steel_worldgen::biomes::BiomeSourceKind;
 
-    let mut registry = Registry::new_vanilla();
-    registry.freeze();
-    let _ = REGISTRY.init(registry);
-    init_behaviors();
-    init_block_entities();
-    init_entities();
+    init_test_core();
 
     let expected = load_expected_hashes();
     let seed = expected.seed;
