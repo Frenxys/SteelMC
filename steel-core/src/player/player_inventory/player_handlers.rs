@@ -3,10 +3,11 @@ use std::{f32::consts::TAU, mem, sync::Arc};
 use glam::DVec3;
 use steel_protocol::packets::game::{
     CContainerClose, COpenScreen, CSetPlayerInventory, ClickType, SContainerButtonClick,
-    SContainerClick, SContainerClose, SContainerSlotStateChanged, SRenameItem, SSetCarriedItem,
-    SSetCreativeModeSlot,
+    SContainerClick, SContainerClose, SContainerSlotStateChanged, SRenameItem, SSetBeaconPacket,
+    SSetCarriedItem, SSetCreativeModeSlot,
 };
 use steel_registry::item_stack::ItemStack;
+use steel_registry::{REGISTRY, RegistryExt};
 use steel_utils::{
     Downcast as _,
     locks::Shared,
@@ -183,6 +184,22 @@ impl Player {
 
             entity.player_touch(&player_arc);
         }
+    }
+
+    /// Handles a beacon effect selection from the set-beacon packet.
+    pub fn handle_set_beacon_packet(&self, packet: SSetBeaconPacket) {
+        let primary = packet
+            .primary
+            .and_then(|id| REGISTRY.mob_effects.by_id(id as usize));
+        let secondary = packet
+            .secondary
+            .and_then(|id| REGISTRY.mob_effects.by_id(id as usize));
+
+        let Ok(mut menu) = self.take_open_menu_for_callback(None) else {
+            return;
+        };
+        menu.update_effects(primary, secondary, &self.connection);
+        self.finish_open_menu_callback(menu);
     }
 
     /// Handles a container button click packet (e.g., enchanting table buttons).

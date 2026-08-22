@@ -7,6 +7,8 @@ mod kind;
 pub mod kinds;
 mod layout;
 
+use std::sync::Arc;
+
 use crate::inventory::container::Container as _;
 pub use behavior::MenuBehavior;
 pub use builder::{
@@ -22,14 +24,14 @@ use steel_utils::locks::Shared;
 use std::fmt;
 use std::mem;
 
-use steel_registry::{item_stack::ItemStack, menu_type::MenuTypeRef};
+use steel_registry::{item_stack::ItemStack, menu_type::MenuTypeRef, mob_effect::MobEffectRef};
 use steel_utils::{Downcast as _, types::GameType};
 
 use crate::inventory::container::CraftingContainer;
 use crate::inventory::menu::kinds::InventoryKind;
 use crate::{
     inventory::lock::{ContainerId, ContainerLockGuard, ContainerRef},
-    player::Player,
+    player::{Player, PlayerConnection},
 };
 
 use crate::inventory::click::{Click, ClickOutcome, SwapTarget, can_item_quick_replace};
@@ -122,6 +124,23 @@ impl Menu {
     #[must_use]
     pub fn can_take_item_for_pick_all(&self, carried: &ItemStack, slot_index: usize) -> bool {
         self.kind.can_take_item_for_pick_all(carried, slot_index)
+    }
+
+    /// Forwards a beacon effect selection from the set-beacon packet. The kind
+    /// decides whether the payment item is consumed.
+    pub fn update_effects(
+        &mut self,
+        primary: Option<MobEffectRef>,
+        secondary: Option<MobEffectRef>,
+        connection: &Arc<PlayerConnection>,
+    ) {
+        {
+            let mut guard = self.behavior.lock_all_containers();
+            self.kind
+                .on_update_effects(&mut self.behavior, &mut guard, primary, secondary);
+        }
+        // The guard is dropped before `broadcast_changes` re-locks the same containers.
+        self.behavior.broadcast_changes(connection);
     }
 
     /// Called when the menu is closed. Hands the carried item and input sections
