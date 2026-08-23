@@ -8,7 +8,7 @@ use std::sync::{Arc, Weak};
 use steel_macros::block_behavior;
 use steel_registry::block_entity_type::BlockEntityTypeRef;
 use steel_registry::blocks::BlockRef;
-use steel_registry::vanilla_block_entity_types;
+use steel_registry::{vanilla_block_entity_types, vanilla_custom_stats};
 use steel_utils::{BlockPos, BlockStateId, Downcast as _, translations};
 use text_components::TextComponent;
 
@@ -66,7 +66,7 @@ impl BlockBehavior for BeaconBlock {
             move |context| beacon(inventory, context.container_id, container_ref, state),
         );
 
-        // TODO: Award stat INTERACT_WITH_BEACON
+        player.award_custom_stat(&vanilla_custom_stats::INTERACT_WITH_BEACON);
         InteractionResult::Success
     }
 
