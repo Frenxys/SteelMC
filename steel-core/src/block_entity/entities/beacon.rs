@@ -28,6 +28,7 @@ use steel_utils::{
 };
 
 use crate::block_entity::{BlockEntity, BlockEntityBase};
+use crate::chunk::light::MAX_LIGHT_LEVEL;
 use crate::entity::{LivingEntity as _, MobEffectInstance};
 use crate::inventory::container::Container;
 use crate::inventory::lock::{ContainerRef, SharedContainer};
@@ -42,6 +43,9 @@ const MAX_LEVELS: i32 = 4;
 
 /// Interval, in game ticks, between pyramid re-checks and effect applications.
 const BEACON_TICK_INTERVAL: i64 = 80;
+
+const BASE_EFFECT_RANGE: f64 = 10.0;
+const EFFECT_RANGE_PER_LEVEL: f64 = 10.0;
 
 /// The four valid beacon effects, indexed by pyramid level tier.
 pub(crate) const BEACON_EFFECTS: [&[MobEffectRef]; 4] = [
@@ -135,7 +139,7 @@ impl BeaconBlockEntity {
     fn is_beam_open(world: &World, pos: BlockPos) -> bool {
         for y in (pos.y() + 1)..=world.get_max_y() {
             let state = world.get_block_state(BlockPos::new(pos.x(), y, pos.z()));
-            if state.get_block() != &vanilla_blocks::BEDROCK && state.get_light_dampening() >= 15 {
+            if state.get_block() != &vanilla_blocks::BEDROCK && state.get_light_dampening() >= MAX_LIGHT_LEVEL {
                 return false;
             }
         }
@@ -182,7 +186,7 @@ impl BeaconBlockEntity {
             return;
         };
 
-        let range = f64::from(levels) * 10.0 + 10.0;
+        let range = f64::from(levels) * EFFECT_RANGE_PER_LEVEL + BASE_EFFECT_RANGE;
         let base_amplifier =
             i32::from(levels >= 4 && secondary.is_some_and(|s| s.key == primary.key));
         let duration = (9 + levels * 2) * 20;
