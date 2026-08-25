@@ -139,7 +139,9 @@ impl BeaconBlockEntity {
     fn is_beam_open(world: &World, pos: BlockPos) -> bool {
         for y in (pos.y() + 1)..=world.get_max_y() {
             let state = world.get_block_state(BlockPos::new(pos.x(), y, pos.z()));
-            if state.get_block() != &vanilla_blocks::BEDROCK && state.get_light_dampening() >= MAX_LIGHT_LEVEL {
+            if state.get_block() != &vanilla_blocks::BEDROCK
+                && state.get_light_dampening() >= MAX_LIGHT_LEVEL
+            {
                 return false;
             }
         }
