@@ -1,22 +1,18 @@
 //! Beacon block entity implementation.
 //!
-//! Beacons are container block entities with a single payment slot. Every 80
-//! game ticks they re-check the supporting pyramid and, while the beam has an
-//! unobstructed path to the sky, apply the configured status effects to nearby
-//! players.
+//! Beacons track the pyramid level and configured effects. Every 80 game ticks
+//! they re-check the supporting pyramid and, while the beam has an unobstructed
+//! path to the sky, apply the configured status effects to nearby players.
 
 use std::{
-    mem,
     str::FromStr as _,
     sync::{Arc, Weak},
 };
 
 use glam::DVec3;
-use simdnbt::ToNbtTag;
 use simdnbt::borrow::{BaseNbtCompound as BorrowedNbtCompound, NbtCompound as NbtCompoundView};
-use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
+use simdnbt::owned::NbtCompound;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
-use steel_registry::item_stack::ItemStack;
 use steel_registry::mob_effect::MobEffectRef;
 use steel_registry::{
     REGISTRY, RegistryExt, TaggedRegistryExt, vanilla_block_entity_types, vanilla_block_tags,
@@ -30,18 +26,12 @@ use steel_utils::{
 use crate::block_entity::{BlockEntity, BlockEntityBase};
 use crate::chunk::light::MAX_LIGHT_LEVEL;
 use crate::entity::{LivingEntity as _, MobEffectInstance};
-use crate::inventory::container::Container;
-use crate::inventory::lock::{ContainerRef, SharedContainer};
 use crate::player::Player;
 use crate::world::World;
-
-/// Number of slots in a beacon (single payment slot).
-pub const BEACON_SLOTS: usize = 1;
 
 /// Maximum beacon pyramid level.
 const MAX_LEVELS: i32 = 4;
 
-/// Interval, in game ticks, between pyramid re-checks and effect applications.
 const BEACON_TICK_INTERVAL: i64 = 80;
 
 const BASE_EFFECT_RANGE: f64 = 10.0;
@@ -74,7 +64,6 @@ impl BeaconState {
         }
     }
 
-    /// Returns `effect` only if it is one of the effects a beacon can apply.
     pub(crate) fn filter_effect(effect: Option<MobEffectRef>) -> Option<MobEffectRef> {
         effect.filter(|effect| {
             BEACON_EFFECTS
@@ -89,24 +78,12 @@ impl BeaconState {
 /// Beacon block entity.
 pub struct BeaconBlockEntity {
     base: Arc<BlockEntityBase>,
-    container: Arc<SyncMutex<BeaconContainer>>,
-    container_ref: ContainerRef,
     state: Arc<SyncMutex<BeaconState>>,
-}
-
-struct BeaconContainer {
-    items: Vec<ItemStack>,
 }
 
 // SAFETY: This key is owned by Steel and uniquely identifies `BeaconBlockEntity`.
 unsafe impl DowncastType for BeaconBlockEntity {
     const TYPE_KEY: DowncastTypeKey = DowncastTypeKey::new("steel:block_entity/beacon");
-}
-
-// SAFETY: This key is owned by Steel and uniquely identifies the independently
-// lockable inventory data used by a beacon block entity.
-unsafe impl DowncastType for BeaconContainer {
-    const TYPE_KEY: DowncastTypeKey = DowncastTypeKey::new("steel:container/beacon");
 }
 
 impl BeaconBlockEntity {
@@ -119,14 +96,8 @@ impl BeaconBlockEntity {
             pos,
             state,
         ));
-        let container = Arc::new(SyncMutex::new(BeaconContainer {
-            items: vec![ItemStack::empty(); BEACON_SLOTS],
-        }));
-        let shared_container: SharedContainer = container.clone();
         Self {
-            container_ref: ContainerRef::owned_by_block_entity(shared_container, Arc::clone(&base)),
             base,
-            container,
             state: Arc::new(SyncMutex::new(BeaconState::new())),
         }
     }
@@ -248,65 +219,17 @@ impl BlockEntity for BeaconBlockEntity {
         &self.base
     }
 
-    fn pre_remove_side_effects(&self, pos: BlockPos, _state: BlockStateId) {
-        let items = {
-            let mut container = self.container.lock();
-            mem::replace(&mut container.items, vec![ItemStack::empty(); BEACON_SLOTS])
-        };
-        let Some(world) = self.get_level() else {
-            return;
-        };
-        for item in items {
-            world.drop_item_stack(pos, item);
-        }
-    }
-
     fn load_additional(&self, nbt: &BorrowedNbtCompound<'_>) {
-        let nbt_view: NbtCompoundView<'_, '_> = nbt.into();
-
-        {
-            let mut state = self.state.lock();
-            state.primary_power = Self::load_effect(nbt, "primary_effect");
-            state.secondary_power = Self::load_effect(nbt, "secondary_effect");
-        }
-
-        let mut container = self.container.lock();
-        container.items.fill(ItemStack::empty());
-        if let Some(items_list) = nbt_view.list("Items")
-            && let Some(compounds) = items_list.compounds()
-        {
-            for compound in compounds {
-                if let Some(slot) = compound.byte("Slot") {
-                    let slot = slot as usize;
-                    if slot < BEACON_SLOTS
-                        && let Some(item) = ItemStack::from_borrowed_compound(&compound)
-                    {
-                        container.items[slot] = item;
-                    }
-                }
-            }
-        }
+        let mut state = self.state.lock();
+        state.primary_power = Self::load_effect(nbt, "primary_effect");
+        state.secondary_power = Self::load_effect(nbt, "secondary_effect");
     }
 
     fn save_additional(&self, nbt: &mut NbtCompound) {
-        {
-            let state = self.state.lock();
-            Self::store_effect(nbt, "primary_effect", state.primary_power);
-            Self::store_effect(nbt, "secondary_effect", state.secondary_power);
-            nbt.insert("Levels", state.levels);
-        }
-
-        let container = self.container.lock();
-        let mut items: Vec<NbtCompound> = Vec::new();
-        for (slot, item) in container.items.iter().enumerate() {
-            if !item.is_empty()
-                && let NbtTag::Compound(mut item_nbt) = item.clone().to_nbt_tag()
-            {
-                item_nbt.insert("Slot", slot as i8);
-                items.push(item_nbt);
-            }
-        }
-        nbt.insert("Items", NbtList::Compound(items));
+        let state = self.state.lock();
+        Self::store_effect(nbt, "primary_effect", state.primary_power);
+        Self::store_effect(nbt, "secondary_effect", state.secondary_power);
+        nbt.insert("Levels", state.levels);
     }
 
     fn get_update_tag(&self) -> Option<NbtCompound> {
@@ -336,39 +259,4 @@ impl BlockEntity for BeaconBlockEntity {
             self.state.lock().levels = 0;
         }
     }
-
-    fn container_ref(&self) -> Option<ContainerRef> {
-        Some(self.container_ref.clone())
-    }
-}
-
-impl Container for BeaconContainer {
-    fn items(&self) -> &[ItemStack] {
-        &self.items
-    }
-
-    fn items_mut(&mut self) -> &mut [ItemStack] {
-        &mut self.items
-    }
-
-    fn get_container_size(&self) -> usize {
-        BEACON_SLOTS
-    }
-
-    fn set_item(&mut self, slot: usize, mut stack: ItemStack) {
-        if slot < BEACON_SLOTS {
-            let max_stack_size = self.get_max_stack_size_for_item(&stack);
-            if !stack.is_empty() && stack.count() > max_stack_size {
-                stack.set_count(max_stack_size);
-            }
-            self.items[slot] = stack;
-        }
-    }
-
-    /// Vanilla's beacon payment slot holds at most one item (`PaymentSlot.getMaxStackSize()`).
-    fn get_max_stack_size(&self) -> i32 {
-        1
-    }
-
-    fn set_changed(&mut self) {}
 }

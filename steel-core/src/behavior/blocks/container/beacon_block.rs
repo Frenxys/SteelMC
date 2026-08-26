@@ -16,7 +16,6 @@ use crate::behavior::InventoryAccess;
 use crate::behavior::block::{BlockBehavior, BlockEntityCreation};
 use crate::behavior::context::{BlockHitResult, BlockPlaceContext, InteractionResult};
 use crate::block_entity::{BLOCK_ENTITIES, BlockEntityTicker, entities::BeaconBlockEntity};
-use crate::inventory::lock::ContainerRef;
 use crate::inventory::menu::kinds::beacon;
 use crate::player::Player;
 use crate::world::World;
@@ -52,18 +51,16 @@ impl BlockBehavior for BeaconBlock {
         let Some(block_entity) = world.get_block_entity(pos) else {
             return InteractionResult::Pass;
         };
-        let Some(container_ref) = ContainerRef::from_block_entity(block_entity.clone()) else {
-            return InteractionResult::Pass;
-        };
         let Some(beacon_entity) = block_entity.downcast_ref::<BeaconBlockEntity>() else {
             return InteractionResult::Pass;
         };
         let state = beacon_entity.state();
 
         let inventory = player.inventory.clone();
+        let world = Arc::clone(world);
         player.open_menu(
             TextComponent::translated(translations::CONTAINER_BEACON.msg()),
-            move |context| beacon(inventory, context.container_id, container_ref, state),
+            move |context| beacon(inventory, context.container_id, pos, &world, state),
         );
 
         player.award_custom_stat(&vanilla_custom_stats::INTERACT_WITH_BEACON);

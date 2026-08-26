@@ -16,7 +16,7 @@ mod raw;
 mod sign;
 
 pub use barrel::{BARREL_SLOTS, BarrelBlockEntity};
-pub use beacon::{BEACON_SLOTS, BeaconBlockEntity, BeaconState};
+pub use beacon::{BeaconBlockEntity, BeaconState};
 pub use beehive::{
     BEEHIVE_MAX_OCCUPANTS, BEEHIVE_MIN_OCCUPATION_TICKS_NECTARLESS, BeehiveBlockEntity,
 };
