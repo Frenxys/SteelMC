@@ -7,11 +7,11 @@
 use std::slice;
 use std::sync::Arc;
 
+use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::{
     REGISTRY, RegistryEntry, TaggedRegistryExt, item_stack::ItemStack, mob_effect::MobEffectRef,
     vanilla_blocks, vanilla_item_tags, vanilla_menu_types,
 };
-use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_utils::{BlockPos, locks::SyncMutex};
 
 use crate::block_entity::entities::BeaconState;
