@@ -179,8 +179,11 @@ impl MenuKind for BeaconKind {
 
         {
             let mut state = self.state.lock();
-            state.primary_power = BeaconState::filter_effect(primary);
-            state.secondary_power = BeaconState::filter_effect(secondary);
+            let levels = state.levels;
+            if BeaconState::validate_effects(primary, secondary, levels) {
+                state.primary_power = primary;
+                state.secondary_power = secondary;
+            }
         }
 
         // Vanilla removes the payment through `Slot.remove(1)`.

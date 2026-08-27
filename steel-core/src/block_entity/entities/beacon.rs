@@ -73,6 +73,44 @@ impl BeaconState {
                 .any(|valid| valid.key == effect.key)
         })
     }
+
+    /// Mirrors vanilla `validateEffects`: returns whether the combination is legal for the
+    /// given pyramid level.
+    pub(crate) fn validate_effects(
+        primary: Option<MobEffectRef>,
+        secondary: Option<MobEffectRef>,
+        levels: i32,
+    ) -> bool {
+        if secondary.is_some() && levels < MAX_LEVELS {
+            return false;
+        }
+        let primary_level = Self::required_levels_for(primary);
+        let secondary_level = Self::required_levels_for(secondary);
+        if primary_level > levels || secondary_level > levels {
+            return false;
+        }
+        // Regeneration (tier 4) is secondary-only.
+        if primary_level >= MAX_LEVELS {
+            return false;
+        }
+        secondary_level == 0
+            || secondary_level >= MAX_LEVELS
+            || primary.zip(secondary).is_some_and(|(p, s)| p.key == s.key)
+    }
+
+    /// Returns the 1-indexed tier that unlocks `effect`, `0` for `None`, or `i32::MAX` for
+    /// effects not in `BEACON_EFFECTS`.
+    fn required_levels_for(effect: Option<MobEffectRef>) -> i32 {
+        let Some(effect) = effect else {
+            return 0;
+        };
+        for (i, tier) in BEACON_EFFECTS.iter().enumerate() {
+            if tier.iter().any(|e| e.key == effect.key) {
+                return i as i32 + 1;
+            }
+        }
+        i32::MAX
+    }
 }
 
 /// Beacon block entity.
