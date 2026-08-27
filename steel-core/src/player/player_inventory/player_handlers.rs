@@ -200,12 +200,18 @@ impl Player {
             return;
         };
         if !menu.still_valid(self) {
-            log::debug!("Player {} interacted with invalid menu", self.gameprofile.name);
+            log::debug!(
+                "Player {} interacted with invalid menu",
+                self.gameprofile.name
+            );
             self.finish_open_menu_callback(menu);
             return;
         }
         if !menu.update_effects(primary, secondary, &self.connection) {
-            log::warn!("Player {} tried to set invalid beacon effects", self.gameprofile.name);
+            log::warn!(
+                "Player {} tried to set invalid beacon effects",
+                self.gameprofile.name
+            );
             self.finish_open_menu_callback(menu);
             self.disconnect(translations::MULTIPLAYER_DISCONNECT_GENERIC.msg());
             return;
