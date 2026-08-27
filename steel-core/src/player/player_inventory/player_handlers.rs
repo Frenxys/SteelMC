@@ -199,9 +199,15 @@ impl Player {
         let Ok(mut menu) = self.take_open_menu_for_callback(None) else {
             return;
         };
-        if !menu.update_effects(primary, secondary, &self.connection) {
+        if !menu.still_valid(self) {
+            log::debug!("Player {} interacted with invalid menu", self.gameprofile.name);
             self.finish_open_menu_callback(menu);
-            self.disconnect(translations::MULTIPLAYER_DISCONNECT_INVALID_PACKET.msg());
+            return;
+        }
+        if !menu.update_effects(primary, secondary, &self.connection) {
+            log::warn!("Player {} tried to set invalid beacon effects", self.gameprofile.name);
+            self.finish_open_menu_callback(menu);
+            self.disconnect(translations::MULTIPLAYER_DISCONNECT_GENERIC.msg());
             return;
         }
         self.finish_open_menu_callback(menu);
