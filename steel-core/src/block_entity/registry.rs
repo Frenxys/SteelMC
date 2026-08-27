@@ -16,11 +16,10 @@ use steel_utils::{BlockPos, BlockStateId};
 
 use super::SharedBlockEntity;
 use super::entities::{
-
-    BarrelBlockEntity, BeaconBlockEntity, BeehiveBlockEntity, BellBlockEntity, BrushableBlockEntity,
-    ChiseledBookShelfBlockEntity, ComparatorBlockEntity, DaylightDetectorBlockEntity,
-    EndGatewayBlockEntity, EndPortalBlockEntity, JukeboxBlockEntity, PistonMovingBlockEntity,
-    PotentSulfurBlockEntity, RawBlockEntity, SignBlockEntity,
+    BarrelBlockEntity, BeaconBlockEntity, BeehiveBlockEntity, BellBlockEntity,
+    BrushableBlockEntity, ChiseledBookShelfBlockEntity, ComparatorBlockEntity,
+    DaylightDetectorBlockEntity, EndGatewayBlockEntity, EndPortalBlockEntity, JukeboxBlockEntity,
+    PistonMovingBlockEntity, PotentSulfurBlockEntity, RawBlockEntity, SignBlockEntity,
 };
 use crate::world::World;
 
