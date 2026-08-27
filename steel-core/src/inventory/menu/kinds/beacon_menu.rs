@@ -180,10 +180,11 @@ impl MenuKind for BeaconKind {
         {
             let mut state = self.state.lock();
             let levels = state.levels;
-            if BeaconState::validate_effects(primary, secondary, levels) {
-                state.primary_power = primary;
-                state.secondary_power = secondary;
+            if !BeaconState::validate_effects(primary, secondary, levels) {
+                return;
             }
+            state.primary_power = primary;
+            state.secondary_power = secondary;
         }
 
         // Vanilla removes the payment through `Slot.remove(1)`.
@@ -358,12 +359,11 @@ mod tests {
                 .is(&vanilla_items::IRON_INGOT)
         });
 
+        // Simulate a level-1 pyramid so Speed is a valid primary.
+        beacon_entity.state().lock().levels = 1;
+
         // Selecting an effect consumes the payment and stores the selection.
-        menu.update_effects(
-            Some(vanilla_mob_effects::STRENGTH),
-            None,
-            &player.connection,
-        );
+        menu.update_effects(Some(vanilla_mob_effects::SPEED), None, &player.connection);
         assert!({
             let guard = menu.behavior().lock_all_containers();
             guard
@@ -376,7 +376,7 @@ mod tests {
         let state = state.lock();
         assert_eq!(
             state.primary_power.map(|effect| effect.key.clone()),
-            Some(vanilla_mob_effects::STRENGTH.key.clone())
+            Some(vanilla_mob_effects::SPEED.key.clone())
         );
         assert!(state.secondary_power.is_none());
     }
