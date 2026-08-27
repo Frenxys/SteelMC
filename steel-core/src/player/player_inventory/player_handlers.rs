@@ -11,6 +11,7 @@ use steel_registry::{REGISTRY, RegistryExt};
 use steel_utils::{
     Downcast as _,
     locks::Shared,
+    translations,
     types::{GameType, InteractionHand},
 };
 use text_components::TextComponent;
@@ -198,7 +199,11 @@ impl Player {
         let Ok(mut menu) = self.take_open_menu_for_callback(None) else {
             return;
         };
-        menu.update_effects(primary, secondary, &self.connection);
+        if !menu.update_effects(primary, secondary, &self.connection) {
+            self.finish_open_menu_callback(menu);
+            self.disconnect(translations::MULTIPLAYER_DISCONNECT_INVALID_PACKET.msg());
+            return;
+        }
         self.finish_open_menu_callback(menu);
     }
 

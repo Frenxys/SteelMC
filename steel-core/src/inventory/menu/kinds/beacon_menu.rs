@@ -169,19 +169,19 @@ impl MenuKind for BeaconKind {
         guard: &mut ContainerLockGuard,
         primary: Option<MobEffectRef>,
         secondary: Option<MobEffectRef>,
-    ) {
+    ) -> bool {
         let Some(payment) = guard.get(self.payment_ref.container_id()) else {
-            return;
+            return false;
         };
         if payment.get_item(0).is_empty() {
-            return;
+            return false;
         }
 
         {
             let mut state = self.state.lock();
             let levels = state.levels;
             if !BeaconState::validate_effects(primary, secondary, levels) {
-                return;
+                return false;
             }
             state.primary_power = primary;
             state.secondary_power = secondary;
@@ -190,6 +190,7 @@ impl MenuKind for BeaconKind {
         // Vanilla removes the payment through `Slot.remove(1)`.
         guard.set_item(self.payment_ref.container_id(), 0, ItemStack::empty());
         self.sync_data_slots(behavior);
+        true
     }
 
     fn quick_move(

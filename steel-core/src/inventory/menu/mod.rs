@@ -126,21 +126,23 @@ impl Menu {
         self.kind.can_take_item_for_pick_all(carried, slot_index)
     }
 
-    /// Forwards a beacon effect selection from the set-beacon packet. The kind
-    /// decides whether the payment item is consumed.
+    /// Forwards a beacon effect selection from the set-beacon packet. Returns
+    /// `false` if the selection or payment was invalid (mirrors vanilla's
+    /// `BeaconMenu.updateEffects` return value).
     pub fn update_effects(
         &mut self,
         primary: Option<MobEffectRef>,
         secondary: Option<MobEffectRef>,
         connection: &Arc<PlayerConnection>,
-    ) {
-        {
+    ) -> bool {
+        let accepted = {
             let mut guard = self.behavior.lock_all_containers();
             self.kind
-                .on_update_effects(&mut self.behavior, &mut guard, primary, secondary);
-        }
+                .on_update_effects(&mut self.behavior, &mut guard, primary, secondary)
+        };
         // The guard is dropped before `broadcast_changes` re-locks the same containers.
         self.behavior.broadcast_changes(connection);
+        accepted
     }
 
     /// Called when the menu is closed. Hands the carried item and input sections

@@ -94,14 +94,17 @@ pub trait MenuKind: ErasedType + Send + Sync {
     }
 
     /// Handles a beacon effect update from the client's set-beacon packet.
-    /// The default is a no-op for menus that don't support effect selection.
+    /// Returns `true` if the effects were accepted, `false` if the selection or
+    /// payment was invalid (mirroring vanilla's `BeaconMenu.updateEffects`).
+    /// The default returns `true` (no-op for menus that don't support beacons).
     fn on_update_effects(
         &mut self,
         _behavior: &mut MenuBehavior,
         _guard: &mut ContainerLockGuard,
         _primary: Option<MobEffectRef>,
         _secondary: Option<MobEffectRef>,
-    ) {
+    ) -> bool {
+        true
     }
 
     /// Shift-click override. Return `Some` to fully handle the quick-move, or
