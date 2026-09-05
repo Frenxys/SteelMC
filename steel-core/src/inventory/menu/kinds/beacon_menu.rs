@@ -457,7 +457,7 @@ mod tests {
         insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
         let player = TestPlayerBuilder::new(Arc::clone(&world), "BeaconShift", 1).build();
 
-        let (mut menu, _state) = open_test_beacon(&world, &player, BlockPos::new(8, 64, 8));
+        let (mut menu, _) = open_test_beacon(&world, &player, BlockPos::new(8, 64, 8));
         let payment_id = payment_id_of(&menu);
 
         // Occupy the payment slot.
@@ -513,7 +513,7 @@ mod tests {
         insert_ready_full_chunk(&world, ChunkPos::new(0, 0));
         let player = TestPlayerBuilder::new(Arc::clone(&world), "BeaconClose", 1).build();
 
-        let (mut menu, _state) = open_test_beacon(&world, &player, BlockPos::new(8, 64, 8));
+        let (mut menu, _) = open_test_beacon(&world, &player, BlockPos::new(8, 64, 8));
         click_into_payment(
             &mut menu,
             &player,
