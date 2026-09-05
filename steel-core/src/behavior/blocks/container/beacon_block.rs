@@ -8,7 +8,7 @@ use std::sync::{Arc, Weak};
 use steel_macros::block_behavior;
 use steel_registry::block_entity_type::BlockEntityTypeRef;
 use steel_registry::blocks::BlockRef;
-use steel_registry::{vanilla_block_entity_types, vanilla_custom_stats};
+use steel_registry::{DyeColor, vanilla_block_entity_types, vanilla_custom_stats};
 use steel_utils::{BlockPos, BlockStateId, Downcast as _, translations};
 use text_components::TextComponent;
 
@@ -48,23 +48,33 @@ impl BlockBehavior for BeaconBlock {
         _hit_result: &BlockHitResult,
         _inv: &mut InventoryAccess,
     ) -> InteractionResult {
+        // Vanilla `useWithoutItem` returns SUCCESS unconditionally, so a missing or mismatched
+        // block entity still swallows the interaction rather than falling through to item use.
+        // Deliberately not the `Pass` most other container blocks return.
         let Some(block_entity) = world.get_block_entity(pos) else {
-            return InteractionResult::Pass;
+            return InteractionResult::Success;
         };
         let Some(beacon_entity) = block_entity.downcast_ref::<BeaconBlockEntity>() else {
-            return InteractionResult::Pass;
+            return InteractionResult::Success;
         };
         let state = beacon_entity.state();
+        let base = beacon_entity.base_handle();
 
         let inventory = player.inventory.clone();
         let world = Arc::clone(world);
         player.open_menu(
             TextComponent::translated(translations::CONTAINER_BEACON.msg()),
-            move |context| beacon(inventory, context.container_id, pos, &world, state),
+            move |context| beacon(inventory, context.container_id, pos, &world, state, base),
         );
 
         player.award_custom_stat(&vanilla_custom_stats::INTERACT_WITH_BEACON);
         InteractionResult::Success
+    }
+
+    /// Vanilla `BeaconBlock implements BeaconBeamBlock` with `DyeColor.WHITE`; the beacon is the
+    /// first block its own scan visits, so this seeds the beam's initial section.
+    fn beacon_beam_color(&self, _state: BlockStateId) -> Option<DyeColor> {
+        Some(DyeColor::White)
     }
 
     fn new_block_entity(

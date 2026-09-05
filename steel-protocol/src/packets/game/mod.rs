@@ -198,7 +198,7 @@ pub use s_player_command::{PlayerCommandAction, SPlayerCommand};
 pub use s_player_input::SPlayerInput;
 pub use s_player_load::SPlayerLoad;
 pub use s_rename_item::SRenameItem;
-pub use s_set_beacon::SSetBeaconPacket;
+pub use s_set_beacon::SSetBeacon;
 pub use s_set_carried_item::SSetCarriedItem;
 pub use s_set_creative_mode_slot::SSetCreativeModeSlot;
 pub use s_set_held_item::SSetHeldItem;

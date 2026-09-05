@@ -11,12 +11,12 @@ use steel_utils::serial::ReadFrom;
 /// Vanilla 26.2 encodes each effect as `ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`:
 /// a presence boolean, then the mob effect's raw registry id as a `VarInt`.
 #[derive(ServerPacket, Clone, Debug)]
-pub struct SSetBeaconPacket {
+pub struct SSetBeacon {
     pub primary: Option<i32>,
     pub secondary: Option<i32>,
 }
 
-impl ReadFrom for SSetBeaconPacket {
+impl ReadFrom for SSetBeacon {
     fn read(data: &mut Cursor<&[u8]>) -> std::io::Result<Self> {
         Ok(Self {
             primary: read_optional_effect(data)?,

@@ -17,7 +17,7 @@ use steel_protocol::packets::game::{
     SCommandSuggestion, SContainerButtonClick, SContainerClick, SContainerClose,
     SContainerSlotStateChanged, SInteract, SMovePlayer, SMovePlayerPos, SMovePlayerPosRot,
     SMovePlayerRot, SMovePlayerStatusOnly, SMoveVehicle, SPickItemFromBlock, SPlayerAbilities,
-    SPlayerAction, SPlayerCommand, SPlayerInput, SPlayerLoad, SRenameItem, SSetBeaconPacket,
+    SPlayerAction, SPlayerCommand, SPlayerInput, SPlayerLoad, SRenameItem, SSetBeacon,
     SSetCarriedItem, SSetCreativeModeSlot, SSignUpdate, SSpectatorAction, SSwing, SUseItem,
     SUseItemOn,
 };
@@ -99,7 +99,7 @@ enum ScheduledPlayPacketKind {
     RenameItem(SRenameItem),
     UseItemOn(SUseItemOn),
     UseItem(SUseItem),
-    SetBeacon(SSetBeaconPacket),
+    SetBeacon(SSetBeacon),
     SetCarriedItem(SSetCarriedItem),
     Swing(SSwing),
     PlayerAction(SPlayerAction),
@@ -760,7 +760,7 @@ impl JavaConnection {
                 ))
             }
             play::S_SET_BEACON => scheduled(ScheduledPlayPacketKind::SetBeacon(
-                SSetBeaconPacket::read_packet(data)?,
+                SSetBeacon::read_packet(data)?,
             )),
             play::S_PLAYER_INPUT => scheduled(ScheduledPlayPacketKind::PlayerInput(
                 SPlayerInput::read_packet(data)?,

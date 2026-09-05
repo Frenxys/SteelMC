@@ -1,10 +1,12 @@
 //! Beacon block entity implementation.
 //!
-//! Beacons track the pyramid level and configured effects. Every 80 game ticks
-//! they re-check the supporting pyramid and, while the beam has an unobstructed
-//! path to the sky, apply the configured status effects to nearby players.
+//! Beacons track the pyramid level and configured effects. The beam is re-scanned
+//! incrementally, [`BLOCKS_CHECK_PER_TICK`] blocks per tick, and every 80 game ticks the
+//! supporting pyramid is re-checked and the configured status effects are applied to nearby
+//! players while the beam is unobstructed.
 
 use std::{
+    mem,
     str::FromStr as _,
     sync::{Arc, Weak},
 };
@@ -14,16 +16,20 @@ use simdnbt::borrow::{BaseNbtCompound as BorrowedNbtCompound, NbtCompound as Nbt
 use simdnbt::owned::NbtCompound;
 use steel_registry::blocks::block_state_ext::BlockStateExt as _;
 use steel_registry::mob_effect::MobEffectRef;
+use steel_registry::sound_event::SoundEventRef;
 use steel_registry::{
-    REGISTRY, RegistryExt, TaggedRegistryExt, vanilla_block_entity_types, vanilla_block_tags,
-    vanilla_blocks, vanilla_entities, vanilla_mob_effects,
+    REGISTRY, RegistryExt, TaggedRegistryExt, sound_events, vanilla_block_entity_types,
+    vanilla_block_tags, vanilla_blocks, vanilla_entities, vanilla_mob_effects,
 };
+use steel_utils::color::ArgbColor;
 use steel_utils::locks::SyncMutex;
 use steel_utils::{
     BlockPos, BlockStateId, Downcast as _, DowncastType, DowncastTypeKey, Identifier, WorldAabb,
 };
 
+use crate::behavior::BLOCK_BEHAVIORS;
 use crate::block_entity::{BlockEntity, BlockEntityBase};
+use crate::chunk::heightmap::HeightmapType;
 use crate::chunk::light::MAX_LIGHT_LEVEL;
 use crate::entity::{LivingEntity as _, MobEffectInstance};
 use crate::player::Player;
@@ -33,6 +39,9 @@ use crate::world::World;
 const MAX_LEVELS: i32 = 4;
 
 const BEACON_TICK_INTERVAL: i64 = 80;
+
+/// Blocks of beam column scanned per tick, mirroring vanilla `BLOCKS_CHECK_PER_TICK`.
+const BLOCKS_CHECK_PER_TICK: i32 = 10;
 
 const BASE_EFFECT_RANGE: f64 = 10.0;
 const EFFECT_RANGE_PER_LEVEL: f64 = 10.0;
@@ -48,11 +57,38 @@ pub(crate) const BEACON_EFFECTS: [&[MobEffectRef]; 4] = [
     &[vanilla_mob_effects::REGENERATION],
 ];
 
+/// A run of beam column sharing one tint.
+///
+/// Vanilla parity: `BeaconBeamOwner.Section`. Only emptiness is read server-side today; the tint
+/// and height are tracked so the scan splits sections exactly as Vanilla does.
+// TODO: Expose these through a `getBeamSections` equivalent when something server-side needs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BeamSection {
+    color: ArgbColor,
+    height: i32,
+}
+
+impl BeamSection {
+    const fn new(color: ArgbColor) -> Self {
+        Self { color, height: 1 }
+    }
+
+    const fn increase_height(&mut self) {
+        self.height += 1;
+    }
+}
+
 /// Mutable beacon state shared with the menu's data slots.
 pub struct BeaconState {
     pub(crate) levels: i32,
     pub(crate) primary_power: Option<MobEffectRef>,
     pub(crate) secondary_power: Option<MobEffectRef>,
+    /// Y level reached by the in-progress beam scan; below `pos.y()` restarts the scan.
+    last_check_y: i32,
+    /// Sections accumulated by the in-progress scan.
+    checking_beam_sections: Vec<BeamSection>,
+    /// Sections from the last completed scan. Emptiness is the beacon's activity gate.
+    pub(crate) beam_sections: Vec<BeamSection>,
 }
 
 impl BeaconState {
@@ -61,6 +97,10 @@ impl BeaconState {
             levels: 0,
             primary_power: None,
             secondary_power: None,
+            // Vanilla uses `level.getMinY() - 1`; any value below the beacon restarts the scan.
+            last_check_y: i32::MIN,
+            checking_beam_sections: Vec::new(),
+            beam_sections: Vec::new(),
         }
     }
 
@@ -144,17 +184,77 @@ impl BeaconBlockEntity {
         Arc::clone(&self.state)
     }
 
-    /// Returns whether the beam has an unobstructed path to the sky.
-    fn is_beam_open(world: &World, pos: BlockPos) -> bool {
-        for y in (pos.y() + 1)..=world.get_max_y() {
-            let state = world.get_block_state(BlockPos::new(pos.x(), y, pos.z()));
-            if state.get_block() != &vanilla_blocks::BEDROCK
-                && state.get_light_dampening() >= MAX_LIGHT_LEVEL
-            {
-                return false;
+    /// Returns a handle the menu can use to mark this beacon changed.
+    ///
+    /// Steel's stand-in for the `ContainerLevelAccess` Vanilla's `BeaconMenu` holds, which it
+    /// uses only for `Level::blockEntityChanged`.
+    pub(crate) fn base_handle(&self) -> Arc<BlockEntityBase> {
+        Arc::clone(&self.base)
+    }
+
+    /// Mirrors vanilla `BeaconBlockEntity.playSound`.
+    pub(crate) fn play_sound(world: &World, pos: BlockPos, sound: SoundEventRef) {
+        world.play_block_sound(sound, pos, 1.0, 1.0, None);
+    }
+
+    /// Advances the incremental beam scan by up to [`BLOCKS_CHECK_PER_TICK`] blocks.
+    ///
+    /// Mirrors the scan loop of vanilla `BeaconBlockEntity.tick`. The beacon block itself is a
+    /// beam block (`BeaconBlock implements BeaconBeamBlock`) and is the first position visited,
+    /// which seeds the initial section — without it the `last_section.is_none()` guard below
+    /// would clear the list on the first air block and no beacon would ever activate.
+    fn advance_beam_scan(
+        state: &mut BeaconState,
+        world: &World,
+        pos: BlockPos,
+        last_set_block: i32,
+    ) {
+        let mut check_pos = if state.last_check_y < pos.y() {
+            state.checking_beam_sections.clear();
+            state.last_check_y = pos.y() - 1;
+            pos
+        } else {
+            BlockPos::new(pos.x(), state.last_check_y + 1, pos.z())
+        };
+
+        for _ in 0..BLOCKS_CHECK_PER_TICK {
+            if check_pos.y() > last_set_block {
+                break;
             }
+
+            let block_state = world.get_block_state(check_pos);
+            let beam_color = BLOCK_BEHAVIORS
+                .get_behavior(block_state.get_block())
+                .beacon_beam_color(block_state);
+
+            if let Some(color) = beam_color {
+                let color = ArgbColor::new(color.texture_diffuse_color());
+                // Vanilla appends while `size() <= 1`, so the beacon seeds one section and the
+                // first tinted block starts a second; only past that do equal colors extend a run.
+                if state.checking_beam_sections.len() <= 1 {
+                    state.checking_beam_sections.push(BeamSection::new(color));
+                } else if let Some(last) = state.checking_beam_sections.last_mut() {
+                    if last.color == color {
+                        last.increase_height();
+                    } else {
+                        let blended = last.color.average(color);
+                        state.checking_beam_sections.push(BeamSection::new(blended));
+                    }
+                }
+            } else {
+                let opaque = block_state.get_block() != &vanilla_blocks::BEDROCK
+                    && block_state.get_light_dampening() >= MAX_LIGHT_LEVEL;
+                let Some(last) = state.checking_beam_sections.last_mut().filter(|_| !opaque) else {
+                    state.checking_beam_sections.clear();
+                    state.last_check_y = last_set_block;
+                    return;
+                };
+                last.increase_height();
+            }
+
+            check_pos = check_pos.above();
+            state.last_check_y += 1;
         }
-        true
     }
 
     /// Recomputes the beacon's pyramid level, mirroring vanilla `updateBase`.
@@ -257,12 +357,15 @@ impl BlockEntity for BeaconBlockEntity {
         &self.base
     }
 
+    // TODO: Persist `CustomName` and `Lock` like Vanilla. Both need foundations Steel lacks: a
+    //       block-entity display name and a `LockCode` type.
     fn load_additional(&self, nbt: &BorrowedNbtCompound<'_>) {
         let mut state = self.state.lock();
         state.primary_power = Self::load_effect(nbt, "primary_effect");
         state.secondary_power = Self::load_effect(nbt, "secondary_effect");
     }
 
+    // `Levels` is written but never read back, matching Vanilla; the pyramid is recomputed.
     fn save_additional(&self, nbt: &mut NbtCompound) {
         let state = self.state.lock();
         Self::store_effect(nbt, "primary_effect", state.primary_power);
@@ -282,19 +385,59 @@ impl BlockEntity for BeaconBlockEntity {
     }
 
     fn tick(&self, world: &Arc<World>) {
-        if world.game_time() % BEACON_TICK_INTERVAL != 0 {
-            return;
+        let pos = self.get_block_pos();
+        // `level_height_at` is already vanilla `Level.getHeight`, so it needs no adjustment.
+        let last_set_block = world.level_height_at(HeightmapType::WorldSurface, pos.x(), pos.z());
+        let is_interval_tick = world.game_time() % BEACON_TICK_INTERVAL == 0;
+
+        let (previous_levels, levels, had_beam, scan_complete) = {
+            let mut state = self.state.lock();
+            Self::advance_beam_scan(&mut state, world, pos, last_set_block);
+
+            let previous_levels = state.levels;
+            // Read before the swap below: this tick is gated on the last *completed* scan.
+            let had_beam = !state.beam_sections.is_empty();
+            if is_interval_tick && had_beam {
+                state.levels = Self::update_base(world, pos);
+            }
+            // An obstructed beam leaves `levels` untouched, as Vanilla does. Zeroing it would
+            // desync an open menu's data slot and get the client kicked on its next selection.
+
+            let scan_complete = state.last_check_y >= last_set_block;
+            if scan_complete {
+                state.last_check_y = world.get_min_y() - 1;
+                state.beam_sections = mem::take(&mut state.checking_beam_sections);
+            }
+
+            (previous_levels, state.levels, had_beam, scan_complete)
+        };
+
+        // Outside the state lock: both walk nearby entities and send packets.
+        if is_interval_tick && levels > 0 && had_beam {
+            self.apply_effects(world, pos, levels);
+            Self::play_sound(world, pos, &sound_events::BLOCK_BEACON_AMBIENT);
         }
 
-        let pos = self.get_block_pos();
-        if Self::is_beam_open(world, pos) {
-            let levels = Self::update_base(world, pos);
-            self.state.lock().levels = levels;
-            if levels > 0 {
-                self.apply_effects(world, pos, levels);
-            }
-        } else {
-            self.state.lock().levels = 0;
+        if scan_complete {
+            // TODO: Trigger the CONSTRUCT_BEACON criterion for nearby players on activation once
+            //       Steel's shared advancement foundations exist.
+            let sound = match (previous_levels > 0, levels > 0) {
+                (false, true) => &sound_events::BLOCK_BEACON_ACTIVATE,
+                (true, false) => &sound_events::BLOCK_BEACON_DEACTIVATE,
+                _ => return,
+            };
+            Self::play_sound(world, pos, sound);
         }
+    }
+
+    fn on_set_removed(&self) {
+        let Some(world) = self.get_level() else {
+            return;
+        };
+        Self::play_sound(
+            &world,
+            self.get_block_pos(),
+            &sound_events::BLOCK_BEACON_DEACTIVATE,
+        );
     }
 }
