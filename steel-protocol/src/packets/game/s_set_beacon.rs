@@ -8,8 +8,8 @@ use steel_utils::serial::ReadFrom;
 
 /// Sent when the player confirms a beacon's effect selection.
 ///
-/// Vanilla 26.2 encodes each effect as `ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`:
-/// a presence boolean, then the mob effect's raw registry id as a `VarInt`.
+/// Each effect is encoded as `ByteBufCodecs.optional(MobEffect.STREAM_CODEC)`:
+/// a presence boolean followed by the mob effect's raw registry id as a `VarInt`.
 #[derive(ServerPacket, Clone, Debug)]
 pub struct SSetBeacon {
     pub primary: Option<i32>,
