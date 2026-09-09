@@ -191,16 +191,11 @@ impl Player {
 
     /// Resolves an optional beacon effect ID, rejecting IDs vanilla's packet codec would reject.
     pub(super) fn resolve_beacon_effect(id: Option<i32>) -> Result<Option<MobEffectRef>, ()> {
-        let Some(id) = id else {
-            return Ok(None);
-        };
-        // `usize::try_from` rejects the negative ids a signed VarInt can carry, which `as usize`
-        // would instead wrap to a huge index.
-        usize::try_from(id)
-            .ok()
-            .and_then(|id| REGISTRY.mob_effects.by_id(id))
-            .map(Some)
-            .ok_or(())
+        id.map(|id| {
+            let id = usize::try_from(id).map_err(|_| ())?;
+            REGISTRY.mob_effects.by_id(id).ok_or(())
+        })
+        .transpose()
     }
 
     /// Handles a beacon effect selection from the set-beacon packet.
