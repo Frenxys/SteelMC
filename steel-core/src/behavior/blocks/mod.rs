@@ -30,6 +30,8 @@ pub use colored::{StainedGlassBlock, StainedGlassPaneBlock};
 pub use container::{
     AnvilBlock, BarrelBlock, BeaconBlock, BeehiveBlock, BlastFurnaceBlock, ChiseledBookShelfBlock,
     CraftingTableBlock, EnderChestBlock, FurnaceBlock, SmokerBlock,
+    AnvilBlock, BarrelBlock, BeehiveBlock, BlastFurnaceBlock, ChiseledBookShelfBlock,
+    CraftingTableBlock, EnderChestBlock, FurnaceBlock, ShulkerBoxBlock, SmokerBlock,
 };
 pub use decoration::{
     BannerBlock, CakeBlock, CandleBlock, CandleCakeBlock, CeilingHangingSignBlock, ChainBlock,
