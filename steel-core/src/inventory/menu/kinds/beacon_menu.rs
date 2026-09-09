@@ -70,7 +70,6 @@ pub fn beacon(
     let payment_ref = ContainerRef::from(payment_container.clone());
 
     let mut builder = MenuBuilder::new(&vanilla_menu_types::BEACON, container_id);
-    // Vanilla gates the payment slot with `ItemTags.BEACON_PAYMENT_ITEMS`.
     let payment = builder.section_with(
         &payment_ref,
         1,
@@ -87,7 +86,6 @@ pub fn beacon(
     let secondary = builder.data_slot(0);
 
     builder.route(payment, player.all(), FillDirection::Backward);
-    // Deliberately not drained; `removed` below drops the payment as vanilla does.
 
     builder.build(BeaconKind {
         payment_ref,
@@ -147,7 +145,6 @@ impl BeaconKind {
 }
 
 impl MenuKind for BeaconKind {
-    // Drops the unspent payment when the menu closes.
     fn removed(&mut self, _behavior: &mut MenuBehavior, player: &Player) {
         let payment = self.payment_container.lock().remove_item_no_update(0);
         if payment.is_empty() {
@@ -204,14 +201,11 @@ impl MenuKind for BeaconKind {
             !state.beam_sections.is_empty()
         };
 
-        // vanilla removes the payment through `Slot.remove(1)`.
         guard.set_item(self.payment_ref.container_id(), 0, ItemStack::empty());
         self.sync_data_slots(behavior);
 
-        // Mark the chunk unsaved so the selection survives a restart.
         self.block_entity.set_changed();
 
-        // vanilla plays this from `dataAccess.set(DATA_PRIMARY, ..)`, guarded on the beam.
         if has_beam {
             BeaconBlockEntity::play_sound(
                 &self.world,
@@ -230,7 +224,6 @@ impl MenuKind for BeaconKind {
         player: &Player,
     ) -> Option<ItemStack> {
         if self.payment.contains(slot_index) {
-            // Falls back to the route table (payment → player.all()).
             return None;
         }
 
@@ -243,9 +236,6 @@ impl MenuKind for BeaconKind {
         }
 
         let mut remaining = clicked.clone();
-
-        // vanilla's `!hasItem` guard: without it a single payment item can't be shift-clicked
-        // while the slot is occupied (the move into the full slot fails and strands the item).
         let pay_start = self.payment.start();
         let payment_slot = &behavior.slots()[pay_start];
         let is_single_payment = !payment_slot.has_item(guard)
@@ -280,7 +270,6 @@ impl MenuKind for BeaconKind {
                 FillDirection::Forward,
             )
         } else {
-            // Vanilla's final fallback targets the whole player inventory.
             behavior.move_item_stack_to(
                 guard,
                 slot_index,
@@ -392,7 +381,6 @@ mod tests {
         let (mut menu, state) = open_test_beacon(&world, &player, BlockPos::new(8, 64, 8));
         let payment_id = payment_id_of(&menu);
 
-        // Non-payment items stay on the cursor.
         click_into_payment(&mut menu, &player, ItemStack::new(&vanilla_items::DIRT));
         assert!(menu.behavior().carried().is(&vanilla_items::DIRT));
         assert!({
@@ -404,7 +392,6 @@ mod tests {
                 .is_empty()
         });
 
-        // Iron is accepted, capped at one item like vanilla's payment slot.
         click_into_payment(
             &mut menu,
             &player,
@@ -420,10 +407,8 @@ mod tests {
                 .is(&vanilla_items::IRON_INGOT)
         });
 
-        // Simulate a level-1 pyramid so Speed is a valid primary.
         state.lock().levels = 1;
 
-        // Selecting an effect consumes the payment and stores the selection.
         menu.update_effects(Some(vanilla_mob_effects::SPEED), None, &player.connection);
         assert!({
             let guard = menu.behavior().lock_all_containers();
@@ -456,14 +441,12 @@ mod tests {
         let (mut menu, _) = open_test_beacon(&world, &player, BlockPos::new(8, 64, 8));
         let payment_id = payment_id_of(&menu);
 
-        // Occupy the payment slot.
         click_into_payment(
             &mut menu,
             &player,
             ItemStack::new(&vanilla_items::IRON_INGOT),
         );
 
-        // Put a single ingot in the first main-inventory slot and shift-click it.
         let main_slot = menu
             .kind()
             .downcast_ref::<BeaconKind>()
@@ -478,7 +461,6 @@ mod tests {
 
         menu.clicked(Click::QuickMove { slot: main_slot }, &player);
 
-        // The ingot moved rather than being stranded, and the payment slot is untouched.
         assert!(
             {
                 let guard = menu.behavior().lock_all_containers();

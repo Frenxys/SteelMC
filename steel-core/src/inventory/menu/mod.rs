@@ -138,7 +138,6 @@ impl Menu {
             self.kind
                 .on_update_effects(&mut self.behavior, &mut guard, primary, secondary)
         };
-        // The guard is dropped before `broadcast_changes` re-locks the same containers.
         self.behavior.broadcast_changes(connection);
         accepted
     }

@@ -92,7 +92,6 @@ impl BeaconState {
             levels: 0,
             primary_power: None,
             secondary_power: None,
-            // vanilla uses `level.getMinY() - 1`; any value below the beacon restarts the scan.
             last_check_y: i32::MIN,
             checking_beam_sections: Vec::new(),
             beam_sections: Vec::new(),
@@ -127,7 +126,6 @@ impl BeaconState {
         if primary_level > levels || secondary_level > levels {
             return false;
         }
-        // Tier-4 effects (regeneration) are never valid as a primary.
         if primary_level >= MAX_LEVELS {
             return false;
         }
@@ -191,11 +189,9 @@ impl BeaconBlockEntity {
         world.play_block_sound(sound, pos, 1.0, 1.0, None);
     }
 
-    /// Advances the incremental beam scan by up to [`BLOCKS_CHECK_PER_TICK`] blocks.
+    /// Advances the beam scan by up to [`BLOCKS_CHECK_PER_TICK`] blocks.
     ///
-    /// The beacon is itself a beam block (`BeaconBlock implements BeaconBeamBlock`) and the
-    /// first position visited, seeding the initial section — without it the scan clears on the
-    /// first air block and no beacon would ever activate.
+    /// The scan starts at the beacon, which is itself a beam block.
     fn advance_beam_scan(
         state: &mut BeaconState,
         world: &World,
@@ -222,7 +218,6 @@ impl BeaconBlockEntity {
 
             if let Some(color) = beam_color {
                 let color = ArgbColor::new(color.texture_diffuse_color());
-                // The beacon occupies the first section; later blocks extend or start runs.
                 if state.checking_beam_sections.len() <= 1 {
                     state.checking_beam_sections.push(BeamSection::new(color));
                 } else if let Some(last) = state.checking_beam_sections.last_mut() {
@@ -358,7 +353,6 @@ impl BlockEntity for BeaconBlockEntity {
         state.secondary_power = Self::load_effect(nbt, "secondary_effect");
     }
 
-    // `Levels` is written but never read back, matching Vanilla; the pyramid is recomputed.
     fn save_additional(&self, nbt: &mut NbtCompound) {
         let state = self.state.lock();
         Self::store_effect(nbt, "primary_effect", state.primary_power);
@@ -392,8 +386,6 @@ impl BlockEntity for BeaconBlockEntity {
             if is_interval_tick && had_beam {
                 state.levels = Self::update_base(world, pos);
             }
-            // An obstructed beam leaves `levels` untouched, as Vanilla does. Zeroing it would
-            // desync an open menu's data slot and get the client kicked on its next selection.
 
             let scan_complete = state.last_check_y >= last_set_block;
             if scan_complete {
@@ -404,7 +396,6 @@ impl BlockEntity for BeaconBlockEntity {
             (previous_levels, state.levels, had_beam, scan_complete)
         };
 
-        // Outside the state lock: both walk nearby entities and send packets.
         if is_interval_tick && levels > 0 && had_beam {
             self.apply_effects(world, pos, levels);
             Self::play_sound(world, pos, &sound_events::BLOCK_BEACON_AMBIENT);

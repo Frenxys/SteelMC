@@ -1915,6 +1915,5 @@ fn resolve_beacon_effect_separates_absent_from_unknown_ids() {
     );
 
     assert_eq!(Player::resolve_beacon_effect(Some(9999)), Err(()));
-    // A signed VarInt can carry a negative id; `as usize` would wrap it into a huge index.
     assert_eq!(Player::resolve_beacon_effect(Some(-1)), Err(()));
 }

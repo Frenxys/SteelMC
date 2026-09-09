@@ -111,9 +111,6 @@ impl ArgbColor {
     }
 
     /// Returns the per-channel mean of two colors.
-    ///
-    /// Vanilla parity: `ARGB.average`. Each channel is averaged independently with integer
-    /// division, so the result is truncated exactly as Vanilla's is.
     #[must_use]
     pub const fn average(self, other: Self) -> Self {
         Self(
