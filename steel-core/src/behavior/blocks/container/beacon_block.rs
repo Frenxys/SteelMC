@@ -48,9 +48,8 @@ impl BlockBehavior for BeaconBlock {
         _hit_result: &BlockHitResult,
         _inv: &mut InventoryAccess,
     ) -> InteractionResult {
-        // Vanilla `useWithoutItem` returns SUCCESS unconditionally, so a missing or mismatched
-        // block entity still swallows the interaction rather than falling through to item use.
-        // Deliberately not the `Pass` most other container blocks return.
+        // Vanilla returns SUCCESS unconditionally — a missing or mismatched block entity must
+        // not fall through to item use (deliberately not the `Pass` other containers return).
         let Some(block_entity) = world.get_block_entity(pos) else {
             return InteractionResult::Success;
         };

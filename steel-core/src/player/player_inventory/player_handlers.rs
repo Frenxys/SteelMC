@@ -191,10 +191,9 @@ impl Player {
 
     /// Resolves an optional mob effect id from the set-beacon packet.
     ///
-    /// Returns `Err` when the client sent an id that resolves to nothing. Vanilla decodes this
-    /// field with `byIdOrThrow`, so an unresolvable id must stay distinguishable from an absent
-    /// one: collapsing both to `None` would let a crafted packet pass effect validation, consume
-    /// the payment, and silently clear the configured effects.
+    /// Returns `Err` for an id that resolves to nothing: vanilla decodes with `byIdOrThrow`, so
+    /// "unknown" must stay distinguishable from "absent", or a crafted packet could consume the
+    /// payment and silently clear the configured effects.
     pub(super) fn resolve_beacon_effect(id: Option<i32>) -> Result<Option<MobEffectRef>, ()> {
         let Some(id) = id else {
             return Ok(None);

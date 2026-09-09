@@ -35,12 +35,11 @@ use crate::entity::{LivingEntity as _, MobEffectInstance};
 use crate::player::Player;
 use crate::world::World;
 
-/// Maximum beacon pyramid level.
 const MAX_LEVELS: i32 = 4;
 
 const BEACON_TICK_INTERVAL: i64 = 80;
 
-/// Blocks of beam column scanned per tick, mirroring vanilla `BLOCKS_CHECK_PER_TICK`.
+/// Blocks of beam column scanned per tick.
 const BLOCKS_CHECK_PER_TICK: i32 = 10;
 
 const BASE_EFFECT_RANGE: f64 = 10.0;
@@ -57,11 +56,8 @@ pub(crate) const BEACON_EFFECTS: [&[MobEffectRef]; 4] = [
     &[vanilla_mob_effects::REGENERATION],
 ];
 
-/// A run of beam column sharing one tint.
-///
-/// Vanilla parity: `BeaconBeamOwner.Section`. Only emptiness is read server-side today; the tint
-/// and height are tracked so the scan splits sections exactly as Vanilla does.
-// TODO: Expose these through a `getBeamSections` equivalent when something server-side needs them.
+/// A contiguous run of beam blocks sharing one tint.
+// TODO: Expose a `getBeamSections` equivalent when server-side callers need it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BeamSection {
     color: ArgbColor,
@@ -85,7 +81,6 @@ pub struct BeaconState {
     pub(crate) secondary_power: Option<MobEffectRef>,
     /// Y level reached by the in-progress beam scan; below `pos.y()` restarts the scan.
     last_check_y: i32,
-    /// Sections accumulated by the in-progress scan.
     checking_beam_sections: Vec<BeamSection>,
     /// Sections from the last completed scan. Emptiness is the beacon's activity gate.
     pub(crate) beam_sections: Vec<BeamSection>,
@@ -97,7 +92,7 @@ impl BeaconState {
             levels: 0,
             primary_power: None,
             secondary_power: None,
-            // Vanilla uses `level.getMinY() - 1`; any value below the beacon restarts the scan.
+            // vanilla uses `level.getMinY() - 1`; any value below the beacon restarts the scan.
             last_check_y: i32::MIN,
             checking_beam_sections: Vec::new(),
             beam_sections: Vec::new(),
@@ -114,8 +109,11 @@ impl BeaconState {
         })
     }
 
-    /// Mirrors vanilla `validateEffects`: returns whether the combination is legal for the
-    /// given pyramid level.
+    /// Rejects effect combinations the vanilla client UI cannot produce for `levels`: tiers
+    /// gate both slots, and a secondary additionally needs a full pyramid or the same effect.
+    ///
+    /// Deliberately stricter than vanilla: `BeaconMenu.updateEffects` (26.2) has no server-side
+    /// tier check, so this hardens against crafted clients.
     pub(crate) fn validate_effects(
         primary: Option<MobEffectRef>,
         secondary: Option<MobEffectRef>,
@@ -129,7 +127,7 @@ impl BeaconState {
         if primary_level > levels || secondary_level > levels {
             return false;
         }
-        // Regeneration (tier 4) is secondary-only.
+        // Tier-4 effects (regeneration) are never valid as a primary.
         if primary_level >= MAX_LEVELS {
             return false;
         }
@@ -184,25 +182,20 @@ impl BeaconBlockEntity {
         Arc::clone(&self.state)
     }
 
-    /// Returns a handle the menu can use to mark this beacon changed.
-    ///
-    /// Steel's stand-in for the `ContainerLevelAccess` Vanilla's `BeaconMenu` holds, which it
-    /// uses only for `Level::blockEntityChanged`.
+    /// Handle the menu uses to mark this beacon changed.
     pub(crate) fn base_handle(&self) -> Arc<BlockEntityBase> {
         Arc::clone(&self.base)
     }
 
-    /// Mirrors vanilla `BeaconBlockEntity.playSound`.
     pub(crate) fn play_sound(world: &World, pos: BlockPos, sound: SoundEventRef) {
         world.play_block_sound(sound, pos, 1.0, 1.0, None);
     }
 
     /// Advances the incremental beam scan by up to [`BLOCKS_CHECK_PER_TICK`] blocks.
     ///
-    /// Mirrors the scan loop of vanilla `BeaconBlockEntity.tick`. The beacon block itself is a
-    /// beam block (`BeaconBlock implements BeaconBeamBlock`) and is the first position visited,
-    /// which seeds the initial section — without it the `last_section.is_none()` guard below
-    /// would clear the list on the first air block and no beacon would ever activate.
+    /// The beacon is itself a beam block (`BeaconBlock implements BeaconBeamBlock`) and the
+    /// first position visited, seeding the initial section — without it the scan clears on the
+    /// first air block and no beacon would ever activate.
     fn advance_beam_scan(
         state: &mut BeaconState,
         world: &World,
@@ -229,8 +222,7 @@ impl BeaconBlockEntity {
 
             if let Some(color) = beam_color {
                 let color = ArgbColor::new(color.texture_diffuse_color());
-                // Vanilla appends while `size() <= 1`, so the beacon seeds one section and the
-                // first tinted block starts a second; only past that do equal colors extend a run.
+                // The beacon occupies the first section; later blocks extend or start runs.
                 if state.checking_beam_sections.len() <= 1 {
                     state.checking_beam_sections.push(BeamSection::new(color));
                 } else if let Some(last) = state.checking_beam_sections.last_mut() {
@@ -257,7 +249,7 @@ impl BeaconBlockEntity {
         }
     }
 
-    /// Recomputes the beacon's pyramid level, mirroring vanilla `updateBase`.
+    /// Recomputes the beacon's pyramid level.
     fn update_base(world: &World, pos: BlockPos) -> i32 {
         let mut levels = 0;
         for step in 1..=MAX_LEVELS {
@@ -302,7 +294,6 @@ impl BeaconBlockEntity {
             i32::from(levels >= MAX_LEVELS && secondary.is_some_and(|s| s.key == primary.key));
         let duration = (9 + levels * 2) * 20;
 
-        // Vanilla: `new AABB(pos).inflate(range).expandTowards(0, level.getHeight(), 0)`.
         let world_height = f64::from(world.get_max_y() - world.get_min_y() + 1);
         let min = DVec3::new(
             f64::from(pos.x()) - range,
@@ -388,7 +379,6 @@ impl BlockEntity for BeaconBlockEntity {
 
     fn tick(&self, world: &Arc<World>) {
         let pos = self.get_block_pos();
-        // `level_height_at` is already vanilla `Level.getHeight`, so it needs no adjustment.
         let last_set_block = world.level_height_at(HeightmapType::WorldSurface, pos.x(), pos.z());
         let is_interval_tick = world.game_time() % BEACON_TICK_INTERVAL == 0;
 

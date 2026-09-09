@@ -94,9 +94,7 @@ pub trait MenuKind: ErasedType + Send + Sync {
     }
 
     /// Handles a beacon effect update from the client's set-beacon packet.
-    /// Returns `true` if the effects were accepted, `false` if the selection or
-    /// payment was invalid (mirroring vanilla's `BeaconMenu.updateEffects`).
-    /// The default returns `true` (no-op for menus that don't support beacons).
+    /// Returns `false` when the selection or payment is invalid.
     fn on_update_effects(
         &mut self,
         _behavior: &mut MenuBehavior,

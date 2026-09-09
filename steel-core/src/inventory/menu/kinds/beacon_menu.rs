@@ -116,8 +116,7 @@ pub struct BeaconKind {
     payment_ref: ContainerRef,
     payment_container: Shared<PaymentContainer>,
     state: Arc<SyncMutex<BeaconState>>,
-    /// Steel's stand-in for the `ContainerLevelAccess` vanilla's `BeaconMenu` holds, used only
-    /// to mark the beacon changed after a selection.
+    /// Handle used to mark the beacon changed after a selection.
     block_entity: Arc<BlockEntityBase>,
     levels: DataSlot,
     primary: DataSlot,
@@ -148,9 +147,7 @@ impl BeaconKind {
 }
 
 impl MenuKind for BeaconKind {
-    /// Mirrors vanilla `BeaconMenu.removed`, which drops the unspent payment rather than
-    /// returning it. This is why the payment section is not drained: `return_drained_items`
-    /// would put it back whenever the player is still connected and alive.
+    // Drops the unspent payment when the menu closes.
     fn removed(&mut self, _behavior: &mut MenuBehavior, player: &Player) {
         let payment = self.payment_container.lock().remove_item_no_update(0);
         if payment.is_empty() {
@@ -207,15 +204,14 @@ impl MenuKind for BeaconKind {
             !state.beam_sections.is_empty()
         };
 
-        // Vanilla removes the payment through `Slot.remove(1)`.
+        // vanilla removes the payment through `Slot.remove(1)`.
         guard.set_item(self.payment_ref.container_id(), 0, ItemStack::empty());
         self.sync_data_slots(behavior);
 
-        // Vanilla `this.access.execute(Level::blockEntityChanged)`: marks the chunk unsaved so
-        // the selection survives a restart. Vanilla sends no block-entity packet here either.
+        // Mark the chunk unsaved so the selection survives a restart.
         self.block_entity.set_changed();
 
-        // Vanilla plays this from `dataAccess.set(DATA_PRIMARY, ..)`, guarded on the beam.
+        // vanilla plays this from `dataAccess.set(DATA_PRIMARY, ..)`, guarded on the beam.
         if has_beam {
             BeaconBlockEntity::play_sound(
                 &self.world,
@@ -248,8 +244,8 @@ impl MenuKind for BeaconKind {
 
         let mut remaining = clicked.clone();
 
-        // Vanilla: `!paymentSlot.hasItem() && paymentSlot.mayPlace(stack) && count == 1`. Without
-        // `hasItem` a single payment item is un-shift-clickable while the slot is occupied.
+        // vanilla's `!hasItem` guard: without it a single payment item can't be shift-clicked
+        // while the slot is occupied (the move into the full slot fails and strands the item).
         let pay_start = self.payment.start();
         let payment_slot = &behavior.slots()[pay_start];
         let is_single_payment = !payment_slot.has_item(guard)

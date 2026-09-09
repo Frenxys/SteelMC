@@ -126,9 +126,7 @@ impl Menu {
         self.kind.can_take_item_for_pick_all(carried, slot_index)
     }
 
-    /// Forwards a beacon effect selection from the set-beacon packet. Returns
-    /// `false` if the selection or payment was invalid (mirrors vanilla's
-    /// `BeaconMenu.updateEffects` return value).
+    /// Forwards a beacon effect selection from the set-beacon packet.
     pub fn update_effects(
         &mut self,
         primary: Option<MobEffectRef>,
