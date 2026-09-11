@@ -303,7 +303,7 @@ impl BeaconBlockEntity {
         let aabb = WorldAabb::from_min_max(min, max);
 
         for entity in world.get_entities_in_aabb_matching(&aabb, |entity| {
-            entity.entity_type() == &vanilla_entities::PLAYER
+            entity.entity_type() == &vanilla_entities::PLAYER && !entity.is_spectator()
         }) {
             let Some(player) = entity.downcast_ref::<Player>() else {
                 continue;
