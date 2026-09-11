@@ -1,6 +1,6 @@
 //! This module contains the `JavaConnection` struct, which is used to represent a connection to a Java client.
 use std::io::Cursor;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use steel_protocol::packet_reader::TCPNetworkDecoder;
@@ -38,8 +38,8 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::command::{handle_client_request, sender::CommandSender};
-use crate::player::Player;
 use crate::player::connection::NetworkConnection;
+use crate::player::{Player, PlayerSession};
 use crate::server::Server;
 
 /// Shared Java socket writer.
@@ -401,7 +401,7 @@ pub struct JavaConnection {
     network_writer: JavaNetworkWriter,
     id: u64,
 
-    player: Weak<Player>,
+    session: Arc<PlayerSession>,
     keep_alive_tracker: SyncMutex<KeepAliveTracker>,
     latency: SyncMutex<u32>,
 }
@@ -414,7 +414,7 @@ impl JavaConnection {
         compression: Option<CompressionInfo>,
         network_writer: JavaNetworkWriter,
         id: u64,
-        player: Weak<Player>,
+        session: Arc<PlayerSession>,
     ) -> Self {
         Self {
             outgoing_packets,
@@ -422,7 +422,7 @@ impl JavaConnection {
             compression,
             network_writer,
             id,
-            player,
+            session,
             keep_alive_tracker: SyncMutex::new(KeepAliveTracker {
                 alive_time: 0,
                 alive_pending: false,
@@ -637,7 +637,7 @@ impl JavaConnection {
                 server.schedule_play_packet(player, packet, payload_bytes);
             }
             DecodedPlayPacket::Immediate(packet) => {
-                self.handle_immediate_packet(packet, &player);
+                self.handle_immediate_packet(packet);
             }
         }
         Ok(())
@@ -812,15 +812,15 @@ impl JavaConnection {
         })
     }
 
-    fn handle_immediate_packet(&self, packet: ImmediatePlayPacket, player: &Player) {
+    fn handle_immediate_packet(&self, packet: ImmediatePlayPacket) {
         match packet {
             ImmediatePlayPacket::KeepAlive(packet) => self.handle_keep_alive(packet),
             ImmediatePlayPacket::PingRequest(packet) => {
-                player.send_packet(CPongResponse::new(packet.time));
+                self.send_packet(CPongResponse::new(packet.time));
             }
             ImmediatePlayPacket::ChunkBatchReceived(packet) => {
-                player
-                    .chunk_sender
+                self.session
+                    .chunk_sender()
                     .lock()
                     .on_chunk_batch_received_by_client(packet.desired_chunks_per_tick);
             }
@@ -842,7 +842,7 @@ impl JavaConnection {
                 packet = reader.get_raw_packet() => {
                     match packet {
                         Ok(packet) => {
-                            if let Some(player) = self.player.upgrade()
+                            if let Some(player) = self.session.current_player()
                                 && let Err(err) = self.process_packet(packet, player, &server) {
                                 log::warn!(
                                     "Failed to get packet from client {}: {err}",
