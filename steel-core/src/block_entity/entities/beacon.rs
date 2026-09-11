@@ -110,9 +110,6 @@ impl BeaconState {
 
     /// Rejects effect combinations the vanilla client UI cannot produce for `levels`: tiers
     /// gate both slots, and a secondary additionally needs a full pyramid or the same effect.
-    ///
-    /// Deliberately stricter than vanilla: `BeaconMenu.updateEffects` (26.2) has no server-side
-    /// tier check, so this hardens against crafted clients.
     pub(crate) fn validate_effects(
         primary: Option<MobEffectRef>,
         secondary: Option<MobEffectRef>,
